@@ -1,0 +1,47 @@
+{
+	"cli": true,
+	"target": "directory",
+	"adapterName": "unifi-access",
+	"title": "UniFi Access",
+	"description": "Integration of Ubiquiti UniFi Access (UA Ultra and others) for ioBroker",
+	"keywords": [
+		"unifi",
+		"access",
+		"ubiquiti",
+		"door",
+		"doorbell",
+		"ua-ultra"
+	],
+	"contributors": [],
+	"expert": "yes",
+	"features": [
+		"adapter"
+	],
+	"adminFeatures": [],
+	"type": "protocols",
+	"startMode": "daemon",
+	"connectionType": "local",
+	"dataSource": "push",
+	"connectionIndicator": "yes",
+	"language": "TypeScript",
+	"nodeVersion": "22",
+	"adminUi": "json",
+	"tools": [
+		"ESLint"
+	],
+	"eslintConfig": "official",
+	"releaseScript": "yes",
+	"devServer": "no",
+	"indentation": "Tab",
+	"quotes": "single",
+	"authorName": "ticaki",
+	"authorGithub": "ticaki",
+	"authorEmail": "github@renopoint.de",
+	"gitRemoteProtocol": "HTTPS",
+	"gitCommit": "yes",
+	"defaultBranch": "main",
+	"license": "MIT License",
+	"dependabot": "yes",
+	"creatorVersion": "3.1.2",
+	"replay": "/tmp/unifi-access-create.json"
+}
