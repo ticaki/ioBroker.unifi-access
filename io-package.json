@@ -72,7 +72,6 @@
 			"license": "MIT"
 		},
 		"platform": "Javascript/Node.js",
-		"main": "build/main.js",
 		"icon": "unifi-access.png",
 		"enabled": true,
 		"extIcon": "https://raw.githubusercontent.com/ticaki/ioBroker.unifi-access/main/admin/unifi-access.png",
@@ -85,7 +84,6 @@
 		"connectionType": "local",
 		"dataSource": "push",
 		"messagebox": true,
-		"supportStopBeforeUpdate": true,
 		"adminUI": {
 			"config": "json"
 		},
@@ -99,10 +97,22 @@
 		],
 		"globalDependencies": [
 			{
-				"admin": ">=7.8.0"
+				"admin": ">=7.6.20"
 			}
 		]
 	},
+	"protectedNative": [
+		"apiToken",
+		"webhookSecret",
+		"genericWebhookPassword",
+		"genericWebhookToken"
+	],
+	"encryptedNative": [
+		"apiToken",
+		"webhookSecret",
+		"genericWebhookPassword",
+		"genericWebhookToken"
+	],
 	"native": {
 		"controllerHost": "",
 		"controllerPort": 12445,
