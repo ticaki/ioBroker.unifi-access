@@ -1,0 +1,31 @@
+{
+    "auth_status_loading": "Adapterstatus controleren…",
+    "auth_status_connected": "Verbonden met UniFi Access-controller",
+    "auth_status_connected_named": "Verbonden met %s",
+    "auth_status_missingToken": "API-token ontbreekt — vul deze in en klik op ‚Verbinding testen'",
+    "auth_status_unauthorized": "Token geweigerd door controller (niet geautoriseerd)",
+    "auth_status_network": "Controller niet bereikbaar (netwerkfout)",
+    "auth_status_disconnected": "Niet verbonden",
+
+    "auth_test_button": "Verbinding testen",
+    "auth_test_tooltip": "Test de controller met de hierboven ingevulde waarden (slaat niet op).",
+    "auth_test_running": "Controller controleren…",
+    "auth_test_missingFields": "Vul eerst host en API-token in.",
+    "auth_test_success": "Verbinding gelukt",
+    "auth_test_success_named": "Verbinding gelukt — controller: %s",
+    "auth_test_error_unauthorized": "Token geweigerd (niet geautoriseerd).",
+    "auth_test_error_network": "Controller niet bereikbaar (netwerkfout).",
+    "auth_test_error_unknown": "Verbindingstest mislukt.",
+
+    "devices_title": "Gevonden UniFi Access-apparaten",
+    "devices_refresh": "Vernieuwen",
+    "devices_loading": "Apparaten laden…",
+    "devices_empty": "Nog geen apparaten — zorg dat de adapter draait en verbonden is.",
+    "devices_error_load": "Apparaten konden niet worden geladen. Draait de adapter?",
+    "devices_online": "online",
+    "devices_offline": "offline",
+    "devices_cap_event_thumbnail": "event-thumbnail",
+    "devices_cap_doorbell": "deurbel",
+    "devices_cap_door_unlock": "deur ontgrendelen",
+    "devices_cap_live_events": "live-events"
+}

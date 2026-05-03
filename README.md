@@ -56,6 +56,10 @@ The adapter accesses the UniFi Access controller using the same APIs that are us
 	### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
+- (ticaki) new: button "Re-register webhook" added to the webhook tab — fixes lingering "signature verification failed" warnings caused by an out-of-sync secret
+- (ticaki) new: full translations for admin UI in es, fr, it, nl, pl, pt, ru, uk and zh-cn (replacing the previous English fallbacks)
+- (ticaki) fixed: snapshot countdown in the www event log now runs exactly 3 seconds (3 → 2 → 1 with one second per step) instead of 4.5 seconds with a dead pause
+- (ticaki) new: door-unlock events without a Protect snapshot show a "Not available" placeholder instead of an empty space
 
 ### 0.0.2 (2026-05-03)
 - (ticaki) initial public skeleton — connection, bootstrap, door unlock, WebSocket event stream

@@ -269,6 +269,23 @@
 					"lg": 3,
 					"xl": 3
 				},
+				"_reregisterWebhook": {
+					"type": "sendto",
+					"label": "reregisterWebhook",
+					"help": "reregisterWebhook_help",
+					"command": "reregisterWebhook",
+					"jsonData": "{}",
+					"variant": "contained",
+					"icon": "refresh",
+					"showProcess": true,
+					"hidden": "!data.enableWebhooks",
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
 				"_thumbnailHeader": {
 					"type": "header",
 					"text": "thumbnail_header",

@@ -437,8 +437,11 @@ class UnifiAccess extends utils.Adapter {
 	private async persistWebhookCredentials(id: string, secret: string): Promise<void> {
 		await this.setState('info.webhookEndpointId', { val: id, ack: true });
 		await this.setState('info.webhookSecret', { val: secret, ack: true });
+		// webhookSecret ist `encryptedNative`: js-controller entschlüsselt es beim
+		// Adapter-Start automatisch — daher hier symmetrisch verschlüsseln, sonst
+		// landet beim nächsten Start Müll in cfg.webhookSecret.
 		await this.extendForeignObjectAsync(`system.adapter.${this.namespace}`, {
-			native: { webhookEndpointId: id, webhookSecret: secret },
+			native: { webhookEndpointId: id, webhookSecret: this.encrypt(secret) },
 		});
 	}
 
@@ -623,6 +626,10 @@ class UnifiAccess extends utils.Adapter {
 
 			case 'access.device.emergency_status':
 				void this.refreshEmergencyStatus();
+				break;
+
+			case 'access.temporary_unlock.start':
+				this.logSystemLogs(event.ts);
 				break;
 		}
 	}

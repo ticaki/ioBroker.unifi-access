@@ -1,0 +1,31 @@
+{
+    "auth_status_loading": "Перевірка стану адаптера…",
+    "auth_status_connected": "Підключено до контролера UniFi Access",
+    "auth_status_connected_named": "Підключено до %s",
+    "auth_status_missingToken": "API-токен відсутній — введіть його та натисніть «Перевірити підключення»",
+    "auth_status_unauthorized": "Контролер відхилив токен (неавторизовано)",
+    "auth_status_network": "Контролер недоступний (мережева помилка)",
+    "auth_status_disconnected": "Не підключено",
+
+    "auth_test_button": "Перевірити підключення",
+    "auth_test_tooltip": "Перевірити контролер із введеними вище значеннями (без збереження).",
+    "auth_test_running": "Перевірка контролера…",
+    "auth_test_missingFields": "Спочатку введіть хост і API-токен.",
+    "auth_test_success": "Підключення успішне",
+    "auth_test_success_named": "Підключення успішне — контролер: %s",
+    "auth_test_error_unauthorized": "Токен відхилено (неавторизовано).",
+    "auth_test_error_network": "Контролер недоступний (мережева помилка).",
+    "auth_test_error_unknown": "Тест підключення не пройдено.",
+
+    "devices_title": "Виявлені пристрої UniFi Access",
+    "devices_refresh": "Оновити",
+    "devices_loading": "Завантаження пристроїв…",
+    "devices_empty": "Пристроїв поки немає — переконайтеся, що адаптер запущено та підключено.",
+    "devices_error_load": "Не вдалося завантажити пристрої. Чи запущено адаптер?",
+    "devices_online": "онлайн",
+    "devices_offline": "офлайн",
+    "devices_cap_event_thumbnail": "мініатюра події",
+    "devices_cap_doorbell": "дзвінок",
+    "devices_cap_door_unlock": "розблокування дверей",
+    "devices_cap_live_events": "live-події"
+}

@@ -37,6 +37,8 @@
 	"defaultUnlockDuration_help": "0 sends a momentary unlock pulse via /doors/:id/unlock. Any value > 0 keeps the door unlocked for that many minutes via /doors/:id/lock_rule type=custom (the API only accepts whole minutes).",
 	"enableWebhooks": "Enable webhook receiver",
 	"enableWebhooks_help": "Activates additional door, sensor, schedule and visitor events via webhook.",
+	"reregisterWebhook": "Re-register webhook",
+	"reregisterWebhook_help": "Deletes the current webhook endpoint on the controller and recreates it with a fresh secret. Use this if you see \"signature verification failed\" warnings.",
 	"enableThumbnailServer": "Enable thumbnail server",
 	"enableThumbnailServer_help": "Serves the latest event thumbnail per device as a JPEG. Used by the www panel.",
 	"events_header": "Forward events to ioBroker states",

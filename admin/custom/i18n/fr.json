@@ -1,0 +1,31 @@
+{
+    "auth_status_loading": "Vérification de l'état de l'adaptateur…",
+    "auth_status_connected": "Connecté au contrôleur UniFi Access",
+    "auth_status_connected_named": "Connecté à %s",
+    "auth_status_missingToken": "Jeton API manquant — saisissez-le et cliquez sur « Tester la connexion »",
+    "auth_status_unauthorized": "Jeton refusé par le contrôleur (non autorisé)",
+    "auth_status_network": "Impossible de joindre le contrôleur (erreur réseau)",
+    "auth_status_disconnected": "Non connecté",
+
+    "auth_test_button": "Tester la connexion",
+    "auth_test_tooltip": "Sonde le contrôleur avec les valeurs saisies ci-dessus (sans enregistrer).",
+    "auth_test_running": "Sondage du contrôleur…",
+    "auth_test_missingFields": "Veuillez d'abord saisir l'hôte et le jeton API.",
+    "auth_test_success": "Connexion réussie",
+    "auth_test_success_named": "Connexion réussie — contrôleur : %s",
+    "auth_test_error_unauthorized": "Jeton refusé (non autorisé).",
+    "auth_test_error_network": "Impossible de joindre le contrôleur (erreur réseau).",
+    "auth_test_error_unknown": "Échec du test de connexion.",
+
+    "devices_title": "Appareils UniFi Access détectés",
+    "devices_refresh": "Actualiser",
+    "devices_loading": "Chargement des appareils…",
+    "devices_empty": "Aucun appareil pour l'instant — assurez-vous que l'adaptateur est en cours d'exécution et connecté.",
+    "devices_error_load": "Impossible de charger les appareils. L'adaptateur est-il en cours d'exécution ?",
+    "devices_online": "en ligne",
+    "devices_offline": "hors ligne",
+    "devices_cap_event_thumbnail": "vignette d'événement",
+    "devices_cap_doorbell": "sonnette",
+    "devices_cap_door_unlock": "ouverture de porte",
+    "devices_cap_live_events": "événements en direct"
+}

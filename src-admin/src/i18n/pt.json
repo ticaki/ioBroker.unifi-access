@@ -1,0 +1,31 @@
+{
+    "auth_status_loading": "A verificar o estado do adaptador…",
+    "auth_status_connected": "Ligado ao controlador UniFi Access",
+    "auth_status_connected_named": "Ligado a %s",
+    "auth_status_missingToken": "Token da API em falta — preencha-o e clique em «Testar ligação»",
+    "auth_status_unauthorized": "Token rejeitado pelo controlador (não autorizado)",
+    "auth_status_network": "Não é possível contactar o controlador (erro de rede)",
+    "auth_status_disconnected": "Não ligado",
+
+    "auth_test_button": "Testar ligação",
+    "auth_test_tooltip": "Testa o controlador com os valores introduzidos acima (não guarda).",
+    "auth_test_running": "A verificar controlador…",
+    "auth_test_missingFields": "Por favor, introduza primeiro o host e o token da API.",
+    "auth_test_success": "Ligação bem-sucedida",
+    "auth_test_success_named": "Ligação bem-sucedida — controlador: %s",
+    "auth_test_error_unauthorized": "Token rejeitado (não autorizado).",
+    "auth_test_error_network": "Não é possível contactar o controlador (erro de rede).",
+    "auth_test_error_unknown": "Teste de ligação falhou.",
+
+    "devices_title": "Dispositivos UniFi Access detetados",
+    "devices_refresh": "Atualizar",
+    "devices_loading": "A carregar dispositivos…",
+    "devices_empty": "Ainda sem dispositivos — verifique que o adaptador está em execução e ligado.",
+    "devices_error_load": "Não foi possível carregar os dispositivos. O adaptador está em execução?",
+    "devices_online": "online",
+    "devices_offline": "offline",
+    "devices_cap_event_thumbnail": "miniatura de evento",
+    "devices_cap_doorbell": "campainha",
+    "devices_cap_door_unlock": "abertura de porta",
+    "devices_cap_live_events": "eventos em direto"
+}

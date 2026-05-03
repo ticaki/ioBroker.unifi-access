@@ -37,6 +37,8 @@
 	"defaultUnlockDuration_help": "0 sendet einen kurzen Entriegelungspuls über /doors/:id/unlock. Werte > 0 halten die Tür für die angegebene Anzahl Minuten über /doors/:id/lock_rule type=custom entriegelt (die API akzeptiert ausschließlich ganze Minuten).",
 	"enableWebhooks": "Webhook-Empfänger aktivieren",
 	"enableWebhooks_help": "Aktiviert zusätzliche Tür-, Sensor-, Zeitplan- und Besucher-Events per Webhook.",
+	"reregisterWebhook": "Webhook neu registrieren",
+	"reregisterWebhook_help": "Löscht den aktuellen Webhook-Endpunkt am Controller und legt ihn mit einem frischen Secret neu an. Hilft bei „signature verification failed“-Warnungen.",
 	"enableThumbnailServer": "Thumbnail-Server aktivieren",
 	"enableThumbnailServer_help": "Stellt das letzte Event-Thumbnail pro Gerät als JPEG bereit. Wird vom www-Panel verwendet.",
 	"events_header": "Events an ioBroker-States weiterleiten",

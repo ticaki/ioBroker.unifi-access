@@ -1,0 +1,31 @@
+{
+    "auth_status_loading": "Sprawdzanie stanu adaptera…",
+    "auth_status_connected": "Połączono z kontrolerem UniFi Access",
+    "auth_status_connected_named": "Połączono z %s",
+    "auth_status_missingToken": "Brak tokena API — wprowadź go i kliknij «Testuj połączenie»",
+    "auth_status_unauthorized": "Token odrzucony przez kontroler (brak autoryzacji)",
+    "auth_status_network": "Nie można skontaktować się z kontrolerem (błąd sieci)",
+    "auth_status_disconnected": "Niepołączony",
+
+    "auth_test_button": "Testuj połączenie",
+    "auth_test_tooltip": "Sprawdź kontroler z wprowadzonymi powyżej wartościami (bez zapisu).",
+    "auth_test_running": "Sprawdzanie kontrolera…",
+    "auth_test_missingFields": "Najpierw wprowadź host i token API.",
+    "auth_test_success": "Połączenie udane",
+    "auth_test_success_named": "Połączenie udane — kontroler: %s",
+    "auth_test_error_unauthorized": "Token odrzucony (brak autoryzacji).",
+    "auth_test_error_network": "Nie można skontaktować się z kontrolerem (błąd sieci).",
+    "auth_test_error_unknown": "Test połączenia nie powiódł się.",
+
+    "devices_title": "Wykryte urządzenia UniFi Access",
+    "devices_refresh": "Odśwież",
+    "devices_loading": "Ładowanie urządzeń…",
+    "devices_empty": "Brak urządzeń — upewnij się, że adapter działa i jest połączony.",
+    "devices_error_load": "Nie można załadować urządzeń. Czy adapter działa?",
+    "devices_online": "online",
+    "devices_offline": "offline",
+    "devices_cap_event_thumbnail": "miniatura zdarzenia",
+    "devices_cap_doorbell": "dzwonek",
+    "devices_cap_door_unlock": "otwieranie drzwi",
+    "devices_cap_live_events": "zdarzenia na żywo"
+}

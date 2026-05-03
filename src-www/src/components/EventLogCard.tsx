@@ -5,10 +5,11 @@ import { useSettings } from '../settings';
 import { EventMediaModal } from './EventMediaModal';
 
 // Adapter triggers the Protect snapshot fetch via system-log poll for these event types only.
-// Show a placeholder with a countdown while we wait for protectSnapshotUrl to be filled in.
-const PROTECT_SNAPSHOT_EVENTS = new Set(['access.door.unlock']);
-const SNAPSHOT_WAIT_MS = 4500;
-const COUNTDOWN_START = 3;
+// Countdown 3 → 2 → 1 over the first 3s; the 1 then lingers for another 1s while the URL
+// usually lands a few hundred ms after the adapter's 3s system-log delay. After 4s without
+// URL we declare "Not available".
+const PROTECT_SNAPSHOT_EVENTS = new Set(['access.door.unlock', 'access.temporary_unlock.start']);
+const SNAPSHOT_WAIT_MS = 4000;
 
 interface EventEntry {
     ts: number;
@@ -69,6 +70,9 @@ export function EventLogCard(): JSX.Element {
     }, [last]);
 
     useEffect(() => {
+        // Tick while any access.door.unlock event is still in its waiting window.
+        // Stop only once every pending event has either resolved (URL) or fully timed out —
+        // otherwise the JSX never flips from countdown to "Not available" because `now` is stale.
         const tickNow = Date.now();
         const hasPending = events.some(
             e =>
@@ -77,6 +81,9 @@ export function EventLogCard(): JSX.Element {
                 tickNow - e.ts < SNAPSHOT_WAIT_MS,
         );
         if (!hasPending) {
+            // No active waiting window — but force one render with a fresh `now` so old
+            // events (loaded already past their timeout) settle on showNoSnapshot reliably.
+            setNow(tickNow);
             return;
         }
         const id = setInterval(() => setNow(Date.now()), 250);
@@ -109,17 +116,16 @@ export function EventLogCard(): JSX.Element {
                                 const label = EVENT_LABELS[e.type] ?? e.type;
                                 const subtypeLabel = e.subtype ? (SUBTYPE_LABELS[e.subtype] ?? e.subtype) : undefined;
                                 const context = [e.doorName, e.userName].filter(Boolean).join(' · ');
-                                const elapsed = now - e.ts;
-                                const showCountdown =
+                                const elapsed = Math.max(0, now - e.ts);
+                                const expectsSnapshot =
                                     !e.protectSnapshotUrl &&
                                     PROTECT_SNAPSHOT_EVENTS.has(e.type) &&
-                                    elapsed >= 0 &&
-                                    elapsed < SNAPSHOT_WAIT_MS &&
                                     settings.thumbWidth > 0;
-                                const countdown = Math.max(
-                                    1,
-                                    Math.min(COUNTDOWN_START, Math.ceil((SNAPSHOT_WAIT_MS - elapsed) / 1000)),
-                                );
+                                const remaining = SNAPSHOT_WAIT_MS - elapsed;
+                                const showCountdown = expectsSnapshot && remaining > 0;
+                                const showNoSnapshot = expectsSnapshot && remaining <= 0;
+                                // 3 → 2 → 1 in the first 3s, then lingers on 1 for the remainder.
+                                const countdown = Math.max(1, 3 - Math.floor(elapsed / 1000));
                                 return (
                                     <ListItem
                                         key={`${e.ts}-${i}`}
@@ -196,6 +202,31 @@ export function EventLogCard(): JSX.Element {
                                                     sx={{ fontVariantNumeric: 'tabular-nums' }}
                                                 >
                                                     {countdown}
+                                                </Typography>
+                                            </Box>
+                                        ) : showNoSnapshot ? (
+                                            <Box
+                                                sx={{
+                                                    width: settings.thumbWidth,
+                                                    height: settings.thumbWidth * 0.75,
+                                                    borderRadius: 0.5,
+                                                    border: '1px dashed',
+                                                    borderColor: 'divider',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    flexShrink: 0,
+                                                    mt: 0.5,
+                                                    bgcolor: 'action.hover',
+                                                    px: 0.5,
+                                                }}
+                                            >
+                                                <Typography
+                                                    variant="caption"
+                                                    color="text.secondary"
+                                                    align="center"
+                                                >
+                                                    Not available
                                                 </Typography>
                                             </Box>
                                         ) : null}

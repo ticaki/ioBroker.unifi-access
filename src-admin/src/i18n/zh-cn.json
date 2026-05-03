@@ -1,0 +1,31 @@
+{
+    "auth_status_loading": "正在检查适配器状态…",
+    "auth_status_connected": "已连接到 UniFi Access 控制器",
+    "auth_status_connected_named": "已连接到 %s",
+    "auth_status_missingToken": "缺少 API 令牌 — 请填写后点击「测试连接」",
+    "auth_status_unauthorized": "控制器拒绝了令牌(未授权)",
+    "auth_status_network": "无法连接控制器(网络错误)",
+    "auth_status_disconnected": "未连接",
+
+    "auth_test_button": "测试连接",
+    "auth_test_tooltip": "使用上方输入的值测试控制器(不保存)。",
+    "auth_test_running": "正在测试控制器…",
+    "auth_test_missingFields": "请先输入主机和 API 令牌。",
+    "auth_test_success": "连接成功",
+    "auth_test_success_named": "连接成功 — 控制器:%s",
+    "auth_test_error_unauthorized": "令牌被拒绝(未授权)。",
+    "auth_test_error_network": "无法连接控制器(网络错误)。",
+    "auth_test_error_unknown": "连接测试失败。",
+
+    "devices_title": "已发现的 UniFi Access 设备",
+    "devices_refresh": "刷新",
+    "devices_loading": "正在加载设备…",
+    "devices_empty": "尚无设备 — 请确认适配器已运行并已连接。",
+    "devices_error_load": "无法加载设备。适配器正在运行吗?",
+    "devices_online": "在线",
+    "devices_offline": "离线",
+    "devices_cap_event_thumbnail": "事件缩略图",
+    "devices_cap_doorbell": "门铃",
+    "devices_cap_door_unlock": "门解锁",
+    "devices_cap_live_events": "实时事件"
+}

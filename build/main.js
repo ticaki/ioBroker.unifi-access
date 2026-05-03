@@ -392,7 +392,7 @@ class UnifiAccess extends utils.Adapter {
     await this.setState("info.webhookEndpointId", { val: id, ack: true });
     await this.setState("info.webhookSecret", { val: secret, ack: true });
     await this.extendForeignObjectAsync(`system.adapter.${this.namespace}`, {
-      native: { webhookEndpointId: id, webhookSecret: secret }
+      native: { webhookEndpointId: id, webhookSecret: this.encrypt(secret) }
     });
   }
   async handleAccessEvent(msg, source) {
@@ -547,6 +547,9 @@ class UnifiAccess extends utils.Adapter {
         break;
       case "access.device.emergency_status":
         void this.refreshEmergencyStatus();
+        break;
+      case "access.temporary_unlock.start":
+        this.logSystemLogs(event.ts);
         break;
     }
   }
