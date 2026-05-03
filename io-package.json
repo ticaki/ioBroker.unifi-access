@@ -1,8 +1,21 @@
 {
 	"common": {
 		"name": "unifi-access",
-		"version": "0.0.1",
+		"version": "0.0.2",
 		"news": {
+			"0.0.2": {
+				"en": "Aligned API integration with the documented UniFi Access Developer API: removed undocumented snapshot/doorbell-call endpoints, switched timed door unlock to lock_rule, added a webhook receiver (HMAC-validated) for the full event catalogue, replaced polled snapshots with an event-driven last-thumbnail card.",
+				"de": "API-Integration an die dokumentierte UniFi-Access-Developer-API angeglichen: nicht dokumentierte Snapshot- und Doorbell-Call-Endpunkte entfernt, zeitgesteuerte Türöffnung auf lock_rule umgestellt, HMAC-validierter Webhook-Empfänger für alle dokumentierten Events ergänzt, gepollte Snapshots durch event-getriebene Last-Thumbnail-Anzeige ersetzt.",
+				"ru": "Интеграция API приведена в соответствие с документацией UniFi Access Developer API.",
+				"pt": "Integração da API alinhada com a documentação oficial do UniFi Access Developer API.",
+				"nl": "API-integratie afgestemd op de gedocumenteerde UniFi Access Developer API.",
+				"fr": "Intégration API alignée sur la documentation officielle UniFi Access Developer API.",
+				"it": "Integrazione API allineata alla documentazione UniFi Access Developer API.",
+				"es": "Integración de API alineada con la documentación oficial UniFi Access Developer API.",
+				"pl": "Integrację z API dostosowano do udokumentowanego UniFi Access Developer API.",
+				"uk": "Інтеграцію API узгоджено з документованим UniFi Access Developer API.",
+				"zh-cn": "API 接入已对齐 UniFi Access 官方开发者 API 文档。"
+			},
 			"0.0.1": {
 				"en": "initial release",
 				"de": "Erstveröffentlichung",
@@ -19,20 +32,20 @@
 		},
 		"titleLang": {
 			"en": "UniFi Access",
-			"de": "UniFi-Zugang",
-			"ru": "Доступ к UniFi",
-			"pt": "Acesso UniFi",
-			"nl": "UniFi-toegang",
-			"fr": "Accès UniFi",
-			"it": "Accesso UniFi",
-			"es": "Acceso UniFi",
-			"pl": "Dostęp do UniFi",
-			"uk": "Доступ UniFi",
-			"zh-cn": "UniFi 接入"
+			"de": "UniFi Access",
+			"ru": "UniFi Access",
+			"pt": "UniFi Access",
+			"nl": "UniFi Access",
+			"fr": "UniFi Access",
+			"it": "UniFi Access",
+			"es": "UniFi Access",
+			"pl": "UniFi Access",
+			"uk": "UniFi Access",
+			"zh-cn": "UniFi Access"
 		},
 		"desc": {
 			"en": "Integration of Ubiquiti UniFi Access (UA Ultra and others) for ioBroker",
-			"de": "Integration von Ubiquiti UniFi Access (UA Ultra und andere) für ioBroker",
+			"de": "Integration von Ubiquiti UniFi Access (UA Ultra und weitere Modelle)",
 			"ru": "Интеграция Ubiquiti UniFi Access (UA Ultra и других) для ioBroker",
 			"pt": "Integração do Ubiquiti UniFi Access (UA Ultra e outros) para ioBroker",
 			"nl": "Integratie van Ubiquiti UniFi Access (UA Ultra en anderen) voor ioBroker",
@@ -59,6 +72,7 @@
 			"license": "MIT"
 		},
 		"platform": "Javascript/Node.js",
+		"main": "build/main.js",
 		"icon": "unifi-access.png",
 		"enabled": true,
 		"extIcon": "https://raw.githubusercontent.com/ticaki/ioBroker.unifi-access/main/admin/unifi-access.png",
@@ -70,8 +84,13 @@
 		"compact": true,
 		"connectionType": "local",
 		"dataSource": "push",
+		"messagebox": true,
+		"supportStopBeforeUpdate": true,
 		"adminUI": {
 			"config": "json"
+		},
+		"localLinks": {
+			"_default": "%web_protocol%://%ip%:%web_port%/unifi-access/index.html"
 		},
 		"dependencies": [
 			{
@@ -80,13 +99,37 @@
 		],
 		"globalDependencies": [
 			{
-				"admin": ">=7.0.23"
+				"admin": ">=7.8.0"
 			}
 		]
 	},
 	"native": {
-		"option1": true,
-		"option2": "42"
+		"controllerHost": "",
+		"controllerPort": 12445,
+		"apiToken": "",
+		"verifyTLS": false,
+		"caCert": "",
+		"wsReconnectDelay": 5,
+		"defaultUnlockDuration": 0,
+		"listenPort": 8095,
+		"listenIp": "0.0.0.0",
+		"enableTls": false,
+		"tlsCertPublic": "",
+		"tlsCertPrivate": "",
+		"tlsCertChained": "",
+		"enableWebhooks": false,
+		"webhookPath": "/unifi-access-webhook",
+		"webhookPublicUrl": "",
+		"enableThumbnailServer": false,
+		"webhookEndpointId": "",
+		"webhookSecret": "",
+		"forwardEvents": [],
+		"enableGenericWebhook": false,
+		"genericWebhookPath": "/webhook",
+		"genericWebhookAuth": "none",
+		"genericWebhookUsername": "",
+		"genericWebhookPassword": "",
+		"genericWebhookToken": ""
 	},
 	"objects": [],
 	"instanceObjects": [
@@ -103,7 +146,7 @@
 			"type": "state",
 			"common": {
 				"role": "indicator.connected",
-				"name": "Device or service connected",
+				"name": "Controller connected",
 				"type": "boolean",
 				"read": true,
 				"write": false,

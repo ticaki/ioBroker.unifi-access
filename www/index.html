@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>ioBroker.unifi-access</title>
+        <link rel="icon" type="image/png" href="./unifi-access.png" />
+        <script>
+            (function () {
+                var isDev = window.location.port === '4174';
+                window.socketUrl = isDev
+                    ? window.location.protocol + '//' + window.location.hostname + ':8081'
+                    : window.location.origin;
+            })();
+
+            window.registerSocketOnLoad = function (cb) {
+                window.socketLoadedHandler = cb;
+            };
+            (function () {
+                const script = document.createElement('script');
+                script.onload = function () {
+                    if (typeof window.socketLoadedHandler === 'function') {
+                        window.socketLoadedHandler();
+                    }
+                };
+                const isDev = window.location.port === '4174';
+                script.src = isDev
+                    ? `${window.location.protocol}//${window.location.hostname}:8081/lib/js/socket.io.js`
+                    : '../../lib/js/socket.io.js';
+                document.head.appendChild(script);
+            })();
+        </script>
+      <script type="module" crossorigin src="./assets/index-Db4J0mrN.js"></script>
+    </head>
+    <body>
+        <div id="root"></div>
+    </body>
+</html>

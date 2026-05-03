@@ -1,0 +1,31 @@
+{
+    "auth_status_loading": "Checking adapter status…",
+    "auth_status_connected": "Connected to UniFi Access controller",
+    "auth_status_connected_named": "Connected to %s",
+    "auth_status_missingToken": "API token missing — fill it in and click 'Test connection'",
+    "auth_status_unauthorized": "Token rejected by controller (unauthorized)",
+    "auth_status_network": "Cannot reach controller (network error)",
+    "auth_status_disconnected": "Not connected",
+
+    "auth_test_button": "Test connection",
+    "auth_test_tooltip": "Probe the controller with the values entered above (does not save).",
+    "auth_test_running": "Probing controller…",
+    "auth_test_missingFields": "Please enter host and API token first.",
+    "auth_test_success": "Connection successful",
+    "auth_test_success_named": "Connection successful — controller: %s",
+    "auth_test_error_unauthorized": "Token rejected (unauthorized).",
+    "auth_test_error_network": "Cannot reach the controller (network error).",
+    "auth_test_error_unknown": "Connection test failed.",
+
+    "devices_title": "Discovered UniFi Access devices",
+    "devices_refresh": "Refresh",
+    "devices_loading": "Loading devices…",
+    "devices_empty": "No devices yet — make sure the adapter is running and connected.",
+    "devices_error_load": "Could not load devices. Is the adapter running?",
+    "devices_online": "online",
+    "devices_offline": "offline",
+    "devices_cap_event_thumbnail": "event thumbnail",
+    "devices_cap_doorbell": "doorbell",
+    "devices_cap_door_unlock": "door-unlock",
+    "devices_cap_live_events": "live events"
+}

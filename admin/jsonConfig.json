@@ -1,26 +1,546 @@
 {
 	"i18n": true,
-	"type": "panel",
+	"type": "tabs",
 	"items": {
-		"option1": {
-			"type": "checkbox",
-			"label": "option1",
-			"newLine": true,
-			"xs": 12,
-			"sm": 12,
-			"md": 6,
-			"lg": 4,
-			"xl": 4
+		"_connectionTab": {
+			"type": "panel",
+			"label": "tab_connection",
+			"items": {
+				"_connectionHeader": {
+					"type": "header",
+					"text": "connection_header",
+					"size": 4,
+					"newLine": true
+				},
+				"controllerHost": {
+					"type": "text",
+					"label": "controllerHost",
+					"help": "controllerHost_help",
+					"newLine": true,
+					"xs": 12,
+					"sm": 8,
+					"md": 6,
+					"lg": 5,
+					"xl": 4
+				},
+				"controllerPort": {
+					"type": "number",
+					"label": "controllerPort",
+					"min": 1,
+					"max": 65535,
+					"default": 12445,
+					"xs": 12,
+					"sm": 4,
+					"md": 2,
+					"lg": 2,
+					"xl": 2
+				},
+				"apiToken": {
+					"type": "text",
+					"label": "apiToken",
+					"help": "apiToken_help",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 9,
+					"lg": 8,
+					"xl": 6
+				},
+				"_authSetup": {
+					"type": "custom",
+					"name": "ConfigCustomUnifiAccessSet/Components/AuthSetup",
+					"url": "custom/customComponents.js",
+					"i18n": true,
+					"bundlerType": "module",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				},
+				"_tlsHeader": {
+					"type": "header",
+					"text": "tls_header",
+					"size": 4,
+					"newLine": true
+				},
+				"verifyTLS": {
+					"type": "checkbox",
+					"label": "verifyTLS",
+					"help": "verifyTLS_help",
+					"default": false,
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"caCert": {
+					"type": "text",
+					"label": "caCert",
+					"help": "caCert_help",
+					"disabled": "!data.verifyTLS",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 9,
+					"lg": 8,
+					"xl": 6
+				},
+				"_pollingHeader": {
+					"type": "header",
+					"text": "polling_header",
+					"size": 4,
+					"newLine": true
+				},
+				"wsReconnectDelay": {
+					"type": "number",
+					"label": "wsReconnectDelay",
+					"help": "wsReconnectDelay_help",
+					"min": 1,
+					"max": 300,
+					"default": 5,
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				}
+			}
 		},
-		"option2": {
-			"type": "text",
-			"label": "option2",
-			"newLine": true,
-			"xs": 12,
-			"sm": 12,
-			"md": 6,
-			"lg": 4,
-			"xl": 4
+		"_devicesTab": {
+			"type": "panel",
+			"label": "tab_devices",
+			"items": {
+				"_devicesHeader": {
+					"type": "header",
+					"text": "devices_header",
+					"size": 4,
+					"newLine": true
+				},
+				"_devicesComponent": {
+					"type": "custom",
+					"name": "ConfigCustomUnifiAccessSet/Components/DeviceManagement",
+					"url": "custom/customComponents.js",
+					"i18n": true,
+					"bundlerType": "module",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				},
+				"_doorbellHeader": {
+					"type": "header",
+					"text": "doorbell_header",
+					"size": 4,
+					"newLine": true
+				},
+				"_doorbellInfo": {
+					"type": "staticText",
+					"text": "doorbell_info",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				},
+				"defaultUnlockDuration": {
+					"type": "number",
+					"label": "defaultUnlockDuration",
+					"help": "defaultUnlockDuration_help",
+					"min": 0,
+					"max": 600,
+					"default": 0,
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				}
+			}
+		},
+		"_serverTab": {
+			"type": "panel",
+			"label": "tab_server",
+			"items": {
+				"_serverHeader": {
+					"type": "header",
+					"text": "server_header",
+					"size": 4,
+					"newLine": true
+				},
+				"_serverInfo": {
+					"type": "staticText",
+					"text": "server_info",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				},
+				"listenPort": {
+					"type": "port",
+					"label": "listenPort",
+					"help": "listenPort_help",
+					"min": 1,
+					"max": 65535,
+					"default": 8095,
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"listenIp": {
+					"type": "ip",
+					"label": "listenIp",
+					"help": "listenIp_help",
+					"default": "0.0.0.0",
+					"listenOnAllPorts": true,
+					"onlyIp4": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"_tlsServerHeader": {
+					"type": "header",
+					"text": "tls_server_header",
+					"size": 5,
+					"newLine": true
+				},
+				"_tlsServerInfo": {
+					"type": "staticText",
+					"text": "tls_server_info",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				},
+				"enableTls": {
+					"type": "checkbox",
+					"label": "enableTls",
+					"help": "enableTls_help",
+					"default": false,
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"_tlsCertificates": {
+					"type": "certificates",
+					"newLine": true,
+					"hidden": "!data.enableTls",
+					"certPublicName": "tlsCertPublic",
+					"certPrivateName": "tlsCertPrivate",
+					"certChainedName": "tlsCertChained",
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				},
+				"_webhookReceiverHeader": {
+					"type": "header",
+					"text": "webhook_receiver_header",
+					"size": 4,
+					"newLine": true
+				},
+				"enableWebhooks": {
+					"type": "checkbox",
+					"label": "enableWebhooks",
+					"help": "enableWebhooks_help",
+					"default": false,
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"_thumbnailHeader": {
+					"type": "header",
+					"text": "thumbnail_header",
+					"size": 4,
+					"newLine": true
+				},
+				"enableThumbnailServer": {
+					"type": "checkbox",
+					"label": "enableThumbnailServer",
+					"help": "enableThumbnailServer_help",
+					"default": false,
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				}
+			}
+		},
+		"_genericWebhookTab": {
+			"type": "panel",
+			"label": "tab_generic_webhook",
+			"items": {
+				"_genericWebhookHeader": {
+					"type": "header",
+					"text": "generic_webhook_header",
+					"size": 4,
+					"newLine": true
+				},
+				"_genericWebhookInfo": {
+					"type": "staticText",
+					"text": "generic_webhook_info",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				},
+				"enableGenericWebhook": {
+					"type": "checkbox",
+					"label": "enableGenericWebhook",
+					"help": "enableGenericWebhook_help",
+					"default": false,
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"genericWebhookPath": {
+					"type": "text",
+					"label": "genericWebhookPath",
+					"help": "genericWebhookPath_help",
+					"default": "/webhook",
+					"disabled": "!data.enableGenericWebhook",
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"_genericWebhookAuthHeader": {
+					"type": "header",
+					"text": "generic_webhook_auth_header",
+					"size": 5,
+					"newLine": true
+				},
+				"genericWebhookAuth": {
+					"type": "select",
+					"label": "genericWebhookAuth",
+					"help": "genericWebhookAuth_help",
+					"default": "none",
+					"disabled": "!data.enableGenericWebhook",
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3,
+					"options": [
+						{ "value": "none", "label": "generic_webhook_auth_none" },
+						{ "value": "basic", "label": "generic_webhook_auth_basic" },
+						{ "value": "bearer", "label": "generic_webhook_auth_bearer" }
+					]
+				},
+				"genericWebhookUsername": {
+					"type": "text",
+					"label": "genericWebhookUsername",
+					"hidden": "!data.enableGenericWebhook || data.genericWebhookAuth !== 'basic'",
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"genericWebhookPassword": {
+					"type": "password",
+					"label": "genericWebhookPassword",
+					"hidden": "!data.enableGenericWebhook || data.genericWebhookAuth !== 'basic'",
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"genericWebhookToken": {
+					"type": "text",
+					"label": "genericWebhookToken",
+					"hidden": "!data.enableGenericWebhook || data.genericWebhookAuth !== 'bearer'",
+					"newLine": true,
+					"xs": 12,
+					"sm": 8,
+					"md": 6,
+					"lg": 5,
+					"xl": 4
+				},
+				"_genericWebhookUrlDisplay": {
+					"type": "custom",
+					"name": "ConfigCustomUnifiAccessSet/Components/GenericWebhookUrl",
+					"url": "custom/customComponents.js",
+					"i18n": true,
+					"bundlerType": "module",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				}
+			}
+		},
+		"_protectTab": {
+			"type": "panel",
+			"label": "tab_protect",
+			"items": {
+				"_protectHeader": {
+					"type": "header",
+					"text": "protect_header",
+					"size": 4,
+					"newLine": true
+				},
+				"_protectInfo": {
+					"type": "staticText",
+					"text": "protect_info",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				},
+				"enableProtect": {
+					"type": "checkbox",
+					"label": "protect_enable",
+					"default": false,
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"protectUsername": {
+					"type": "text",
+					"label": "protect_username",
+					"disabled": "!data.enableProtect",
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"protectPassword": {
+					"type": "password",
+					"label": "protect_password",
+					"disabled": "!data.enableProtect",
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				},
+				"protectVerifyTLS": {
+					"type": "checkbox",
+					"label": "protect_verify_tls",
+					"default": true,
+					"disabled": "!data.enableProtect",
+					"newLine": true,
+					"xs": 12,
+					"sm": 6,
+					"md": 4,
+					"lg": 3,
+					"xl": 3
+				}
+			}
+		},
+		"_eventsTab": {
+			"type": "panel",
+			"label": "tab_events",
+			"items": {
+				"_eventsHeader": {
+					"type": "header",
+					"text": "events_header",
+					"size": 4,
+					"newLine": true
+				},
+				"_eventsInfo": {
+					"type": "staticText",
+					"text": "events_info",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
+				},
+				"forwardEvents": {
+					"type": "table",
+					"label": "forwardEvents",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12,
+					"items": [
+						{
+							"type": "select",
+							"attr": "event",
+							"title": "ev_type",
+							"default": "access.door.unlock",
+							"options": [
+								{ "value": "access.remote_view", "label": "WebSocket: doorbell ringing (access.remote_view)" },
+								{ "value": "access.remote_view.change", "label": "WebSocket: doorbell status change (access.remote_view.change)" },
+								{ "value": "access.data.device.remote_unlock", "label": "WebSocket: admin remote unlock (access.data.device.remote_unlock)" },
+								{ "value": "access.doorbell.incoming", "label": "Webhook: doorbell incoming (access.doorbell.incoming)" },
+								{ "value": "access.doorbell.completed", "label": "Webhook: doorbell completed (access.doorbell.completed)" },
+								{ "value": "access.doorbell.incoming.REN", "label": "Webhook: doorbell REN (access.doorbell.incoming.REN)" },
+								{ "value": "access.device.dps_status", "label": "Webhook: door position changed (access.device.dps_status)" },
+								{ "value": "access.door.unlock", "label": "Webhook: door unlocked (access.door.unlock)" },
+								{ "value": "access.device.emergency_status", "label": "Webhook: emergency mode (access.device.emergency_status)" },
+								{ "value": "access.unlock_schedule.activate", "label": "Webhook: unlock schedule activated (access.unlock_schedule.activate)" },
+								{ "value": "access.unlock_schedule.deactivate", "label": "Webhook: unlock schedule deactivated (access.unlock_schedule.deactivate)" },
+								{ "value": "access.temporary_unlock.start", "label": "Webhook: temporary unlock start (access.temporary_unlock.start)" },
+								{ "value": "access.temporary_unlock.end", "label": "Webhook: temporary unlock end (access.temporary_unlock.end)" },
+								{ "value": "access.visitor.status.changed", "label": "Webhook: visitor status (access.visitor.status.changed)" }
+							]
+						},
+						{
+							"type": "text",
+							"attr": "deviceId",
+							"title": "ev_deviceId",
+							"default": ""
+						},
+						{
+							"type": "text",
+							"attr": "targetState",
+							"title": "ev_target",
+							"default": ""
+						}
+					]
+				}
+			}
 		}
 	}
 }

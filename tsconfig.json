@@ -41,6 +41,10 @@
 	"exclude": [
 		"build/**",
 		"node_modules/**",
-		"widgets/**"
+		"widgets/**",
+		"src-admin/**",
+		"src-www/**",
+		"www/**",
+		"admin/**"
 	]
 }

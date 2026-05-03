@@ -1,0 +1,35 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node",
+            "request": "attach",
+            "name": "Attach to remote",
+            "restart": true,
+            "port": 9229,
+            "resolveSourceMapLocations": [
+                "${workspaceFolder}/.dev-server/default/node_modules/**/*.js"
+            ]
+        },
+        {
+            "name": "Launch Adapter (dev-server watch -n)",
+            "type": "node",
+            "request": "launch",
+            "program": "${workspaceFolder}/.dev-server/default/node_modules/iobroker.unifi-access/build/main.js",
+            "args": ["--debug", "0"],
+            "cwd": "${workspaceFolder}/.dev-server/default",
+            "console": "internalConsole",
+            "outputCapture": "std",
+            "attachSimplePort": 9230,
+            "runtimeArgs": ["--inspect-brk=9230"],
+            "sourceMaps": true,
+            "outFiles": [
+                "${workspaceFolder}/.dev-server/default/node_modules/iobroker.unifi-access/build/**/*.js"
+            ],
+            "resolveSourceMapLocations": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/.dev-server/default/node_modules/iobroker.unifi-access/build/**"
+            ]
+        }
+    ]
+}

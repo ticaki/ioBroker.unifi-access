@@ -10,120 +10,53 @@
 
 **Tests:** ![Test and Release](https://github.com/ticaki/ioBroker.unifi-access/workflows/Test%20and%20Release/badge.svg)
 
-## unifi-access adapter for ioBroker
+## UniFi Access adapter for ioBroker
 
-Integration of Ubiquiti UniFi Access (UA Ultra and others) for ioBroker
+This adapter integrates Ubiquiti's UniFi Access platform with ioBroker. It uses the documented [UniFi Access Developer API](https://assets.identity.ui.com/unifi-access/api_reference.pdf) (also bundled in this repo at `.doc/api_reference.pdf`). Built around the **UA Ultra** standalone reader/hub/camera/doorbell, with basic integration for other UniFi Access devices (UA G2 Pro readers, UA G3 Pro doorbell, UA Hub). It can optionally pair with a UniFi Protect controller to enrich access events with camera snapshots and clip URLs, and ships a generic webhook receiver to bridge external alarm systems into ioBroker.
 
-## Developer manual
-This section is intended for the developer. It can be deleted later.
+Capabilities exposed by the adapter:
 
-### DISCLAIMER
+- **Door unlock** — momentary pulse via `PUT /doors/:id/unlock`, or timed unlock for N minutes via `PUT /doors/:id/lock_rule`.
+- **Emergency control** — `doors.emergency.lockdown` and `doors.emergency.evacuation` as read/write states (UniFi Access ≥ 1.24.6, written via `PUT /doors/settings/emergency`).
+- **Live event stream** — UniFi Access WebSocket (`access.remote_view`, `access.remote_view.change`, `access.data.device.remote_unlock`) plus optional webhook receiver for the full event catalogue (`access.doorbell.incoming/.completed/.incoming.REN`, `access.door.unlock`, `access.device.dps_status`, `access.device.emergency_status`, `access.unlock_schedule.*`, `access.temporary_unlock.*`, `access.visitor.status.changed`).
+- **Doorbell ringing notification** — passive: states show who is ringing and when. Accepting/rejecting calls is **not** part of this adapter — it requires WebRTC and is what the official UniFi Access mobile app is for.
+- **Last-event thumbnail** — for UA Ultra, UA G3 Pro and UA G2 Pro, the adapter captures the `door_thumbnail` path from each event and exposes the latest image as a JPEG via a small built-in HTTP proxy (the controller serves it via `/system/static`, behind Bearer auth).
+- **UniFi Protect integration (optional)** — links Protect cameras to access events, caching live snapshots and exposing them in the recent-events log alongside a clip URL.
+- **Generic webhook receiver (optional)** — second HTTP endpoint with optional Basic/Bearer auth, lets external alarm systems push events into the adapter's `notifications.*` states.
 
-Please make sure that you consider copyrights and trademarks when you use names or logos of a company and add a disclaimer to your README.
-You can check other adapters for examples or ask in the developer community. Using a name or logo of a company without permission may cause legal problems for you.
+Explicitly **not** provided in v1 (because the UniFi Access Developer API has no endpoint for it): on-demand camera snapshots, doorbell accept/reject, two-way audio, WebRTC live video.
 
-### Getting started
+[![Deutsche Dokumentation](https://img.shields.io/badge/Doku-Deutsch-green?logo=readme)](README_GERMAN.md)
 
-You are almost done, only a few steps left:
-1. Create a new repository on GitHub with the name `ioBroker.unifi-access`
+[![English documentation](https://img.shields.io/badge/docs-English-blue?logo=readme)](README_ENGLISH.md)
 
-1. Push all files to the GitHub repo. The creator has already set up the local repository for you:  
-	```bash
-	git push origin main
-	```
-1. Add a new secret under https://github.com/ticaki/ioBroker.unifi-access/settings/secrets. It must be named `AUTO_MERGE_TOKEN` and contain a personal access token with push access to the repository, e.g. yours. You can create a new token under https://github.com/settings/tokens.
 
-1. Head over to [src/main.ts](src/main.ts) and start programming!
+---
 
-### Best Practices
-We've collected some [best practices](https://github.com/ioBroker/ioBroker.repositories#development-and-coding-best-practices) regarding ioBroker development and coding in general. If you're new to ioBroker or Node.js, you should
-check them out. If you're already experienced, you should also take a look at them - you might learn something new :)
+## Credits
 
-### State Roles
-When creating state objects, it is important to use the correct role for the state. The role defines how the state should be interpreted by visualizations and other adapters. For a list of available roles and their meanings, please refer to the [state roles documentation](https://www.iobroker.net/#en/documentation/dev/stateroles.md).
+- **[UniFi Access Developer API reference](https://assets.identity.ui.com/unifi-access/api_reference.pdf)** — official endpoint documentation provided by Ubiquiti.
+- **[hjdhjd/unifi-access](https://github.com/hjdhjd/unifi-access)** — community Node.js client that maps out many of the developer-API quirks and was used as a reference for the WebSocket event format.
 
-**Important:** Do not invent your own custom role names. If you need a role that is not part of the official list, please contact the ioBroker developer community for guidance and discussion about adding new roles.
+A big thank you to all contributors of these projects!
 
-### Scripts in `package.json`
-Several npm scripts are predefined for your convenience. You can run them using `npm run <scriptname>`
-| Script name | Description |
-|-------------|-------------|
-| `build` | Compile the TypeScript sources. |
-| `watch` | Compile the TypeScript sources and watch for changes. |
-| `test:ts` | Executes the tests you defined in `*.test.ts` files. |
-| `test:package` | Ensures your `package.json` and `io-package.json` are valid. |
-| `test:integration` | Tests the adapter startup with an actual instance of ioBroker. |
-| `test` | Performs a minimal test run on package files and your tests. |
-| `check` | Performs a type-check on your code (without compiling anything). |
-| `lint` | Runs `ESLint` to check your code for formatting errors and potential bugs. |
-| `translate` | Translates texts in your adapter to all required languages, see [`@iobroker/adapter-dev`](https://github.com/ioBroker/adapter-dev#manage-translations) for more details. |
-| `release` | Creates a new release, see [`@alcalzone/release-script`](https://github.com/AlCalzone/release-script#usage) for more details. |
 
-### Configuring the compilation
-The adapter template uses [esbuild](https://esbuild.github.io/) to compile TypeScript and/or React code. You can configure many compilation settings 
-either in `tsconfig.json` or by changing options for the build tasks. These options are described in detail in the
-[`@iobroker/adapter-dev` documentation](https://github.com/ioBroker/adapter-dev#compile-adapter-files).
+## Disclaimer
 
-### Writing tests
-When done right, testing code is invaluable, because it gives you the 
-confidence to change your code while knowing exactly if and when 
-something breaks. A good read on the topic of test-driven development 
-is https://hackernoon.com/introduction-to-test-driven-development-tdd-61a13bc92d92. 
-Although writing tests before the code might seem strange at first, but it has very 
-clear upsides.
+This adapter is an independent, community-developed open-source project. It is **not affiliated with, endorsed by, or in any way officially connected to Ubiquiti Inc.**
 
-The template provides you with basic tests for the adapter startup and package files.
-It is recommended that you add your own tests into the mix.
+*UniFi*, *UniFi Access*, *UA Ultra* and all other Ubiquiti trademarks are the property of Ubiquiti Inc. All product names, logos, and brands are property of their respective owners. The use of these names is for identification purposes only.
 
-### Publishing the adapter
-Using GitHub Actions, you can enable automatic releases on npm whenever you push a new git tag that matches the form 
-`v<major>.<minor>.<patch>`. We **strongly recommend** that you do. The necessary steps are described in `.github/workflows/test-and-release.yml`.
+The adapter accesses the UniFi Access controller using the same APIs that are used by Ubiquiti's own clients. Use of those APIs is subject to Ubiquiti's Terms of Service. By using this adapter, you agree to comply with all applicable Ubiquiti terms and conditions. The author accepts no liability for any misuse of the adapter.
 
-Since you installed the release script, you can create a new
-release simply by calling:
-```bash
-npm run release
-```
-Additional command line options for the release script are explained in the
-[release-script documentation](https://github.com/AlCalzone/release-script#command-line).
-
-To get your adapter released in ioBroker, please refer to the documentation 
-of [ioBroker.repositories](https://github.com/ioBroker/ioBroker.repositories#requirements-for-adapter-to-get-added-to-the-latest-repository).
-
-### Test the adapter manually on a local ioBroker installation
-In order to install the adapter locally without publishing, the following steps are recommended:
-1. Create a GitHub repository for your adapter if you haven't already
-1. Push your code to the GitHub repository
-1. Use the ioBroker Admin interface or command line to install the adapter from GitHub:
-	* **Via Admin UI**: Go to the "Adapters" tab, click on "Custom Install" (GitHub icon), and enter your repository URL:
-		```
-		https://github.com/ticaki/ioBroker.unifi-access
-		```
-		You can also install from a specific branch by adding `#branchname` at the end:
-		```
-		https://github.com/ticaki/ioBroker.unifi-access#dev
-		```
-	* **Via Command Line**: Install using the `iob` command:
-		```bash
-		iob url https://github.com/ticaki/ioBroker.unifi-access
-		```
-		Or from a specific branch:
-		```bash
-		iob url https://github.com/ticaki/ioBroker.unifi-access#dev
-		```
-
-For later updates:
-1. Push your changes to GitHub
-1. Repeat the installation steps above (via Admin UI or `iob url` command) to update the adapter
 
 ## Changelog
 <!--
 	Placeholder for the next version (at the beginning of the line):
 	### **WORK IN PROGRESS**
 -->
-
 ### **WORK IN PROGRESS**
-* (ticaki) initial release
+- (ticaki) initial public skeleton — connection, bootstrap, door unlock, WebSocket event stream
 
 ## License
 MIT License

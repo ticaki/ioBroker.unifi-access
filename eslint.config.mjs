@@ -1,6 +1,7 @@
 // ioBroker eslint template configuration file for js and ts files
 // Please note that esm or react based modules need additional modules loaded.
 import config from '@iobroker/eslint-config';
+import pluginUnicorn from 'eslint-plugin-unicorn';
 
 export default [
 	...config,
@@ -18,18 +19,33 @@ export default [
 			'admin/admin.d.ts',
 			'admin/blockly.js',
 			'**/adapter-config.d.ts',
-			'widgets/**/*.js'
+			'widgets/**/*.js',
+			'tasks.ts',
+			'data',
+			'admin',
+			'src-admin',
+			'src-www',
+			'www',
 		],
 	},
 	{
-		// you may disable some 'jsdoc' warnings - but using jsdoc is highly recommended
-		// as this improves maintainability. jsdoc warnings will not block build process.
+		plugins: {
+			unicorn: pluginUnicorn,
+		},
 		rules: {
-			// 'jsdoc/require-jsdoc': 'off',
-			// 'jsdoc/require-param': 'off',
-			// 'jsdoc/require-param-description': 'off',
-			// 'jsdoc/require-returns-description': 'off',
-			// 'jsdoc/require-returns-check': 'off',
+			'jsdoc/require-jsdoc': 'off',
+			'require-await': 'off',
+			'@typescript-eslint/require-await': 'off',
+			'no-unused-vars': 'off',
+			'unicorn/numeric-separators-style': [
+				'warn',
+				{
+					number: { minimumDigits: 5, groupLength: 3 },
+					hexadecimal: { minimumDigits: 0, groupLength: 2 },
+					binary: { minimumDigits: 0, groupLength: 4 },
+					octal: { minimumDigits: 0, groupLength: 3 },
+				},
+			],
 		},
 	},
 ];

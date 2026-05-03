@@ -1,14 +1,48 @@
 // This file extends the AdapterConfig type from "@iobroker/types"
 
-// Augment the globally declared type ioBroker.AdapterConfig
 declare global {
 	namespace ioBroker {
 		interface AdapterConfig {
-			option1: boolean;
-			option2: string;
+			controllerHost: string;
+			controllerPort: number;
+			apiToken: string;
+			verifyTLS: boolean;
+			caCert: string;
+
+			wsReconnectDelay: number;
+
+			defaultUnlockDuration: number;
+
+			// Shared HTTP(S) server (UniFi webhook receiver, thumbnail proxy, generic webhook)
+			listenPort: number;
+			listenIp: string;
+			enableTls: boolean;
+			tlsCertPublic: string;
+			tlsCertPrivate: string;
+			tlsCertChained: string;
+
+			enableWebhooks: boolean;
+
+			enableThumbnailServer: boolean;
+
+			forwardEvents: { event: string; deviceId?: string; targetState: string }[];
+
+			webhookEndpointId: string;
+			webhookSecret: string;
+
+			enableGenericWebhook: boolean;
+			genericWebhookPath: string;
+			genericWebhookAuth: 'none' | 'basic' | 'bearer';
+			genericWebhookUsername: string;
+			genericWebhookPassword: string;
+			genericWebhookToken: string;
+
+			enableProtect: boolean;
+			protectUsername: string;
+			protectPassword: string;
+			protectVerifyTLS: boolean;
 		}
 	}
 }
 
-// this is required so the above AdapterConfig is found by TypeScript / type checking
 export {};

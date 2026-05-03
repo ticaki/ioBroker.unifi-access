@@ -1,0 +1,31 @@
+{
+    "auth_status_loading": "Adapter-Status wird geprüft…",
+    "auth_status_connected": "Mit UniFi-Access-Controller verbunden",
+    "auth_status_connected_named": "Verbunden mit %s",
+    "auth_status_missingToken": "API-Token fehlt — bitte eintragen und „Verbindung testen“ klicken",
+    "auth_status_unauthorized": "Token wurde vom Controller abgelehnt (unauthorized)",
+    "auth_status_network": "Controller nicht erreichbar (Netzwerkfehler)",
+    "auth_status_disconnected": "Nicht verbunden",
+
+    "auth_test_button": "Verbindung testen",
+    "auth_test_tooltip": "Prüft den Controller mit den oben eingetragenen Werten (ohne zu speichern).",
+    "auth_test_running": "Prüfe Controller…",
+    "auth_test_missingFields": "Bitte zuerst Host und API-Token eintragen.",
+    "auth_test_success": "Verbindung erfolgreich",
+    "auth_test_success_named": "Verbindung erfolgreich — Controller: %s",
+    "auth_test_error_unauthorized": "Token wurde abgelehnt (unauthorized).",
+    "auth_test_error_network": "Controller nicht erreichbar (Netzwerkfehler).",
+    "auth_test_error_unknown": "Verbindungstest fehlgeschlagen.",
+
+    "devices_title": "Erkannte UniFi-Access-Geräte",
+    "devices_refresh": "Aktualisieren",
+    "devices_loading": "Lade Geräte…",
+    "devices_empty": "Noch keine Geräte — bitte sicherstellen, dass der Adapter läuft und verbunden ist.",
+    "devices_error_load": "Geräte konnten nicht geladen werden. Läuft der Adapter?",
+    "devices_online": "online",
+    "devices_offline": "offline",
+    "devices_cap_event_thumbnail": "Event-Thumbnail",
+    "devices_cap_doorbell": "Türklingel",
+    "devices_cap_door_unlock": "Türöffner",
+    "devices_cap_live_events": "Live-Events"
+}

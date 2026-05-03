@@ -1,75 +1,90 @@
 {
-  "name": "iobroker.unifi-access",
-  "version": "0.0.1",
-  "description": "Integration of Ubiquiti UniFi Access (UA Ultra and others) for ioBroker",
-  "author": {
-    "name": "ticaki",
-    "email": "github@renopoint.de"
-  },
-  "contributors": [],
-  "homepage": "https://github.com/ticaki/ioBroker.unifi-access",
-  "license": "MIT",
-  "keywords": [
-    "unifi",
-    "access",
-    "ubiquiti",
-    "door",
-    "doorbell",
-    "ua-ultra"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/ticaki/ioBroker.unifi-access.git"
-  },
-  "engines": {
-    "node": ">= 22"
-  },
-  "dependencies": {
-    "@iobroker/adapter-core": "^3.3.2"
-  },
-  "devDependencies": {
-    "@alcalzone/release-script": "^5.1.1",
-    "@alcalzone/release-script-plugin-iobroker": "^5.1.2",
-    "@alcalzone/release-script-plugin-license": "^5.1.1",
-    "@alcalzone/release-script-plugin-manual-review": "^5.1.1",
-    "@iobroker/adapter-dev": "^1.5.0",
-    "@iobroker/eslint-config": "^2.2.0",
-    "@iobroker/testing": "^5.2.2",
-    "@tsconfig/node22": "^22.0.5",
-    "@types/iobroker": "npm:@iobroker/types@^7.1.1",
-    "@types/node": "^22.19.17",
-    "rimraf": "^6.1.3",
-    "source-map-support": "^0.5.21",
-    "ts-node": "^10.9.2",
-    "typescript": "~5.9.3"
-  },
-  "main": "build/main.js",
-  "files": [
-    "admin{,/!(src)/**}/!(tsconfig|tsconfig.*|.eslintrc).{json,json5}",
-    "admin{,/!(src)/**}/*.{html,css,png,svg,jpg,js}",
-    "build/",
-    "www/",
-    "io-package.json",
-    "LICENSE"
-  ],
-  "scripts": {
-    "prebuild": "rimraf build",
-    "build": "build-adapter ts",
-    "watch": "build-adapter ts --watch",
-    "prebuild:ts": "rimraf build",
-    "build:ts": "build-adapter ts",
-    "watch:ts": "build-adapter ts --watch",
-    "test:ts": "mocha --config test/mocharc.custom.json src/**/*.test.ts",
-    "test:package": "mocha test/package --exit",
-    "test:integration": "mocha test/integration --exit",
-    "test": "npm run test:ts && npm run test:package",
-    "check": "tsc --noEmit",
-    "lint": "eslint -c eslint.config.mjs .",
-    "translate": "translate-adapter",
-    "release": "release-script"
-  },
-  "bugs": {
-    "url": "https://github.com/ticaki/ioBroker.unifi-access/issues"
-  },
-  "readmeFilename": "README.md"
+	"name": "iobroker.unifi-access",
+	"version": "0.0.2",
+	"description": "Integration of Ubiquiti UniFi Access (UA Ultra and others) for ioBroker",
+	"author": {
+		"name": "ticaki",
+		"email": "github@renopoint.de"
+	},
+	"contributors": [],
+	"homepage": "https://github.com/ticaki/ioBroker.unifi-access",
+	"license": "MIT",
+	"keywords": [
+		"ioBroker",
+		"unifi",
+		"access",
+		"ubiquiti",
+		"door",
+		"doorbell",
+		"ua-ultra"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/ticaki/ioBroker.unifi-access.git"
+	},
+	"engines": {
+		"node": ">= 22"
+	},
+	"dependencies": {
+		"@iobroker/adapter-core": "^3.3.2",
+		"axios": "^1.7.9",
+		"ws": "^8.18.0"
+	},
+	"devDependencies": {
+		"@alcalzone/release-script": "^5.1.1",
+		"@alcalzone/release-script-plugin-iobroker": "^5.1.2",
+		"@alcalzone/release-script-plugin-license": "^5.1.1",
+		"@alcalzone/release-script-plugin-manual-review": "^5.1.1",
+		"@iobroker/adapter-dev": "^1.5.0",
+		"@iobroker/eslint-config": "^2.2.0",
+		"@iobroker/testing": "^5.2.2",
+		"@tsconfig/node22": "^22.0.5",
+		"@types/iobroker": "npm:@iobroker/types@^7.1.1",
+		"@types/node": "^22.19.17",
+		"@types/ws": "^8.5.13",
+		"eslint-plugin-unicorn": "^60.0.0",
+		"rimraf": "^6.1.3",
+		"source-map-support": "^0.5.21",
+		"ts-node": "^10.9.2",
+		"typescript": "~5.9.3"
+	},
+	"main": "build/main.js",
+	"files": [
+		"admin{,/!(src)/**}/!(tsconfig|tsconfig.*|.eslintrc).{json,json5}",
+		"admin{,/!(src)/**}/*.{html,css,png,svg,jpg,js}",
+		"build/",
+		"www/",
+		"io-package.json",
+		"LICENSE"
+	],
+	"scripts": {
+		"prebuild": "rimraf build",
+		"build": "build-adapter ts",
+		"watch": "build-adapter ts --watch",
+		"prebuild:ts": "rimraf build",
+		"build:ts": "build-adapter ts",
+		"watch:ts": "build-adapter ts --watch",
+		"check": "tsc --noEmit",
+		"lint": "eslint -c eslint.config.mjs . --cache --cache-location .eslintcache --cache-strategy content",
+		"test:ts": "mocha --config test/mocharc.custom.json src/**/*.test.ts",
+		"test:package": "mocha test/package --exit",
+		"test:integration": "mocha test/integration --exit",
+		"test": "npm run test:ts && npm run test:package",
+		"translate": "translate-adapter",
+		"npm": "npm i && cd src-admin && npm i && cd ../src-www && npm i",
+		"npm:admin": "cd src-admin && npm i",
+		"npm:www": "cd src-www && npm i",
+		"build:admin": "cd src-admin && npm run build",
+		"build:www": "cd src-www && npm run build",
+		"build:all": "npm run build && npm run build:admin && npm run build:www",
+		"lint:admin": "cd src-admin && npm run lint",
+		"verify": "npm run lint && npm run lint:admin && npm run build",
+		"dev:admin": "npm run build:admin && dev-server upload && dev-server watch",
+		"dev:www": "cd src-www && npm run start",
+		"release": "release-script"
+	},
+	"bugs": {
+		"url": "https://github.com/ticaki/ioBroker.unifi-access/issues"
+	},
+	"readmeFilename": "README.md"
 }
