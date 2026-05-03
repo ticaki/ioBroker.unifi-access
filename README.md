@@ -56,6 +56,8 @@ The adapter accesses the UniFi Access controller using the same APIs that are us
 	### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
+
+### 0.0.2 (2026-05-03)
 - (ticaki) initial public skeleton — connection, bootstrap, door unlock, WebSocket event stream
 
 ## License

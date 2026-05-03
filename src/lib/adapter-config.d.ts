@@ -17,9 +17,9 @@ declare global {
 			listenPort: number;
 			listenIp: string;
 			enableTls: boolean;
-			tlsCertPublic: string;
-			tlsCertPrivate: string;
-			tlsCertChained: string;
+			certPublic: string;
+			certPrivate: string;
+			certChained: string;
 
 			enableWebhooks: boolean;
 
