@@ -139,12 +139,12 @@ class UnifiHttp {
     return (_b = (_a = r.data) == null ? void 0 : _a.data) != null ? _b : [];
   }
   async createWebhookEndpoint(payload) {
-    var _a;
+    var _a, _b, _c;
     const r = await this.client.post(
       "/api/v1/developer/webhooks/endpoints",
       payload
     );
-    return (_a = r.data) == null ? void 0 : _a.data;
+    return { code: (_b = (_a = r.data) == null ? void 0 : _a.code) != null ? _b : "SUCCESS", endpoint: (_c = r.data) == null ? void 0 : _c.data };
   }
   async deleteWebhookEndpoint(id) {
     await this.client.delete(`/api/v1/developer/webhooks/endpoints/${encodeURIComponent(id)}`);

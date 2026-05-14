@@ -36,8 +36,31 @@ const DEFAULT_WEBHOOK_EVENTS = [
   "access.temporary_unlock.end",
   "access.visitor.status.changed"
 ];
+async function deleteAllMatching(http, url, extraId, logger) {
+  let list;
+  try {
+    list = await http.listWebhookEndpoints();
+  } catch (err) {
+    logger.warn(`Could not list webhook endpoints before delete: ${err.message}`);
+    return;
+  }
+  const toDelete = /* @__PURE__ */ new Set();
+  for (const e of list) {
+    if (e.endpoint === url || e.id === extraId) {
+      toDelete.add(e.id);
+    }
+  }
+  for (const id of toDelete) {
+    try {
+      await http.deleteWebhookEndpoint(id);
+      logger.info(`Deleted webhook endpoint ${id}.`);
+    } catch (err) {
+      logger.warn(`Failed to delete webhook endpoint ${id}: ${err.message}`);
+    }
+  }
+}
 async function ensureRegistration(options) {
-  var _a;
+  var _a, _b, _c;
   const events = (_a = options.events) != null ? _a : DEFAULT_WEBHOOK_EVENTS;
   const list = await options.http.listWebhookEndpoints();
   const existing = list.find((e) => e.endpoint === options.publicUrl);
@@ -53,35 +76,51 @@ async function ensureRegistration(options) {
       options.logger.warn(`Failed to delete stale webhook endpoint: ${err.message}`);
     }
   }
-  const created = await options.http.createWebhookEndpoint({
+  const result = await options.http.createWebhookEndpoint({
     name: options.name,
     endpoint: options.publicUrl,
     events: [...events]
   });
-  if (!(created == null ? void 0 : created.id) || !(created == null ? void 0 : created.secret)) {
+  if (result.code === "CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED") {
+    options.logger.info(`Webhook endpoint already exists on controller (race/stale) \u2014 fetching from list.`);
+    const refreshed = await options.http.listWebhookEndpoints();
+    const dup = refreshed.find((e) => e.endpoint === options.publicUrl);
+    if ((dup == null ? void 0 : dup.id) && (dup == null ? void 0 : dup.secret)) {
+      return { id: dup.id, secret: dup.secret, endpoint: dup.endpoint };
+    }
+    throw new Error("Webhook endpoint is duplicated on controller but could not be found in the list.");
+  }
+  if (!((_b = result.endpoint) == null ? void 0 : _b.id) || !((_c = result.endpoint) == null ? void 0 : _c.secret)) {
     throw new Error("Webhook endpoint created but response did not include id/secret.");
   }
-  options.logger.info(`Registered new webhook endpoint ${created.id} for ${options.publicUrl}.`);
-  return { id: created.id, secret: created.secret, endpoint: created.endpoint };
+  options.logger.info(`Registered new webhook endpoint ${result.endpoint.id} for ${options.publicUrl}.`);
+  return { id: result.endpoint.id, secret: result.endpoint.secret, endpoint: result.endpoint.endpoint };
 }
 async function reregister(options, storedId) {
-  var _a;
-  if (storedId) {
-    try {
-      await options.http.deleteWebhookEndpoint(storedId);
-    } catch (err) {
-      options.logger.warn(`Failed to delete previous webhook endpoint: ${err.message}`);
-    }
-  }
-  const created = await options.http.createWebhookEndpoint({
+  var _a, _b, _c, _d, _e, _f;
+  await deleteAllMatching(options.http, options.publicUrl, storedId, options.logger);
+  const result = await options.http.createWebhookEndpoint({
     name: options.name,
     endpoint: options.publicUrl,
     events: [...(_a = options.events) != null ? _a : DEFAULT_WEBHOOK_EVENTS]
   });
-  if (!(created == null ? void 0 : created.id) || !(created == null ? void 0 : created.secret)) {
+  if (result.code === "CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED") {
+    options.logger.warn(`Webhook endpoint still duplicated after delete \u2014 retrying cleanup.`);
+    await deleteAllMatching(options.http, options.publicUrl, null, options.logger);
+    const retry = await options.http.createWebhookEndpoint({
+      name: options.name,
+      endpoint: options.publicUrl,
+      events: [...(_b = options.events) != null ? _b : DEFAULT_WEBHOOK_EVENTS]
+    });
+    if (!((_c = retry.endpoint) == null ? void 0 : _c.id) || !((_d = retry.endpoint) == null ? void 0 : _d.secret)) {
+      throw new Error("Webhook endpoint re-registration failed: response did not include id/secret after duplicate cleanup.");
+    }
+    return { id: retry.endpoint.id, secret: retry.endpoint.secret, endpoint: retry.endpoint.endpoint };
+  }
+  if (!((_e = result.endpoint) == null ? void 0 : _e.id) || !((_f = result.endpoint) == null ? void 0 : _f.secret)) {
     throw new Error("Webhook endpoint created but response did not include id/secret.");
   }
-  return { id: created.id, secret: created.secret, endpoint: created.endpoint };
+  return { id: result.endpoint.id, secret: result.endpoint.secret, endpoint: result.endpoint.endpoint };
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

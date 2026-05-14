@@ -137,12 +137,12 @@ export class UnifiHttp {
 
 	async createWebhookEndpoint(
 		payload: UnifiWebhookEndpointCreate,
-	): Promise<UnifiWebhookEndpoint & { secret?: string }> {
-		const r = await this.client.post<{ data: UnifiWebhookEndpoint & { secret?: string } }>(
+	): Promise<{ code: string; endpoint?: UnifiWebhookEndpoint & { secret?: string } }> {
+		const r = await this.client.post<{ code?: string; data?: UnifiWebhookEndpoint & { secret?: string } }>(
 			'/api/v1/developer/webhooks/endpoints',
 			payload,
 		);
-		return r.data?.data;
+		return { code: r.data?.code ?? 'SUCCESS', endpoint: r.data?.data };
 	}
 
 	async deleteWebhookEndpoint(id: string): Promise<void> {
