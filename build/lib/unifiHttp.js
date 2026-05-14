@@ -51,6 +51,16 @@ class UnifiHttp {
         ca: options.caCert ? options.caCert : void 0
       })
     });
+    if (options.debugLog) {
+      const log = options.debugLog;
+      this.client.interceptors.response.use((r) => {
+        var _a, _b;
+        if ((_a = r.config.url) == null ? void 0 : _a.includes("webhooks")) {
+          log(`webhook response [${(_b = r.config.method) == null ? void 0 : _b.toUpperCase()} ${r.config.url}] status=${r.status} body=${JSON.stringify(r.data)}`);
+        }
+        return r;
+      });
+    }
   }
   get url() {
     return this.baseUrl;

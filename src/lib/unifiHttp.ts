@@ -17,6 +17,7 @@ export interface UnifiHttpOptions {
 	token: string;
 	verifyTLS?: boolean;
 	caCert?: string;
+	debugLog?: (msg: string) => void;
 }
 
 export class UnifiHttp {
@@ -37,6 +38,15 @@ export class UnifiHttp {
 				ca: options.caCert ? options.caCert : undefined,
 			}),
 		});
+		if (options.debugLog) {
+			const log = options.debugLog;
+			this.client.interceptors.response.use(r => {
+				if (r.config.url?.includes('webhooks')) {
+					log(`webhook response [${r.config.method?.toUpperCase()} ${r.config.url}] status=${r.status} body=${JSON.stringify(r.data)}`);
+				}
+				return r;
+			});
+		}
 	}
 
 	get url(): string {

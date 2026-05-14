@@ -124,7 +124,7 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 
-		this.http = new UnifiHttp({ host, port, token, verifyTLS, caCert });
+		this.http = new UnifiHttp({ host, port, token, verifyTLS, caCert, debugLog: (m: string) => this.log.debug(m) });
 
 		if (cfg.enableProtect === true && cfg.protectUsername) {
 			this.protectHttp = new ProtectHttp({
