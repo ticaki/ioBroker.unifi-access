@@ -27,16 +27,19 @@ interface ActorSelectState extends ConfigGenericState {
     loading: boolean;
     error: string | null;
     users: UnifiUser[];
+    selectedId: string;
 }
 
 class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
     constructor(props: ConfigGenericProps) {
         super(props);
+        const data = props.data as Record<string, unknown> | undefined;
         Object.assign(this.state, {
             loaded: false,
             loading: false,
             error: null,
             users: [],
+            selectedId: (data?.unlockActorId as string | undefined) ?? '',
         } satisfies Partial<ActorSelectState>);
     }
 
@@ -68,6 +71,7 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
     private handleChange(e: SelectChangeEvent<string>): void {
         const id = e.target.value;
         if (!id) {
+            this.setState({ selectedId: '' });
             this.onChange('unlockActorId', '');
             this.onChange('unlockActorName', '');
             return;
@@ -76,14 +80,13 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
         if (!user) {
             return;
         }
+        this.setState({ selectedId: user.id });
         this.onChange('unlockActorId', user.id);
         this.onChange('unlockActorName', user.name);
     }
 
     renderItem(): React.JSX.Element {
-        const { loading, loaded, error, users } = this.state;
-        const data = this.props.data as Record<string, unknown> | undefined;
-        const currentId = (data?.unlockActorId as string | undefined) ?? '';
+        const { loading, loaded, error, users, selectedId } = this.state;
 
         return (
             <Box sx={{ width: '100%', mt: 1 }}>
@@ -126,7 +129,7 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
                         >
                             <InputLabel>{I18n.t('actor_select_label')}</InputLabel>
                             <Select
-                                value={currentId}
+                                value={selectedId}
                                 label={I18n.t('actor_select_label')}
                                 onChange={e => this.handleChange(e)}
                             >
