@@ -4,11 +4,11 @@
 
 ioBroker-Adapter `ioBroker.unifi-access` für Ubiquiti UniFi Access (Tür-Reader, Doorbells, UA Ultra). Schwerpunkt: vollständige UA-Ultra-Unterstützung, Basis-Support für andere UniFi-Access-Geräte. Quelle der Wahrheit für die API ist `.doc/api_reference.pdf` im Repo (offizielle Developer-API von Ubiquiti).
 
-Die PDF wurde einmalig in `.doc/api_reference.txt` konvertiert (15 000+ Zeilen). **Für API-Recherchen immer die TXT-Datei per `grep` durchsuchen** — nie die PDF erneut mit `pdftotext` aufrufen. Beispiele:
+Die PDF wurde einmalig in `.doc/api_reference.md` konvertiert (≈10 800 Zeilen Markdown). **Für API-Recherchen immer die Markdown-Datei per `grep` durchsuchen** — nie die PDF erneut konvertieren. Beispiele:
 ```bash
-grep -n "door_thumbnail" .doc/api_reference.txt
-grep -A 30 "access.doorbell.incoming" .doc/api_reference.txt
-grep -n "firmware" .doc/api_reference.txt
+grep -n "door_thumbnail" .doc/api_reference.md
+grep -A 30 "access.doorbell.incoming" .doc/api_reference.md
+grep -n "firmware" .doc/api_reference.md
 ```
 
 ## Architektur
@@ -136,7 +136,7 @@ src/
 
 ### UniFi-API-Endpoints (`unifiHttp.ts`)
 
-Stand der offiziellen Developer-Doku (`.doc/api_reference.pdf`).
+Stand der offiziellen Developer-Doku (`.doc/api_reference.md`).
 
 | Methode | Endpoint | Methode | Hinweis |
 |---|---|---|---|
@@ -287,7 +287,7 @@ Das `@alcalzone/release-script` führt automatisch aus:
 | Ressource | Pfad |
 |---|---|
 | UniFi Access API-Dokumentation (PDF, im Repo) | `.doc/api_reference.pdf` |
-| **Durchsuchbare TXT-Version (für `grep`)** | **`.doc/api_reference.txt`** |
+| **Durchsuchbare Markdown-Version (für `grep`)** | **`.doc/api_reference.md`** |
 | Online-Quelle (zur Verifikation) | https://assets.identity.ui.com/unifi-access/api_reference.pdf |
 
 ## Wichtige Dateien
@@ -309,4 +309,4 @@ Das `@alcalzone/release-script` führt automatisch aus:
 | `src/webserver/snapshotEndpoint.ts` | Thumbnail-Proxy (event-driven) |
 | `io-package.json` | Adapter-Metadaten, `adminUI.config: "json"`, `localLinks` |
 | `.doc/api_reference.pdf` | Quelle der Wahrheit für API-Endpoints und Events |
-| `.doc/api_reference.txt` | Durchsuchbare TXT-Version der API-Doku (via `grep`) |
+| `.doc/api_reference.md` | Durchsuchbare Markdown-Version der API-Doku (via `grep`) |

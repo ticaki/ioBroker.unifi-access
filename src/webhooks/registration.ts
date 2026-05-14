@@ -30,31 +30,24 @@ export interface RegistrationOptions {
 
 /**
  * Ensure a webhook endpoint matching `publicUrl` is registered with the controller.
- * If one already exists for the same URL, it is reused (we cannot read the secret back
- * from list — caller must keep its previously-stored secret). If none matches, register
- * a fresh endpoint and return the new id+secret.
+ * The list endpoint returns the secret for every existing endpoint, so we can always
+ * use the current secret directly — no delete+recreate needed just to recover it.
+ * Only registers a new endpoint when none with a matching URL is found.
  *
- * Returns null if a match was found but the caller has no stored secret (forces a
- * delete+recreate via reregister()).
- *
- * @param options      Controller HTTP client, public URL, event list and logger
- * @param storedSecret Previously persisted webhook secret (or null if unknown)
- * @param storedId     Previously persisted endpoint id (or null if unknown)
+ * @param options Controller HTTP client, public URL, event list and logger
  */
 export async function ensureRegistration(
 	options: RegistrationOptions,
-	storedSecret: string | null,
-	storedId: string | null,
-): Promise<RegistrationResult | null> {
+): Promise<RegistrationResult> {
 	const events = options.events ?? DEFAULT_WEBHOOK_EVENTS;
 	const list = await options.http.listWebhookEndpoints();
 	const existing = list.find(e => e.endpoint === options.publicUrl);
+	if (existing?.id && existing?.secret) {
+		options.logger.debug(`Webhook endpoint already registered: ${existing.id}`);
+		return { id: existing.id, secret: existing.secret, endpoint: existing.endpoint };
+	}
 	if (existing) {
-		if (storedId === existing.id && storedSecret) {
-			options.logger.debug(`Webhook endpoint already registered: ${existing.id}`);
-			return { id: existing.id, secret: storedSecret, endpoint: existing.endpoint };
-		}
-		options.logger.info(`Webhook endpoint exists but secret unknown — recreating to obtain a fresh secret.`);
+		options.logger.info(`Webhook endpoint exists but list did not return a secret — recreating.`);
 		try {
 			await options.http.deleteWebhookEndpoint(existing.id);
 		} catch (err) {

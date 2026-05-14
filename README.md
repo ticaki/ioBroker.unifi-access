@@ -56,6 +56,7 @@ The adapter accesses the UniFi Access controller using the same APIs that are us
 	### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
+- (ticaki) fixed: webhook registration no longer fails with "did not include id/secret" — secret is now read directly from the list response instead of requiring a delete+recreate cycle
 - (ticaki) new: button "Re-register webhook" added to the webhook tab — fixes lingering "signature verification failed" warnings caused by an out-of-sync secret
 - (ticaki) new: full translations for admin UI in es, fr, it, nl, pl, pt, ru, uk and zh-cn (replacing the previous English fallbacks)
 - (ticaki) fixed: snapshot countdown in the www event log now runs exactly 3 seconds (3 → 2 → 1 with one second per step) instead of 4.5 seconds with a dead pause

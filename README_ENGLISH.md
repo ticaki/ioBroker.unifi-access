@@ -183,6 +183,7 @@ WebRTC live video, doorbell accept/reject and on-demand camera snapshots are int
 - **`network` error / `404` during bootstrap** — verify host/port/firewall. UA Ultra and UniFi OS consoles run UniFi Access on `12445` by default. The controller responds to `GET /api/v1/developer/devices`; anything else is not a UniFi Access endpoint.
 - **TLS validation errors** — the controller uses a self-signed certificate. The adapter disables TLS verification by default. Enable `Verify TLS certificate` only after pasting the controller CA into `CA certificate`.
 - **WebSocket keeps reconnecting** — the controller may be terminating idle connections. Increase `WebSocket reconnect delay` to keep the back-off bounded.
+- **"Webhook endpoint created but response did not include id/secret"** — the UniFi Access controller returned an unexpected response. Most common cause: firmware older than **2.2.10** (minimum version required for the webhook API). Check the firmware version in the UniFi Access UI and update if needed.
 - **Webhooks not arriving** — verify the public URL is reachable from the controller (try `curl -X POST <public-url>` from the controller's host) and that any reverse proxy passes both the body and the `Signature` header through unmodified. If the controller logs "endpoint unreachable", set **Listen IP** explicitly instead of relying on the auto-detected first IPv4.
 - **UniFi Protect login failed** — only local Protect accounts work, not the cloud / UI account. Verify the credentials and that the Protect controller is reachable from the ioBroker host.
 

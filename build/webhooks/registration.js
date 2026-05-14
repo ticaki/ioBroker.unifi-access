@@ -36,17 +36,17 @@ const DEFAULT_WEBHOOK_EVENTS = [
   "access.temporary_unlock.end",
   "access.visitor.status.changed"
 ];
-async function ensureRegistration(options, storedSecret, storedId) {
+async function ensureRegistration(options) {
   var _a;
   const events = (_a = options.events) != null ? _a : DEFAULT_WEBHOOK_EVENTS;
   const list = await options.http.listWebhookEndpoints();
   const existing = list.find((e) => e.endpoint === options.publicUrl);
+  if ((existing == null ? void 0 : existing.id) && (existing == null ? void 0 : existing.secret)) {
+    options.logger.debug(`Webhook endpoint already registered: ${existing.id}`);
+    return { id: existing.id, secret: existing.secret, endpoint: existing.endpoint };
+  }
   if (existing) {
-    if (storedId === existing.id && storedSecret) {
-      options.logger.debug(`Webhook endpoint already registered: ${existing.id}`);
-      return { id: existing.id, secret: storedSecret, endpoint: existing.endpoint };
-    }
-    options.logger.info(`Webhook endpoint exists but secret unknown \u2014 recreating to obtain a fresh secret.`);
+    options.logger.info(`Webhook endpoint exists but list did not return a secret \u2014 recreating.`);
     try {
       await options.http.deleteWebhookEndpoint(existing.id);
     } catch (err) {

@@ -248,23 +248,17 @@ class UnifiAccess extends utils.Adapter {
         this.log.warn("Webhook registration skipped: no usable network address found.");
       } else {
         try {
-          const result = await (0, import_registration.ensureRegistration)(
-            {
-              http: this.http,
-              publicUrl,
-              name: `ioBroker.unifi-access (${this.namespace})`,
-              events: import_registration.DEFAULT_WEBHOOK_EVENTS,
-              logger
-            },
-            this.webhookSecret,
-            this.webhookEndpointId
-          );
-          if (result) {
-            this.webhookEndpointId = result.id;
-            this.webhookSecret = result.secret;
-            await this.persistWebhookCredentials(result.id, result.secret);
-            await this.setState("info.webhookRegistered", { val: true, ack: true });
-          }
+          const result = await (0, import_registration.ensureRegistration)({
+            http: this.http,
+            publicUrl,
+            name: `ioBroker.unifi-access (${this.namespace})`,
+            events: import_registration.DEFAULT_WEBHOOK_EVENTS,
+            logger
+          });
+          this.webhookEndpointId = result.id;
+          this.webhookSecret = result.secret;
+          await this.persistWebhookCredentials(result.id, result.secret);
+          await this.setState("info.webhookRegistered", { val: true, ack: true });
         } catch (err) {
           this.log.warn(`Webhook registration failed: ${err.message}`);
           await this.setState("info.webhookRegistered", { val: false, ack: true });
