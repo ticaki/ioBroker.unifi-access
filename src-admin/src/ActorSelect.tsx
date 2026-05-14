@@ -27,19 +27,16 @@ interface ActorSelectState extends ConfigGenericState {
     loading: boolean;
     error: string | null;
     users: UnifiUser[];
-    selectedId: string;
 }
 
 class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
     constructor(props: ConfigGenericProps) {
         super(props);
-        const data = props.data as Record<string, unknown> | undefined;
         Object.assign(this.state, {
             loaded: false,
             loading: false,
             error: null,
             users: [],
-            selectedId: (data?.unlockActorId as string | undefined) ?? '',
         } satisfies Partial<ActorSelectState>);
     }
 
@@ -69,13 +66,12 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
     }
 
     private handleChange(e: SelectChangeEvent<string>): void {
-        const id = e.target.value;
-        this.setState({ selectedId: id });
-        void this.onChange('unlockActorId', id);
+        void this.onChange(this.props.attr, e.target.value);
     }
 
     renderItem(): React.JSX.Element {
-        const { loading, loaded, error, users, selectedId } = this.state;
+        const { loading, loaded, error, users } = this.state;
+        const selectedId = (this.state.value as string) || '';
 
         return (
             <Box sx={{ width: '100%', mt: 1 }}>

@@ -166,21 +166,18 @@
 				},
 				"_actorSelect": {
 					"type": "custom",
+					"attr": "unlockActorId",
 					"name": "ConfigCustomUnifiAccessSet/Components/ActorSelect",
 					"url": "custom/customComponents.js",
 					"i18n": true,
 					"bundlerType": "module",
+					"default": "",
 					"newLine": true,
 					"xs": 12,
 					"sm": 12,
 					"md": 10,
 					"lg": 8,
 					"xl": 6
-				},
-				"unlockActorId": {
-					"type": "text",
-					"hidden": true,
-					"default": ""
 				}
 			}
 		},
