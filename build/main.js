@@ -723,6 +723,7 @@ class UnifiAccess extends utils.Adapter {
     }
   }
   async handleDoorUnlock(safeDoorId) {
+    var _a;
     if (!this.http) {
       return;
     }
@@ -732,7 +733,8 @@ class UnifiAccess extends utils.Adapter {
     }
     const cfg = this.config;
     const minutes = Math.max(0, Math.floor(cfg.defaultUnlockDuration || 0));
-    const actor = cfg.unlockActorId && cfg.unlockActorName ? { id: cfg.unlockActorId, name: cfg.unlockActorName } : void 0;
+    const actorId = cfg.unlockActorId || "";
+    const actor = actorId ? { id: actorId, name: (_a = this.userNameCache.get(actorId)) != null ? _a : actorId } : void 0;
     try {
       if (minutes > 0) {
         await this.http.setDoorLockRule(safeDoorId, { type: "custom", interval: minutes });
@@ -752,6 +754,7 @@ class UnifiAccess extends utils.Adapter {
     }
   }
   async handleDoorUnlockDuration(safeDoorId, minutes) {
+    var _a;
     if (!this.http) {
       return;
     }
@@ -759,7 +762,8 @@ class UnifiAccess extends utils.Adapter {
       this.log.debug(`[unlock_duration] ignoring unknown door id: ${safeDoorId}`);
       return;
     }
-    const actor = this.config.unlockActorId && this.config.unlockActorName ? { id: this.config.unlockActorId, name: this.config.unlockActorName } : void 0;
+    const actorId = this.config.unlockActorId || "";
+    const actor = actorId ? { id: actorId, name: (_a = this.userNameCache.get(actorId)) != null ? _a : actorId } : void 0;
     try {
       if (minutes > 0) {
         await this.http.setDoorLockRule(safeDoorId, { type: "custom", interval: minutes });

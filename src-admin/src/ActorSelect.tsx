@@ -70,19 +70,8 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
 
     private handleChange(e: SelectChangeEvent<string>): void {
         const id = e.target.value;
-        if (!id) {
-            this.setState({ selectedId: '' });
-            this.onChange('unlockActorId', '');
-            this.onChange('unlockActorName', '');
-            return;
-        }
-        const user = this.state.users.find(u => u.id === id);
-        if (!user) {
-            return;
-        }
-        this.setState({ selectedId: user.id });
-        this.onChange('unlockActorId', user.id);
-        this.onChange('unlockActorName', user.name);
+        this.setState({ selectedId: id });
+        void this.onChange('unlockActorId', id);
     }
 
     renderItem(): React.JSX.Element {

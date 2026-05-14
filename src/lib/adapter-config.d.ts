@@ -43,7 +43,6 @@ declare global {
 			protectVerifyTLS: boolean;
 
 			unlockActorId: string;
-			unlockActorName: string;
 		}
 	}
 }

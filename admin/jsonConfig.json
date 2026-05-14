@@ -181,11 +181,6 @@
 					"type": "text",
 					"hidden": true,
 					"default": ""
-				},
-				"unlockActorName": {
-					"type": "text",
-					"hidden": true,
-					"default": ""
 				}
 			}
 		},
