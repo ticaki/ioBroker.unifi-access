@@ -732,12 +732,13 @@ class UnifiAccess extends utils.Adapter {
     }
     const cfg = this.config;
     const minutes = Math.max(0, Math.floor(cfg.defaultUnlockDuration || 0));
+    const actor = cfg.unlockActorId && cfg.unlockActorName ? { id: cfg.unlockActorId, name: cfg.unlockActorName } : void 0;
     try {
       if (minutes > 0) {
         await this.http.setDoorLockRule(safeDoorId, { type: "custom", interval: minutes });
         this.log.info(`Door ${safeDoorId} unlocked for ${minutes} min via lock_rule.`);
       } else {
-        await this.http.unlockDoor(safeDoorId);
+        await this.http.unlockDoor(safeDoorId, actor);
         this.log.info(`Door ${safeDoorId} unlocked (pulse).`);
       }
       await this.setState(`doors.${safeDoorId}.unlock`, { val: true, ack: true });
@@ -758,12 +759,13 @@ class UnifiAccess extends utils.Adapter {
       this.log.debug(`[unlock_duration] ignoring unknown door id: ${safeDoorId}`);
       return;
     }
+    const actor = this.config.unlockActorId && this.config.unlockActorName ? { id: this.config.unlockActorId, name: this.config.unlockActorName } : void 0;
     try {
       if (minutes > 0) {
         await this.http.setDoorLockRule(safeDoorId, { type: "custom", interval: minutes });
         this.log.info(`Door ${safeDoorId} unlocked for ${minutes} min via lock_rule.`);
       } else {
-        await this.http.unlockDoor(safeDoorId);
+        await this.http.unlockDoor(safeDoorId, actor);
         this.log.info(`Door ${safeDoorId} unlocked (pulse) via unlock_duration.`);
       }
       await this.setState(`doors.${safeDoorId}.unlock_duration`, { val: minutes, ack: true });
@@ -846,6 +848,28 @@ class UnifiAccess extends utils.Adapter {
     }
     if (msg.command === "reregisterWebhook") {
       void this.handleReregisterWebhook(msg);
+      return;
+    }
+    if (msg.command === "listUsers") {
+      if (!this.http) {
+        this.sendTo(msg.from, msg.command, { users: [] }, msg.callback);
+        return;
+      }
+      void this.http.listUsers().then((users) => {
+        this.sendTo(
+          msg.from,
+          msg.command,
+          {
+            users: users.map((u) => ({
+              id: u.id,
+              name: [u.first_name, u.last_name].filter(Boolean).join(" ") || u.user_email || u.id
+            }))
+          },
+          msg.callback
+        );
+      }).catch(() => {
+        this.sendTo(msg.from, msg.command, { users: [] }, msg.callback);
+      });
       return;
     }
     if (msg.command === "getNetworkInterfaces") {

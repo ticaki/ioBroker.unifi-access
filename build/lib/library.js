@@ -126,23 +126,31 @@ class Library {
         role: "level",
         unit: "min",
         min: 0,
+        def: 0,
         read: true,
         write: true
       },
       native: {}
     });
+    if (await this.adapter.getStateAsync(`${channelId}.unlock_duration`) === null) {
+      await this.adapter.setState(`${channelId}.unlock_duration`, { val: 0, ack: true });
+    }
     await this.adapter.extendObject(`${channelId}.lock_rule`, {
       type: "state",
       common: {
         name: "Lock rule",
         type: "number",
         role: "value",
+        def: 0,
         read: true,
         write: true,
         states: { 0: "default", 1: "keep_unlock", 2: "keep_lock", 3: "lock_now" }
       },
       native: {}
     });
+    if (await this.adapter.getStateAsync(`${channelId}.lock_rule`) === null) {
+      await this.adapter.setState(`${channelId}.lock_rule`, { val: 0, ack: true });
+    }
     await this.adapter.setState(`${channelId}.name`, { val: (_c = door.name) != null ? _c : door.id, ack: true });
     await this.adapter.setState(`${channelId}.fullName`, { val: (_d = door.full_name) != null ? _d : "", ack: true });
     const lockedFlag = door.door_lock_relay_status === "lock" ? true : door.door_lock_relay_status === "unlock" ? false : null;

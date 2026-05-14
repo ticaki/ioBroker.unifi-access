@@ -27,5 +27,12 @@
     "devices_cap_event_thumbnail": "Event-Thumbnail",
     "devices_cap_doorbell": "Türklingel",
     "devices_cap_door_unlock": "Türöffner",
-    "devices_cap_live_events": "Live-Events"
+    "devices_cap_live_events": "Live-Events",
+
+    "actor_select_label": "Türöffner-Akteur (in Logs angezeigt)",
+    "actor_select_none": "Keiner (API-Token-Name verwenden)",
+    "actor_select_loading": "Benutzer werden geladen…",
+    "actor_select_error": "Benutzer konnten nicht geladen werden. Läuft der Adapter?",
+    "actor_select_refresh": "Benutzerliste aktualisieren",
+    "actor_select_help": "Der gewählte Benutzer erscheint in UniFi-Access-Protokollen und Webhooks, wenn ioBroker eine Tür öffnet."
 }

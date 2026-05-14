@@ -27,5 +27,12 @@
     "devices_cap_event_thumbnail": "event thumbnail",
     "devices_cap_doorbell": "doorbell",
     "devices_cap_door_unlock": "door-unlock",
-    "devices_cap_live_events": "live events"
+    "devices_cap_live_events": "live events",
+
+    "actor_select_label": "Unlock actor (shown in logs)",
+    "actor_select_none": "None (use API token name)",
+    "actor_select_loading": "Loading users…",
+    "actor_select_error": "Could not load users. Is the adapter running?",
+    "actor_select_refresh": "Refresh user list",
+    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
 }

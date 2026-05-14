@@ -6,7 +6,6 @@
     "auth_status_unauthorized": "Контролер відхилив токен (неавторизовано)",
     "auth_status_network": "Контролер недоступний (мережева помилка)",
     "auth_status_disconnected": "Не підключено",
-
     "auth_test_button": "Перевірити підключення",
     "auth_test_tooltip": "Перевірити контролер із введеними вище значеннями (без збереження).",
     "auth_test_running": "Перевірка контролера…",
@@ -16,7 +15,6 @@
     "auth_test_error_unauthorized": "Токен відхилено (неавторизовано).",
     "auth_test_error_network": "Контролер недоступний (мережева помилка).",
     "auth_test_error_unknown": "Тест підключення не пройдено.",
-
     "devices_title": "Виявлені пристрої UniFi Access",
     "devices_refresh": "Оновити",
     "devices_loading": "Завантаження пристроїв…",
@@ -27,5 +25,11 @@
     "devices_cap_event_thumbnail": "мініатюра події",
     "devices_cap_doorbell": "дзвінок",
     "devices_cap_door_unlock": "розблокування дверей",
-    "devices_cap_live_events": "live-події"
+    "devices_cap_live_events": "live-події",
+    "actor_select_label": "Unlock actor (shown in logs)",
+    "actor_select_none": "None (use API token name)",
+    "actor_select_loading": "Loading users…",
+    "actor_select_error": "Could not load users. Is the adapter running?",
+    "actor_select_refresh": "Refresh user list",
+    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
 }

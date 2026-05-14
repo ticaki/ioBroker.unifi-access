@@ -6,7 +6,6 @@
     "auth_status_unauthorized": "El controlador rechazó el token (no autorizado)",
     "auth_status_network": "No se puede contactar con el controlador (error de red)",
     "auth_status_disconnected": "No conectado",
-
     "auth_test_button": "Probar conexión",
     "auth_test_tooltip": "Prueba el controlador con los valores introducidos arriba (no guarda).",
     "auth_test_running": "Probando controlador…",
@@ -16,7 +15,6 @@
     "auth_test_error_unauthorized": "Token rechazado (no autorizado).",
     "auth_test_error_network": "No se puede contactar con el controlador (error de red).",
     "auth_test_error_unknown": "Error en la prueba de conexión.",
-
     "devices_title": "Dispositivos UniFi Access detectados",
     "devices_refresh": "Actualizar",
     "devices_loading": "Cargando dispositivos…",
@@ -27,5 +25,11 @@
     "devices_cap_event_thumbnail": "miniatura de evento",
     "devices_cap_doorbell": "timbre",
     "devices_cap_door_unlock": "apertura de puerta",
-    "devices_cap_live_events": "eventos en vivo"
+    "devices_cap_live_events": "eventos en vivo",
+    "actor_select_label": "Unlock actor (shown in logs)",
+    "actor_select_none": "None (use API token name)",
+    "actor_select_loading": "Loading users…",
+    "actor_select_error": "Could not load users. Is the adapter running?",
+    "actor_select_refresh": "Refresh user list",
+    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
 }

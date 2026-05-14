@@ -88,12 +88,19 @@ export class UnifiHttp {
 	}
 
 	/**
-	 * Pulse-unlock a door. Endpoint accepts only actor_id/actor_name/extra; no duration.
+	 * Pulse-unlock a door. Optionally pass actor to customize what appears in UniFi Access logs.
+	 * Both actor.id and actor.name must be provided together (API requirement).
 	 *
 	 * @param doorId UniFi door identifier
+	 * @param actor  Optional actor identity shown in system logs and webhooks
 	 */
-	async unlockDoor(doorId: string): Promise<void> {
-		await this.client.put(`/api/v1/developer/doors/${encodeURIComponent(doorId)}/unlock`, {});
+	async unlockDoor(doorId: string, actor?: { id: string; name: string }): Promise<void> {
+		const body: Record<string, string> = {};
+		if (actor?.id && actor?.name) {
+			body.actor_id = actor.id;
+			body.actor_name = actor.name;
+		}
+		await this.client.put(`/api/v1/developer/doors/${encodeURIComponent(doorId)}/unlock`, body);
 	}
 
 	/**

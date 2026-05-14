@@ -6,7 +6,6 @@
     "auth_status_unauthorized": "Контроллер отклонил токен (не авторизован)",
     "auth_status_network": "Контроллер недоступен (сетевая ошибка)",
     "auth_status_disconnected": "Не подключено",
-
     "auth_test_button": "Проверить подключение",
     "auth_test_tooltip": "Проверить контроллер с введёнными выше значениями (без сохранения).",
     "auth_test_running": "Проверка контроллера…",
@@ -16,7 +15,6 @@
     "auth_test_error_unauthorized": "Токен отклонён (не авторизован).",
     "auth_test_error_network": "Контроллер недоступен (сетевая ошибка).",
     "auth_test_error_unknown": "Тест подключения не пройден.",
-
     "devices_title": "Обнаруженные устройства UniFi Access",
     "devices_refresh": "Обновить",
     "devices_loading": "Загрузка устройств…",
@@ -27,5 +25,11 @@
     "devices_cap_event_thumbnail": "миниатюра события",
     "devices_cap_doorbell": "звонок",
     "devices_cap_door_unlock": "разблокировка двери",
-    "devices_cap_live_events": "live-события"
+    "devices_cap_live_events": "live-события",
+    "actor_select_label": "Unlock actor (shown in logs)",
+    "actor_select_none": "None (use API token name)",
+    "actor_select_loading": "Loading users…",
+    "actor_select_error": "Could not load users. Is the adapter running?",
+    "actor_select_refresh": "Refresh user list",
+    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
 }

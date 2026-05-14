@@ -41,6 +41,9 @@ declare global {
 			protectUsername: string;
 			protectPassword: string;
 			protectVerifyTLS: boolean;
+
+			unlockActorId: string;
+			unlockActorName: string;
 		}
 	}
 }
