@@ -138,6 +138,8 @@ class UnifiAccess extends utils.Adapter {
       this.log.debug("[protect] integration disabled");
     }
     this.subscribeStates("doors.*.unlock");
+    this.subscribeStates("doors.*.unlock_duration");
+    this.subscribeStates("doors.*.lock_rule");
     this.subscribeStates("doors.emergency.*");
     this.subscribeStates("admin.uiSettings");
     await this.bootstrapAndConnect();
@@ -664,8 +666,23 @@ class UnifiAccess extends utils.Adapter {
     }
     const localId = id.startsWith(`${this.namespace}.`) ? id.slice(this.namespace.length + 1) : id;
     if (localId.startsWith("doors.") && localId.endsWith(".unlock")) {
+      if (state.val !== true) {
+        return;
+      }
       const doorId = localId.slice("doors.".length, -".unlock".length);
       void this.handleDoorUnlock(doorId);
+      return;
+    }
+    if (localId.startsWith("doors.") && localId.endsWith(".unlock_duration")) {
+      const minutes = typeof state.val === "number" ? Math.max(0, Math.floor(state.val)) : 0;
+      const doorId = localId.slice("doors.".length, -".unlock_duration".length);
+      void this.handleDoorUnlockDuration(doorId, minutes);
+      return;
+    }
+    if (localId.startsWith("doors.") && localId.endsWith(".lock_rule")) {
+      const ruleIndex = typeof state.val === "number" ? state.val : 0;
+      const doorId = localId.slice("doors.".length, -".lock_rule".length);
+      void this.handleDoorLockRule(doorId, ruleIndex);
       return;
     }
     if (localId === "doors.emergency.lockdown") {
@@ -731,6 +748,64 @@ class UnifiAccess extends utils.Adapter {
       }, resetMs);
     } catch (err) {
       this.log.warn(`Unlock door ${safeDoorId} failed: ${err.message}`);
+    }
+  }
+  async handleDoorUnlockDuration(safeDoorId, minutes) {
+    if (!this.http) {
+      return;
+    }
+    if (!this.doorNameCache.has(safeDoorId)) {
+      this.log.debug(`[unlock_duration] ignoring unknown door id: ${safeDoorId}`);
+      return;
+    }
+    try {
+      if (minutes > 0) {
+        await this.http.setDoorLockRule(safeDoorId, { type: "custom", interval: minutes });
+        this.log.info(`Door ${safeDoorId} unlocked for ${minutes} min via lock_rule.`);
+      } else {
+        await this.http.unlockDoor(safeDoorId);
+        this.log.info(`Door ${safeDoorId} unlocked (pulse) via unlock_duration.`);
+      }
+      await this.setState(`doors.${safeDoorId}.unlock_duration`, { val: minutes, ack: true });
+      await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
+      const resetMs = minutes > 0 ? minutes * 60 * 1e3 : 5e3;
+      this.setTimeout(() => {
+        void this.setState(`doors.${safeDoorId}.locked`, { val: true, ack: true });
+      }, resetMs);
+    } catch (err) {
+      this.log.warn(`Unlock door ${safeDoorId} (duration) failed: ${err.message}`);
+    }
+  }
+  async handleDoorLockRule(safeDoorId, ruleIndex) {
+    if (!this.http) {
+      return;
+    }
+    if (!this.doorNameCache.has(safeDoorId)) {
+      this.log.debug(`[lock_rule] ignoring unknown door id: ${safeDoorId}`);
+      return;
+    }
+    const ruleMap = {
+      0: "reset",
+      1: "keep_unlock",
+      2: "keep_lock",
+      3: "lock_now"
+    };
+    const type = ruleMap[ruleIndex];
+    if (!type) {
+      this.log.warn(`[lock_rule] unknown rule index ${ruleIndex} for door ${safeDoorId}`);
+      return;
+    }
+    try {
+      await this.http.setDoorLockRule(safeDoorId, { type });
+      this.log.info(`Door ${safeDoorId} lock_rule set to ${type}.`);
+      await this.setState(`doors.${safeDoorId}.lock_rule`, { val: ruleIndex, ack: true });
+      if (type === "keep_unlock") {
+        await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
+      } else if (type === "keep_lock" || type === "lock_now" || type === "reset") {
+        await this.setState(`doors.${safeDoorId}.locked`, { val: true, ack: true });
+      }
+    } catch (err) {
+      this.log.warn(`Set lock_rule for door ${safeDoorId} failed: ${err.message}`);
     }
   }
   onMessage(msg) {

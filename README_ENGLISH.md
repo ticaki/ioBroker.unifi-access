@@ -51,9 +51,31 @@ For every door discovered, the adapter creates a channel under `unifi-access.<i>
 | `locked` | boolean | read | `true` = locked, `false` = unlocked, `null` = unknown |
 | `position` | string | read | `open` / `close` / `unknown` (sensor-dependent) |
 | `isBindHub` | boolean | read | Door is bound to a hub (required for remote unlock) |
-| `unlock` | boolean | write | Setting it to `true` unlocks the door |
+| `unlock` | boolean | write | Pulse or timed unlock (depends on `defaultUnlockDuration` in configuration) |
+| `unlock_duration` | number | write | Unlock for exactly N **minutes**; `0` = pulse. Overrides the global setting for this one action. |
+| `lock_rule` | number | write | Set a lock rule (0 = default, 1 = keep_unlock, 2 = keep_lock, 3 = lock_now) |
 
-`defaultUnlockDuration = 0` sends a momentary unlock via `PUT /doors/:id/unlock`. Any value above 0 is rounded up to whole minutes and applied via `PUT /doors/:id/lock_rule {type:"custom", interval}`.
+#### `lock_rule` values
+
+| Value | Label | What it does |
+|:---:|---|---|
+| `0` | `default` | Return to normal schedule / state (API: `reset`) |
+| `1` | `keep_unlock` | Keep door open indefinitely (until manually reset) |
+| `2` | `keep_lock` | Keep door locked (overrides all schedules) |
+| `3` | `lock_now` | Lock immediately |
+
+### Setting the unlock duration
+
+The **Default unlock duration** setting (tab *Devices & Doors*, field `defaultUnlockDuration`) controls the behaviour of the `unlock` state for all doors:
+
+| Value | Behaviour |
+|---|---|
+| **`0`** (default) | Pulse — the controller opens briefly and re-locks itself |
+| **`1`–`N`** | Door stays open for exactly **N minutes** |
+
+To set a per-action duration, write directly to `unlock_duration` — this overrides the configuration value for that single call.
+
+**Note:** The API accepts whole minutes only. The door re-locks automatically when the timer expires; early re-locking is done via `lock_rule = 3` (`lock_now`).
 
 ### Emergency states
 

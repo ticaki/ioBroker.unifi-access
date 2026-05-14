@@ -51,9 +51,31 @@ Für jede Tür aus dem Bootstrap legt der Adapter unter `unifi-access.<i>.doors.
 | `locked` | boolean | read | `true` = verriegelt, `false` = entriegelt, `null` = unbekannt |
 | `position` | string | read | `open` / `close` / `unknown` (sensorabhängig) |
 | `isBindHub` | boolean | read | Tür ist an einen Hub gebunden (Voraussetzung für Remote-Unlock) |
-| `unlock` | boolean | write | Setzen auf `true` öffnet die Tür |
+| `unlock` | boolean | write | Puls-Unlock oder timed Unlock (abhängig von `defaultUnlockDuration` in der Konfiguration) |
+| `unlock_duration` | number | write | Unlock für genau N **Minuten**; `0` = Puls. Überschreibt die globale Einstellung für diese eine Aktion. |
+| `lock_rule` | number | write | Sperr-Regel setzen (0 = default, 1 = keep_unlock, 2 = keep_lock, 3 = lock_now) |
 
-`defaultUnlockDuration = 0` löst einen kurzen Entriegelungspuls über `PUT /doors/:id/unlock` aus. Werte > 0 werden auf volle Minuten aufgerundet und über `PUT /doors/:id/lock_rule {type:"custom", interval}` angewendet.
+#### `lock_rule`-Werte
+
+| Wert | Anzeige | Was passiert |
+|:---:|---|---|
+| `0` | `default` | Zurück zum normalen Zeitplan / Zustand (API: `reset`) |
+| `1` | `keep_unlock` | Tür dauerhaft geöffnet halten (bis manuell zurückgesetzt) |
+| `2` | `keep_lock` | Tür dauerhaft verriegelt (überschreibt alle Zeitpläne) |
+| `3` | `lock_now` | Sofort verriegeln |
+
+### Öffnungsdauer einstellen
+
+Die Einstellung **Standard-Öffnungsdauer** (Tab *Geräte & Türen*, Feld `defaultUnlockDuration`) steuert das Verhalten des `unlock`-States für alle Türen:
+
+| Wert | Verhalten |
+|---|---|
+| **`0`** (Standard) | Puls — Controller öffnet kurz und verriegelt danach sofort selbst |
+| **`1`–`N`** | Tür bleibt genau **N Minuten** offen |
+
+Für eine individuelle Dauer pro Aktion den State `unlock_duration` direkt beschreiben — dieser überschreibt den Konfigurationswert für genau diesen einen Aufruf.
+
+**Hinweis:** Die API akzeptiert nur ganze Minuten. Die Tür verriegelt nach Ablauf der Zeit automatisch wieder; vorzeitiges Verriegeln geht über `lock_rule = 3` (`lock_now`).
 
 ### Notfall-States
 

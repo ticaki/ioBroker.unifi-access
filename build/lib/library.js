@@ -118,6 +118,31 @@ class Library {
       "Door is bound to a hub (required for remote unlock)"
     );
     await this.ensureControlState(`${channelId}.unlock`, "Trigger door unlock", "boolean");
+    await this.adapter.extendObject(`${channelId}.unlock_duration`, {
+      type: "state",
+      common: {
+        name: "Unlock for N minutes (0 = pulse)",
+        type: "number",
+        role: "level",
+        unit: "min",
+        min: 0,
+        read: true,
+        write: true
+      },
+      native: {}
+    });
+    await this.adapter.extendObject(`${channelId}.lock_rule`, {
+      type: "state",
+      common: {
+        name: "Lock rule",
+        type: "number",
+        role: "value",
+        read: true,
+        write: true,
+        states: { 0: "default", 1: "keep_unlock", 2: "keep_lock", 3: "lock_now" }
+      },
+      native: {}
+    });
     await this.adapter.setState(`${channelId}.name`, { val: (_c = door.name) != null ? _c : door.id, ack: true });
     await this.adapter.setState(`${channelId}.fullName`, { val: (_d = door.full_name) != null ? _d : "", ack: true });
     const lockedFlag = door.door_lock_relay_status === "lock" ? true : door.door_lock_relay_status === "unlock" ? false : null;
