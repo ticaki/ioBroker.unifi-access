@@ -64,6 +64,16 @@ async function ensureRegistration(options) {
   const events = (_a = options.events) != null ? _a : DEFAULT_WEBHOOK_EVENTS;
   const list = await options.http.listWebhookEndpoints();
   const existing = list.find((e) => e.endpoint === options.publicUrl);
+  for (const e of list) {
+    if (e.endpoint !== options.publicUrl && e.name === options.name) {
+      options.logger.info(`Removing stale webhook endpoint ${e.id} with outdated URL ${e.endpoint}.`);
+      try {
+        await options.http.deleteWebhookEndpoint(e.id);
+      } catch (err) {
+        options.logger.warn(`Could not remove stale endpoint ${e.id}: ${err.message}`);
+      }
+    }
+  }
   if ((existing == null ? void 0 : existing.id) && (existing == null ? void 0 : existing.secret)) {
     options.logger.debug(`Webhook endpoint already registered: ${existing.id}`);
     return { id: existing.id, secret: existing.secret, endpoint: existing.endpoint };

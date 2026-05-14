@@ -113,8 +113,24 @@ class UnifiAccess extends utils.Adapter {
         await this.protectHttp.login();
         this.log.info("UniFi Protect API client initialized");
       } catch (err) {
-        this.log.warn(`Protect login failed: ${err.message}`);
-        this.protectHttp = null;
+        const msg = err.message;
+        this.log.warn(`Protect login failed: ${msg}`);
+        if (msg.includes("429")) {
+          this.log.info("Protect rate-limited (429) \u2014 retrying in 30 s.");
+          setTimeout(() => {
+            var _a2;
+            void ((_a2 = this.protectHttp) == null ? void 0 : _a2.login().then(() => {
+              this.log.info("Protect login retry succeeded.");
+              void this.setState("info.protectConnected", { val: true, ack: true });
+            }).catch((e) => {
+              this.log.warn(`Protect login retry failed: ${e.message}`);
+              this.protectHttp = null;
+              void this.setState("info.protectConnected", { val: false, ack: true });
+            }));
+          }, 3e4);
+        } else {
+          this.protectHttp = null;
+        }
       }
     } else if (cfg.enableProtect === true) {
       this.log.warn("[protect] integration enabled but no username configured \u2014 skipping");
@@ -257,7 +273,11 @@ class UnifiAccess extends utils.Adapter {
           });
           this.webhookEndpointId = result.id;
           this.webhookSecret = result.secret;
-          await this.persistWebhookCredentials(result.id, result.secret);
+          const idChanged = result.id !== (cfg.webhookEndpointId || null);
+          const secretChanged = result.secret !== (cfg.webhookSecret || null);
+          if (idChanged || secretChanged) {
+            await this.persistWebhookCredentials(result.id, result.secret);
+          }
           await this.setState("info.webhookRegistered", { val: true, ack: true });
         } catch (err) {
           this.log.warn(`Webhook registration failed: ${err.message}`);

@@ -71,6 +71,20 @@ export async function ensureRegistration(options: RegistrationOptions): Promise<
 	const events = options.events ?? DEFAULT_WEBHOOK_EVENTS;
 	const list = await options.http.listWebhookEndpoints();
 	const existing = list.find(e => e.endpoint === options.publicUrl);
+
+	// Clean up stale endpoints registered under the same name but a different URL
+	// (e.g. from a previous network config or Docker IP change).
+	for (const e of list) {
+		if (e.endpoint !== options.publicUrl && e.name === options.name) {
+			options.logger.info(`Removing stale webhook endpoint ${e.id} with outdated URL ${e.endpoint}.`);
+			try {
+				await options.http.deleteWebhookEndpoint(e.id);
+			} catch (err) {
+				options.logger.warn(`Could not remove stale endpoint ${e.id}: ${(err as Error).message}`);
+			}
+		}
+	}
+
 	if (existing?.id && existing?.secret) {
 		options.logger.debug(`Webhook endpoint already registered: ${existing.id}`);
 		return { id: existing.id, secret: existing.secret, endpoint: existing.endpoint };
