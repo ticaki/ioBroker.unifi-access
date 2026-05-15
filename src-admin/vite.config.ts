@@ -6,31 +6,31 @@ import { moduleFederationShared } from '@iobroker/adapter-react-v5/modulefederat
 import { readFileSync } from 'node:fs';
 
 const config = {
-    plugins: [
-        federation({
-            manifest: true,
-            name: 'ConfigCustomUnifiAccessSet',
-            filename: 'customComponents.js',
-            exposes: {
-                './Components': './src/Components.tsx',
-            },
-            remotes: {},
-            shared: moduleFederationShared(JSON.parse(readFileSync('./package.json').toString())),
-            dts: false,
-        }),
-        react(),
-        vitetsConfigPaths(),
-        commonjs(),
-    ],
-    server: {
-        port: 3000,
-    },
-    base: './',
-    build: {
-        target: 'chrome89',
-        outDir: './build',
-        chunkSizeWarningLimit: 5000,
-    },
+	plugins: [
+		federation({
+			manifest: true,
+			name: 'ConfigCustomUnifiAccessSet',
+			filename: 'customComponents.js',
+			exposes: {
+				'./Components': './src/Components.tsx',
+			},
+			remotes: {},
+			shared: moduleFederationShared(JSON.parse(readFileSync('./package.json').toString())),
+			dts: false,
+		}),
+		react(),
+		vitetsConfigPaths(),
+		commonjs(),
+	],
+	server: {
+		port: 3000,
+	},
+	base: './',
+	build: {
+		target: 'chrome89',
+		outDir: './build',
+		chunkSizeWarningLimit: 5000,
+	},
 };
 
 export default config;

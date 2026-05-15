@@ -31,6 +31,11 @@ export interface RegistrationOptions {
 /**
  * Delete all webhook endpoints on the controller that match either `id` or `url`.
  * Errors are swallowed and logged as warnings so the caller can proceed to re-create.
+ *
+ * @param http
+ * @param url
+ * @param extraId
+ * @param logger
  */
 async function deleteAllMatching(
 	http: UnifiHttp,
@@ -66,6 +71,8 @@ async function deleteAllMatching(
  * The list endpoint returns the secret for every existing endpoint, so the secret is
  * read directly from there — no delete+recreate needed just to recover it.
  * Only registers a new endpoint when none with a matching URL (and secret) is found.
+ *
+ * @param options
  */
 export async function ensureRegistration(options: RegistrationOptions): Promise<RegistrationResult> {
 	const events = options.events ?? DEFAULT_WEBHOOK_EVENTS;
@@ -137,7 +144,9 @@ export async function reregister(options: RegistrationOptions, storedId: string 
 			events: [...(options.events ?? DEFAULT_WEBHOOK_EVENTS)],
 		});
 		if (!retry.endpoint?.id || !retry.endpoint?.secret) {
-			throw new Error('Webhook endpoint re-registration failed: response did not include id/secret after duplicate cleanup.');
+			throw new Error(
+				'Webhook endpoint re-registration failed: response did not include id/secret after duplicate cleanup.',
+			);
 		}
 		return { id: retry.endpoint.id, secret: retry.endpoint.secret, endpoint: retry.endpoint.endpoint };
 	}

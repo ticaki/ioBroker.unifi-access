@@ -143,14 +143,17 @@ class UnifiAccess extends utils.Adapter {
 					// Rate-limited — retry once after 30 s without blocking the adapter start.
 					this.log.info('Protect rate-limited (429) — retrying in 30 s.');
 					setTimeout(() => {
-						void this.protectHttp?.login().then(() => {
-							this.log.info('Protect login retry succeeded.');
-							void this.setState('info.protectConnected', { val: true, ack: true });
-						}).catch(e => {
-							this.log.warn(`Protect login retry failed: ${(e as Error).message}`);
-							this.protectHttp = null;
-							void this.setState('info.protectConnected', { val: false, ack: true });
-						});
+						void this.protectHttp
+							?.login()
+							.then(() => {
+								this.log.info('Protect login retry succeeded.');
+								void this.setState('info.protectConnected', { val: true, ack: true });
+							})
+							.catch(e => {
+								this.log.warn(`Protect login retry failed: ${(e as Error).message}`);
+								this.protectHttp = null;
+								void this.setState('info.protectConnected', { val: false, ack: true });
+							});
 					}, 30_000);
 				} else {
 					this.protectHttp = null;
@@ -844,9 +847,7 @@ class UnifiAccess extends utils.Adapter {
 		const cfg = this.config;
 		const minutes = Math.max(0, Math.floor(cfg.defaultUnlockDuration || 0));
 		const actorId = cfg.unlockActorId || '';
-		const actor = actorId
-			? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId }
-			: undefined;
+		const actor = actorId ? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId } : undefined;
 		try {
 			if (minutes > 0) {
 				await this.http.setDoorLockRule(safeDoorId, { type: 'custom', interval: minutes });
@@ -875,9 +876,7 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		const actorId = this.config.unlockActorId || '';
-		const actor = actorId
-			? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId }
-			: undefined;
+		const actor = actorId ? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId } : undefined;
 		try {
 			if (minutes > 0) {
 				await this.http.setDoorLockRule(safeDoorId, { type: 'custom', interval: minutes });
@@ -929,7 +928,6 @@ class UnifiAccess extends utils.Adapter {
 			this.log.warn(`Set lock_rule for door ${safeDoorId} failed: ${(err as Error).message}`);
 		}
 	}
-
 
 	private onMessage(msg: ioBroker.Message): void {
 		this.log.debug(`Message: ${JSON.stringify({ command: msg.command })}`);

@@ -133,7 +133,9 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 									fullWidth
 									variant="outlined"
 								/>
-								<Tooltip title={isCopied ? I18n.t('generic_webhook_copied') : I18n.t('generic_webhook_copy')}>
+								<Tooltip
+									title={isCopied ? I18n.t('generic_webhook_copied') : I18n.t('generic_webhook_copy')}
+								>
 									<IconButton
 										onClick={() => this.copyToClipboard(url)}
 										color={isCopied ? 'success' : 'default'}

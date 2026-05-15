@@ -42,7 +42,9 @@ export class UnifiHttp {
 			const log = options.debugLog;
 			this.client.interceptors.response.use(r => {
 				if (r.config.url?.includes('webhooks')) {
-					log(`webhook response [${r.config.method?.toUpperCase()} ${r.config.url}] status=${r.status} body=${JSON.stringify(r.data)}`);
+					log(
+						`webhook response [${r.config.method?.toUpperCase()} ${r.config.url}] status=${r.status} body=${JSON.stringify(r.data)}`,
+					);
 				}
 				return r;
 			});
@@ -93,6 +95,8 @@ export class UnifiHttp {
 	 *
 	 * @param doorId UniFi door identifier
 	 * @param actor  Optional actor identity shown in system logs and webhooks
+	 * @param actor.id
+	 * @param actor.name
 	 */
 	async unlockDoor(doorId: string, actor?: { id: string; name: string }): Promise<void> {
 		const body: Record<string, string> = {};

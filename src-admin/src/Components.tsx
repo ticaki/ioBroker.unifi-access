@@ -4,8 +4,8 @@ import GenericWebhookUrl from './GenericWebhookUrl';
 import ActorSelect from './ActorSelect';
 
 export default {
-    AuthSetup,
-    DeviceManagement,
-    GenericWebhookUrl,
-    ActorSelect,
+	AuthSetup,
+	DeviceManagement,
+	GenericWebhookUrl,
+	ActorSelect,
 };
