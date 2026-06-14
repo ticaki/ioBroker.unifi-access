@@ -40,7 +40,7 @@
 		"@iobroker/testing": "^5.2.2",
 		"@tsconfig/node22": "^22.0.5",
 		"@types/iobroker": "npm:@iobroker/types@^7.1.1",
-		"@types/node": "^22.19.17",
+		"@types/node": "^22.19.20",
 		"@types/ws": "^8.5.13",
 		"eslint-plugin-unicorn": "^60.0.0",
 		"rimraf": "^6.1.3",
