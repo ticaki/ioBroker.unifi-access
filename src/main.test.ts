@@ -276,6 +276,197 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		});
 	});
 
+	describe('control states: only valid values trigger a door action (R-04, R-24)', () => {
+		const doorWrites = (): string[] =>
+			mock.requests
+				.filter(r => r.method !== 'GET' && r.path.startsWith('/doors/'))
+				.map(r => `${r.method} ${r.path}`);
+
+		for (const [label, bad] of [
+			['the string "10"', '10'],
+			['null', null],
+			['true', true],
+			['NaN', Number.NaN],
+			['Infinity', Number.POSITIVE_INFINITY],
+			['a negative number', -1],
+			['a value above the 600 min maximum', 601],
+			['an object', { minutes: 5 }],
+		] as [string, unknown][]) {
+			it(`unlock_duration = ${label}: no door action, warning, state reset with ack`, async () => {
+				const instance = await startConnected();
+				instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, bad);
+				await waitFor(() => instance.log.of('warn').some(m => m.includes('unlock_duration')), {
+					description: 'warning',
+				});
+				await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.unlock_duration`)?.ack === true, {
+					description: 'state reset',
+				});
+				expect(instance.val(`doors.${DOOR_3855}.unlock_duration`)).to.equal(0);
+				expect(doorWrites()).to.deep.equal([]);
+				expect(mock.unlocks).to.deep.equal([]);
+				expect(instance.val(`doors.${DOOR_3855}.locked`)).to.equal(true);
+			});
+		}
+
+		it('unlock_duration = 600 (maximum) is accepted', async () => {
+			const instance = await startConnected();
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 600);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.unlock_duration`)?.ack === true, {
+				description: 'ack',
+			});
+			expect(
+				mock.findRequests({ method: 'PUT', path: `/doors/${DOOR_3855}/lock_rule` }).map(r => r.body),
+			).to.deep.equal([{ type: 'custom', interval: 600 }]);
+			expect(instance.log.of('warn')).to.deep.equal([]);
+			expect(instance.obj(`doors.${DOOR_3855}.unlock_duration`)?.common).to.include({ min: 0, max: 600 });
+		});
+
+		it('an invalid unlock_duration restores the last acknowledged value', async () => {
+			const instance = await startConnected();
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 3);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.unlock_duration`)?.ack === true, {
+				description: 'ack',
+			});
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 'abc');
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.unlock_duration`)?.ack === true, {
+				description: 'state reset',
+			});
+			expect(instance.val(`doors.${DOOR_3855}.unlock_duration`)).to.equal(3);
+			expect(doorWrites()).to.deep.equal([`PUT /doors/${DOOR_3855}/lock_rule`]);
+		});
+
+		for (const [label, bad] of [
+			['the string "1"', '1'],
+			['null', null],
+			['true', true],
+			['NaN', Number.NaN],
+			['a fraction', 1.5],
+			['an unknown index', 9],
+			['a negative index', -1],
+		] as [string, unknown][]) {
+			it(`lock_rule = ${label}: no door action (in particular no reset), warning, state reset with ack`, async () => {
+				const instance = await startConnected();
+				instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, bad);
+				await waitFor(() => instance.log.of('warn').some(m => m.includes('lock_rule')), {
+					description: 'warning',
+				});
+				await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.lock_rule`)?.ack === true, {
+					description: 'state reset',
+				});
+				expect(instance.val(`doors.${DOOR_3855}.lock_rule`)).to.equal(0);
+				expect(doorWrites()).to.deep.equal([]);
+			});
+		}
+
+		for (const [label, bad] of [
+			['the string "true"', 'true'],
+			['the number 1', 1],
+			['an object', {}],
+		] as [string, unknown][]) {
+			it(`unlock = ${label}: no door action, warning, state reset to false with ack`, async () => {
+				const instance = await startConnected();
+				instance.fireStateChange(`doors.${DOOR_3855}.unlock`, bad);
+				await waitFor(() => instance.log.of('warn').some(m => m.includes('unlock')), {
+					description: 'warning',
+				});
+				await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.unlock`)?.ack === true, {
+					description: 'state reset',
+				});
+				expect(instance.val(`doors.${DOOR_3855}.unlock`)).to.equal(false);
+				expect(doorWrites()).to.deep.equal([]);
+				expect(mock.unlocks).to.deep.equal([]);
+			});
+		}
+
+		for (const field of ['lockdown', 'evacuation'] as const) {
+			for (const [label, bad] of [
+				['the string "true"', 'true'],
+				['the number 1', 1],
+				['null', null],
+			] as [string, unknown][]) {
+				it(`doors.emergency.${field} = ${label}: no PUT, warning, state restored from the controller`, async () => {
+					mock.emergency = { lockdown: field === 'lockdown', evacuation: field === 'evacuation' };
+					const instance = await startConnected();
+					instance.fireStateChange(`doors.emergency.${field}`, bad);
+					await waitFor(() => instance.log.of('warn').some(m => m.includes(`doors.emergency.${field}`)), {
+						description: 'warning',
+					});
+					await waitFor(() => instance.states.get(`${NS}.doors.emergency.${field}`)?.ack === true, {
+						description: 'state restored',
+					});
+					expect(instance.val(`doors.emergency.${field}`)).to.equal(true);
+					expect(mock.findRequests({ method: 'PUT', path: '/doors/settings/emergency' })).to.deep.equal([]);
+					expect(mock.emergency).to.deep.equal({
+						lockdown: field === 'lockdown',
+						evacuation: field === 'evacuation',
+					});
+				});
+			}
+		}
+
+		it('emergency: the other flag is taken from the controller, never from a stale or unacknowledged state', async () => {
+			const instance = await startConnected();
+			// an evacuation command that never reached the controller leaves evacuation=true/ack=false behind
+			mock.failNext({ method: 'PUT', path: '/doors/settings/emergency', status: 500 });
+			instance.fireStateChange('doors.emergency.evacuation', true);
+			await waitFor(() => instance.log.of('warn').some(m => m.startsWith('Set emergency status failed')), {
+				description: 'failed evacuation',
+			});
+			expect(mock.emergency).to.deep.equal({ lockdown: false, evacuation: false });
+
+			instance.fireStateChange('doors.emergency.lockdown', true);
+			await waitFor(() => instance.states.get(`${NS}.doors.emergency.lockdown`)?.ack === true, {
+				description: 'lockdown ack',
+			});
+			expect(mock.emergency, 'the failed evacuation must not be sent along').to.deep.equal({
+				lockdown: true,
+				evacuation: false,
+			});
+		});
+	});
+
+	describe('access.device.dps_status (D-01)', () => {
+		it('takes the door position from the documented data.object.status', async () => {
+			const instance = await startConnected();
+			expect(instance.val(`doors.${DOOR_3855}.position`)).to.equal('close');
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.dpsStatus({ door: door(DOOR_3855), device: hub(), status: 'open' }),
+			);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.position`) === 'open', { description: 'open' });
+			await waitFor(() => events()[0]?.subtype === 'open', { description: 'subtype' });
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.dpsStatus({ door: door(DOOR_3855), device: hub(), status: 'close' }),
+			);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.position`) === 'close', { description: 'close' });
+		});
+
+		it('still accepts the legacy field names data.dps_status / data.value as a fallback', async () => {
+			const instance = await startConnected();
+			const legacy = fixtures.webhookEvents.dpsStatus({ door: door(DOOR_3855), device: hub(), status: 'open' });
+			delete legacy.data.object;
+			legacy.data.dps_status = 'open';
+			await mock.deliverWebhook(legacy);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.position`) === 'open', { description: 'open' });
+			const legacy2 = fixtures.webhookEvents.dpsStatus({ door: door(DOOR_3855), device: hub(), status: 'open' });
+			legacy2.data.object = null;
+			legacy2.data.value = 'close';
+			await mock.deliverWebhook(legacy2);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.position`) === 'close', { description: 'close' });
+		});
+
+		it('never overwrites the position with "unknown" when the event carries no usable status', async () => {
+			const instance = await startConnected();
+			const broken = fixtures.webhookEvents.dpsStatus({ door: door(DOOR_3855), device: hub(), status: 'open' });
+			broken.data.object = { event_type: 'dps_change', status: 42 };
+			await mock.deliverWebhook(broken);
+			await waitFor(() => events().length === 1, { description: 'event logged' });
+			expect(instance.val(`doors.${DOOR_3855}.position`)).to.equal('close');
+			expect(instance.stateWrites.filter(w => w.id.endsWith('.position') && w.val === 'unknown')).to.deep.equal(
+				[],
+			);
+		});
+	});
+
 	describe('unlock event de-duplication (WebSocket remote_unlock vs. webhook door.unlock)', () => {
 		it('logs access.data.device.remote_unlock 4 s later when no door.unlock webhook follows', async () => {
 			const instance = await startConnected();

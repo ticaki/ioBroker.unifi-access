@@ -304,7 +304,7 @@ function defineAdapterTests({ suite, describe, it }) {
 				});
 			}
 
-			it('ignores an unknown lock_rule value (no request, not acknowledged)', async () => {
+			it('ignores an unknown lock_rule value (no request)', async () => {
 				const before = doorRequests('rule').length;
 				await tools.writeState(harness, `doors.${DOORS.rule}.lock_rule`, 9);
 				await tools.writeState(harness, `doors.${DOORS.rule}.lock_rule`, 2);
@@ -545,10 +545,9 @@ function defineAdapterTests({ suite, describe, it }) {
 				});
 			});
 
-			// BUG-C-12: the documented access.device.dps_status payload (api_reference 11.7) carries the sensor
-			// state in data.object.status ("open" | "close"). The adapter reads data.dps_status / data.value,
-			// which do not exist in that payload → doors.<id>.position is set to "unknown" on every sensor change.
-			it.skip('BUG-C-12: access.device.dps_status updates doors.<id>.position from data.object.status', async () => {
+			// The documented access.device.dps_status payload (api_reference 11.7) carries the sensor
+			// state in data.object.status ("open" | "close").
+			it('access.device.dps_status updates doors.<id>.position from data.object.status', async () => {
 				const open = fixtures.webhookEvents.dpsStatus({ door: door('hook'), device: hub(), status: 'open' });
 				expect((await mock.deliverWebhook(open))[0].status).to.equal(200);
 				expect(await state(`doors.${DOORS.hook}.position`)).to.equal('open');

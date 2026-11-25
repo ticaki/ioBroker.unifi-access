@@ -11,6 +11,15 @@ import { ProtectHttp } from './lib/protectHttp';
 import { UnifiWebSocket } from './lib/unifiWebSocket';
 import { Library } from './lib/library';
 import { detectModel, featuresFor, type DeviceCapability, type UnifiDeviceModel } from './lib/deviceModels';
+import {
+	describeValue,
+	extractDpsStatus,
+	LOCK_RULE_BY_INDEX,
+	MAX_UNLOCK_MINUTES,
+	normalizeDefaultUnlockMinutes,
+	parseLockRuleIndex,
+	parseUnlockMinutes,
+} from './lib/controlValues';
 import type {
 	GenericAlarmPayload,
 	LastError,
@@ -18,6 +27,7 @@ import type {
 	UnifiAccessEventEnvelope,
 	UnifiDeviceRaw,
 	UnifiDoorRaw,
+	UnifiLockRuleType,
 } from './lib/types';
 import { networkInterfaces } from 'node:os';
 import { WebhookHandler } from './webhooks/server';
@@ -64,6 +74,15 @@ interface ForwardRule {
 	targetState: string;
 }
 
+/**
+ * Message of an unknown thrown value.
+ *
+ * @param err Whatever was thrown
+ */
+function errorText(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
 class UnifiAccess extends utils.Adapter {
 	private http: UnifiHttp | null = null;
 	private protectHttp: ProtectHttp | null = null;
@@ -93,6 +112,9 @@ class UnifiAccess extends utils.Adapter {
 	// the pending remote_unlock is cancelled and door.unlock (richer data) is pushed instead.
 	private readonly unlockPendingTimers = new Map<string, ioBroker.Timeout>();
 	private readonly unlockPendingEvents = new Map<string, NormalizedEvent>();
+
+	/** Last value the adapter acknowledged per control state — what an invalid write is reset to. */
+	private readonly lastAckedControlValues = new Map<string, number>();
 
 	public constructor(options: Partial<utils.AdapterOptions> = {}) {
 		super({
@@ -501,8 +523,7 @@ class UnifiAccess extends utils.Adapter {
 			const code = Number(data.reason_code ?? -1);
 			subtype = REMOTE_VIEW_CHANGE_REASONS[code];
 		} else if (msg.event === 'access.device.dps_status') {
-			const val = data.dps_status ?? data.value;
-			subtype = typeof val === 'string' ? val : undefined;
+			subtype = extractDpsStatus(data);
 		}
 
 		const event: NormalizedEvent = {
@@ -637,11 +658,14 @@ class UnifiAccess extends utils.Adapter {
 
 			case 'access.device.dps_status':
 				if (event.doorId) {
-					const value = raw.data?.dps_status ?? raw.data?.value;
-					await this.setState(`doors.${this.safeId(event.doorId)}.position`, {
-						val: typeof value === 'string' ? value : 'unknown',
-						ack: true,
-					});
+					// Documented location of the sensor state is data.object.status. An event without a usable
+					// status must not overwrite the known position (it used to be set to "unknown" here).
+					const value = extractDpsStatus(raw.data);
+					if (value !== undefined) {
+						await this.setState(`doors.${this.safeId(event.doorId)}.position`, { val: value, ack: true });
+					} else {
+						this.log.debug(`[event] ${event.type} for doorId=${event.doorId} without a status — ignored`);
+					}
 				}
 				break;
 
@@ -771,54 +795,119 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		const localId = id.startsWith(`${this.namespace}.`) ? id.slice(this.namespace.length + 1) : id;
+		const val: unknown = state.val;
 
-		if (localId.startsWith('doors.') && localId.endsWith('.unlock')) {
-			if (state.val !== true) {
+		if (localId === 'doors.emergency.lockdown' || localId === 'doors.emergency.evacuation') {
+			const field = localId === 'doors.emergency.lockdown' ? 'lockdown' : 'evacuation';
+			this.runCommand(localId, this.handleEmergencyChange(field, val));
+			return;
+		}
+
+		const match = /^doors\.([^.]+)\.(unlock|unlock_duration|lock_rule)$/.exec(localId);
+		if (!match) {
+			return;
+		}
+		const [, doorId, control] = match;
+
+		// A control state opens or locks a real door: only values of exactly the expected type and
+		// range are acted upon. Everything else is rejected with a warning and the state is put back
+		// (acknowledged) — it must never be "repaired" into a pulse unlock or a rule reset.
+		if (control === 'unlock') {
+			if (val === false) {
 				return;
 			}
-			const doorId = localId.slice('doors.'.length, -'.unlock'.length);
-			void this.handleDoorUnlock(doorId);
+			if (val !== true) {
+				this.rejectControlValue(localId, val, 'expected the boolean true', false);
+				return;
+			}
+			this.runCommand(localId, this.handleDoorUnlock(doorId));
 			return;
 		}
-		if (localId.startsWith('doors.') && localId.endsWith('.unlock_duration')) {
-			const minutes = typeof state.val === 'number' ? Math.max(0, Math.floor(state.val)) : 0;
-			const doorId = localId.slice('doors.'.length, -'.unlock_duration'.length);
-			void this.handleDoorUnlockDuration(doorId, minutes);
+		if (control === 'unlock_duration') {
+			const minutes = parseUnlockMinutes(val);
+			if (minutes === null) {
+				this.rejectControlValue(
+					localId,
+					val,
+					`expected a number of minutes between 0 and ${MAX_UNLOCK_MINUTES}`,
+					this.lastAckedControlValues.get(localId) ?? 0,
+				);
+				return;
+			}
+			this.runCommand(localId, this.handleDoorUnlockDuration(doorId, minutes));
 			return;
 		}
-		if (localId.startsWith('doors.') && localId.endsWith('.lock_rule')) {
-			const ruleIndex = typeof state.val === 'number' ? state.val : 0;
-			const doorId = localId.slice('doors.'.length, -'.lock_rule'.length);
-			void this.handleDoorLockRule(doorId, ruleIndex);
+		const ruleType = parseLockRuleIndex(val);
+		if (ruleType === null) {
+			this.rejectControlValue(
+				localId,
+				val,
+				`expected one of the rule indexes ${Object.keys(LOCK_RULE_BY_INDEX).join(', ')}`,
+				this.lastAckedControlValues.get(localId) ?? 0,
+			);
 			return;
 		}
-		if (localId === 'doors.emergency.lockdown') {
-			void this.handleEmergencyChange('lockdown', state.val === true);
-			return;
-		}
-		if (localId === 'doors.emergency.evacuation') {
-			void this.handleEmergencyChange('evacuation', state.val === true);
-			return;
-		}
+		this.runCommand(localId, this.handleDoorLockRule(doorId, val as number, ruleType));
 	}
 
-	private async handleEmergencyChange(field: 'lockdown' | 'evacuation', val: boolean): Promise<void> {
+	/**
+	 * Run a command handler detached from the state-change callback. Handlers catch their own API
+	 * errors; this is the safety net that keeps an unexpected rejection from terminating the adapter.
+	 *
+	 * @param what Short description for the log
+	 * @param promise The running handler
+	 */
+	private runCommand(what: string, promise: Promise<void>): void {
+		promise.catch((err: unknown) => {
+			this.log.warn(`Command ${what} failed unexpectedly: ${errorText(err)}`);
+		});
+	}
+
+	/**
+	 * Refuse an invalid value written to a control state: warn and put the state back (acknowledged).
+	 * No request is sent to the controller.
+	 *
+	 * @param localId State id without namespace
+	 * @param val The rejected value
+	 * @param expected Human-readable description of what would have been valid
+	 * @param restore Value the state is reset to
+	 */
+	private rejectControlValue(localId: string, val: unknown, expected: string, restore: ioBroker.StateValue): void {
+		this.log.warn(
+			`Ignoring invalid value ${describeValue(val)} for ${localId}: ${expected}. No door action taken.`,
+		);
+		this.setState(localId, { val: restore, ack: true }).catch((err: unknown) => {
+			this.log.debug(`Could not reset ${localId}: ${errorText(err)}`);
+		});
+	}
+
+	private async handleEmergencyChange(field: 'lockdown' | 'evacuation', val: unknown): Promise<void> {
 		if (!this.http) {
 			return;
 		}
-		const sibling = field === 'lockdown' ? 'evacuation' : 'lockdown';
-		const siblingState = await this.getStateAsync(`doors.emergency.${sibling}`);
-		const siblingVal = siblingState?.val === true;
-		const payload =
-			field === 'lockdown'
-				? { lockdown: val, evacuation: siblingVal }
-				: { lockdown: siblingVal, evacuation: val };
+		const localId = `doors.emergency.${field}`;
+		if (typeof val !== 'boolean') {
+			this.log.warn(
+				`Ignoring invalid value ${describeValue(val)} for ${localId}: expected a boolean. Emergency status not changed.`,
+			);
+			// put the state back to what the controller reports
+			await this.refreshEmergencyStatus();
+			return;
+		}
 		try {
+			// The request carries both flags. The other one is read from the controller right now: the
+			// local state may be stale or hold a command that never went through (ack=false), and
+			// sending that along could switch evacuation/lockdown on by accident.
+			const current = await this.http.getEmergencyStatus();
+			const payload = { lockdown: current.lockdown === true, evacuation: current.evacuation === true };
+			payload[field] = val;
 			await this.http.setEmergencyStatus(payload);
-			await this.setState(`doors.emergency.${field}`, { val, ack: true });
+			await this.setState(localId, { val, ack: true });
+			const sibling = field === 'lockdown' ? 'evacuation' : 'lockdown';
+			await this.setState(`doors.emergency.${sibling}`, { val: payload[sibling], ack: true });
 			this.log.info(`Emergency status: lockdown=${payload.lockdown}, evacuation=${payload.evacuation}`);
 		} catch (err) {
-			this.log.warn(`Set emergency status failed: ${(err as Error).message}`);
+			this.log.warn(`Set emergency status failed: ${errorText(err)}`);
 		}
 	}
 
@@ -845,7 +934,7 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		const cfg = this.config;
-		const minutes = Math.max(0, Math.floor(cfg.defaultUnlockDuration || 0));
+		const minutes = normalizeDefaultUnlockMinutes(cfg.defaultUnlockDuration);
 		const actorId = cfg.unlockActorId || '';
 		const actor = actorId ? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId } : undefined;
 		try {
@@ -886,6 +975,7 @@ class UnifiAccess extends utils.Adapter {
 				this.log.info(`Door ${safeDoorId} unlocked (pulse) via unlock_duration.`);
 			}
 			await this.setState(`doors.${safeDoorId}.unlock_duration`, { val: minutes, ack: true });
+			this.lastAckedControlValues.set(`doors.${safeDoorId}.unlock_duration`, minutes);
 			await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
 			const resetMs = minutes > 0 ? minutes * 60 * 1000 : 5000;
 			this.setTimeout(() => {
@@ -896,7 +986,11 @@ class UnifiAccess extends utils.Adapter {
 		}
 	}
 
-	private async handleDoorLockRule(safeDoorId: string, ruleIndex: number): Promise<void> {
+	private async handleDoorLockRule(
+		safeDoorId: string,
+		ruleIndex: number,
+		type: Exclude<UnifiLockRuleType, 'custom'>,
+	): Promise<void> {
 		if (!this.http) {
 			return;
 		}
@@ -904,21 +998,11 @@ class UnifiAccess extends utils.Adapter {
 			this.log.debug(`[lock_rule] ignoring unknown door id: ${safeDoorId}`);
 			return;
 		}
-		const ruleMap: Record<number, 'reset' | 'keep_unlock' | 'keep_lock' | 'lock_now'> = {
-			0: 'reset',
-			1: 'keep_unlock',
-			2: 'keep_lock',
-			3: 'lock_now',
-		};
-		const type = ruleMap[ruleIndex];
-		if (!type) {
-			this.log.warn(`[lock_rule] unknown rule index ${ruleIndex} for door ${safeDoorId}`);
-			return;
-		}
 		try {
 			await this.http.setDoorLockRule(safeDoorId, { type });
 			this.log.info(`Door ${safeDoorId} lock_rule set to ${type}.`);
 			await this.setState(`doors.${safeDoorId}.lock_rule`, { val: ruleIndex, ack: true });
+			this.lastAckedControlValues.set(`doors.${safeDoorId}.lock_rule`, ruleIndex);
 			if (type === 'keep_unlock') {
 				await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
 			} else if (type === 'keep_lock' || type === 'lock_now' || type === 'reset') {

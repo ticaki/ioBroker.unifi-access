@@ -139,6 +139,7 @@ describe('Library (object and state management, in-memory adapter)', () => {
 					role: 'level',
 					unit: 'min',
 					min: 0,
+					max: 600,
 					def: 0,
 					read: true,
 					write: true,
@@ -154,6 +155,7 @@ describe('Library (object and state management, in-memory adapter)', () => {
 				1: 'keep_unlock',
 				2: 'keep_lock',
 				3: 'lock_now',
+				4: 'lock_early',
 			});
 		});
 
@@ -205,10 +207,9 @@ describe('Library (object and state management, in-memory adapter)', () => {
 			expect(adapter.val('doors.door_1_a_b.name')).to.equal('Odd');
 		});
 
-		// BUG-C-08: the documented door sample (api_reference 7.7) reports a door without position sensor
-		// as `"door_position_status": ""`. The empty string is written to the state as it is; the documented
-		// value range of `position` is open | close | unknown.
-		it.skip('BUG-C-08: maps an empty door_position_status to "unknown"', async () => {
+		// The documented door sample (api_reference 7.7) reports a door without position sensor as
+		// `"door_position_status": ""`; the value range of `position` is open | close | unknown.
+		it('maps an empty door_position_status to "unknown"', async () => {
 			await library.ensureDoor({
 				id: 'door-nosensor',
 				name: 'Main Door',

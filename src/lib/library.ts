@@ -1,6 +1,27 @@
 import type { UnifiAccess } from '../UnifiAccess';
 import { detectModel, featuresFor, type UnifiDeviceModel } from './deviceModels';
 import type { UnifiDeviceRaw, UnifiDoorRaw } from './types';
+import { LOCK_RULE_STATES, MAX_UNLOCK_MINUTES } from './controlValues';
+
+/**
+ * `doors.<id>.locked` for a door record: true/false for the documented relay states, `null` when unknown.
+ *
+ * @param door Door as returned by the controller
+ */
+export function doorLocked(door: UnifiDoorRaw): boolean | null {
+	return door.door_lock_relay_status === 'lock' ? true : door.door_lock_relay_status === 'unlock' ? false : null;
+}
+
+/**
+ * `doors.<id>.position` for a door record: `open` / `close`, or `unknown` when no sensor is connected
+ * (the controller reports `null` or — as in the documented sample — an empty string).
+ *
+ * @param door Door as returned by the controller
+ */
+export function doorPosition(door: UnifiDoorRaw): string {
+	const value: unknown = door.door_position_status;
+	return typeof value === 'string' && value !== '' ? value : 'unknown';
+}
 
 /**
  * Sets up and updates ioBroker objects/states for the UniFi Access bootstrap response.
@@ -120,6 +141,7 @@ export class Library {
 				role: 'level',
 				unit: 'min',
 				min: 0,
+				max: MAX_UNLOCK_MINUTES,
 				def: 0,
 				read: true,
 				write: true,
@@ -138,7 +160,7 @@ export class Library {
 				def: 0,
 				read: true,
 				write: true,
-				states: { 0: 'default', 1: 'keep_unlock', 2: 'keep_lock', 3: 'lock_now' },
+				states: { ...LOCK_RULE_STATES },
 			},
 			native: {},
 		});
@@ -148,11 +170,9 @@ export class Library {
 
 		await this.adapter.setState(`${channelId}.name`, { val: door.name ?? door.id, ack: true });
 		await this.adapter.setState(`${channelId}.fullName`, { val: door.full_name ?? '', ack: true });
-		const lockedFlag =
-			door.door_lock_relay_status === 'lock' ? true : door.door_lock_relay_status === 'unlock' ? false : null;
-		await this.adapter.setState(`${channelId}.locked`, { val: lockedFlag, ack: true });
+		await this.adapter.setState(`${channelId}.locked`, { val: doorLocked(door), ack: true });
 		await this.adapter.setState(`${channelId}.position`, {
-			val: door.door_position_status ?? 'unknown',
+			val: doorPosition(door),
 			ack: true,
 		});
 		await this.adapter.setState(`${channelId}.isBindHub`, { val: door.is_bind_hub === true, ack: true });
