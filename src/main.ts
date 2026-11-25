@@ -154,6 +154,8 @@ class UnifiAccess extends utils.Adapter {
 	/** True once the endpoint is known to be registered with the controller in this run. */
 	private webhookRegistered = false;
 	private webhookRegistrationRunning = false;
+	/** The registration step that is running (check/registration or re-registration), for serialising them. */
+	private webhookRegistrationTask: Promise<void> | null = null;
 	/** The registration was made before a connection outage and has to be checked again. */
 	private webhookRegistrationStale = false;
 	private webhookRegistrationFailureLog = '';
@@ -800,6 +802,8 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		this.webhookRegistrationRunning = true;
+		let done: () => void = () => undefined;
+		this.webhookRegistrationTask = new Promise<void>(resolve => (done = resolve));
 		try {
 			const storedId = this.webhookEndpointId;
 			const storedSecret = this.webhookSecret;
@@ -837,6 +841,8 @@ class UnifiAccess extends utils.Adapter {
 			this.scheduleWebhookRegistrationRetry();
 		} finally {
 			this.webhookRegistrationRunning = false;
+			this.webhookRegistrationTask = null;
+			done();
 		}
 	}
 
@@ -2497,10 +2503,32 @@ class UnifiAccess extends utils.Adapter {
 		if (!publicUrl) {
 			return { ok: false, error: 'receiver-not-running' };
 		}
+		// One registration step at a time: a check that is running works with the endpoint list it
+		// fetched before — finishing after the re-registration it would put the old secret back.
+		while (this.webhookRegistrationTask) {
+			await this.webhookRegistrationTask;
+		}
+		this.webhookRegistrationRunning = true;
+		let done: () => void = () => undefined;
+		this.webhookRegistrationTask = new Promise<void>(resolve => (done = resolve));
+		try {
+			return await this.reregisterWebhookNow(publicUrl, defer);
+		} finally {
+			this.webhookRegistrationRunning = false;
+			this.webhookRegistrationTask = null;
+			done();
+		}
+	}
+
+	private async reregisterWebhookNow(
+		publicUrl: string,
+		defer: (task: () => Promise<void>) => void,
+	): Promise<Record<string, unknown>> {
+		const http = this.http!;
 		try {
 			const result = await reregister(
 				{
-					http: this.http,
+					http,
 					publicUrl,
 					name: this.webhookEndpointName(),
 					events: DEFAULT_WEBHOOK_EVENTS,

@@ -29,6 +29,7 @@ import {
 	type FakeAdapter,
 } from '../test/mock';
 import { ProtectHttp } from './lib/protectHttp';
+import { UnifiHttp } from './lib/unifiHttp';
 import { SharedHttpServer } from './webserver/sharedHttpServer';
 
 const TOKEN = 'main-test-token';
@@ -465,6 +466,45 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 					objectWrites,
 				);
 				expect(instance.val('info.webhookRegistered')).to.equal(true);
+			});
+
+			it('"Re-register webhook" during a running check waits for it; the check cannot put the old secret back (RK U-2)', async () => {
+				const instance = await startConnected();
+				const old = { ...mock.webhookEndpoints[0] };
+				// the check fetches the endpoint list and is held before it continues with it
+				let release: () => void = () => undefined;
+				const gate = new Promise<void>(resolve => (release = resolve));
+				let held = false;
+				const original = UnifiHttp.prototype.listWebhookEndpoints;
+				const stub = sinon.stub(UnifiHttp.prototype, 'listWebhookEndpoints').callsFake(async function (
+					this: UnifiHttp,
+				) {
+					const list = await original.call(this);
+					if (!held) {
+						held = true;
+						await gate;
+					}
+					return list;
+				});
+				try {
+					await advance(15 * 60_000);
+					await waitFor(() => held, { description: 'check holds its endpoint list' });
+					const answer = instance.request('reregisterWebhook', undefined, 5000);
+					await delay(50);
+					release();
+					expect(await answer).to.include({ ok: true });
+				} finally {
+					stub.restore();
+				}
+				await delay(50);
+				const current = mock.webhookEndpoints.find(e => e.name === ENDPOINT_NAME)!;
+				expect(current.id).to.not.equal(old.id);
+				expect(mock.webhookEndpoints.map(e => e.id)).to.not.include(old.id);
+				const [result] = await mock.deliverWebhook(
+					fixtures.webhookEvents.doorbellCompleted({ door: door(DOOR_A2), device: hub() }),
+				);
+				expect(result.status, 'webhook with the secret of the new endpoint').to.equal(200);
+				expect(instance.val('info.webhookEndpointId')).to.equal(current.id);
 			});
 
 			it('an endpoint deleted at the controller is registered again at the next check', async () => {
