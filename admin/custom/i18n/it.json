@@ -35,7 +35,11 @@
     "generic_webhook_url_no_addresses": "Nessun indirizzo di interfaccia di rete trovato.",
     "generic_webhook_copy": "Copia negli appunti",
     "generic_webhook_copied": "Copiato!",
+    "generic_webhook_server_not_running": "Il server HTTP dell'adattatore al momento non è in esecuzione, quindi questo URL non risponde ancora. Salvare le impostazioni e, se continua a non avviarsi, controllare il log dell'istanza (porta in uso?).",
+    "generic_webhook_tls_inactive": "TLS è attivo, ma non è stato possibile caricare i certificati (%s). Il server risponde in http non cifrato finché il problema non viene risolto.",
 
     "adapter_not_running": "L'istanza dell'adapter non è in esecuzione. Avviala e riprova.",
-    "adapter_no_response": "L'adapter non ha risposto in tempo."
+    "adapter_no_response": "L'adapter non ha risposto in tempo.",
+    "adapter_unknown_command": "L'istanza dell'adattatore in esecuzione non conosce questa richiesta. Adattatore e pagina delle impostazioni sembrano avere versioni diverse: riavviare l'istanza.",
+    "adapter_not_configured": "L'istanza in esecuzione non ha ancora un host del controller o un token API. Inserire entrambi, salvare e riprovare."
 }

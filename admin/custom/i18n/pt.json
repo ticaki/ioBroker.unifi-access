@@ -35,7 +35,11 @@
     "generic_webhook_url_no_addresses": "Não foram encontrados endereços de interfaces de rede.",
     "generic_webhook_copy": "Copiar para a área de transferência",
     "generic_webhook_copied": "Copiado!",
+    "generic_webhook_server_not_running": "O servidor HTTP do adaptador não está em execução neste momento, pelo que este URL ainda não responde. Guarde as definições e, se continuar sem iniciar, verifique o registo da instância (porta em uso?).",
+    "generic_webhook_tls_inactive": "O TLS está ativado, mas não foi possível carregar os certificados (%s). O servidor responde por http não cifrado até isto ser corrigido.",
 
     "adapter_not_running": "A instância do adaptador não está em execução. Inicie-a e tente novamente.",
-    "adapter_no_response": "O adaptador não respondeu a tempo."
+    "adapter_no_response": "O adaptador não respondeu a tempo.",
+    "adapter_unknown_command": "A instância do adaptador em execução não conhece este pedido. O adaptador e a página de configuração parecem ter versões diferentes — reinicie a instância.",
+    "adapter_not_configured": "A instância em execução ainda não tem host do controlador ou token de API. Introduza ambos, guarde e tente novamente."
 }

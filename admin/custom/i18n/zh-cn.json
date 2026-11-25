@@ -35,7 +35,11 @@
     "generic_webhook_url_no_addresses": "未找到网络接口地址。",
     "generic_webhook_copy": "复制到剪贴板",
     "generic_webhook_copied": "已复制!",
+    "generic_webhook_server_not_running": "适配器的 HTTP 服务器当前未运行, 因此该 URL 暂时无法访问. 请保存设置; 如果仍未启动, 请检查实例日志 (端口被占用?).",
+    "generic_webhook_tls_inactive": "已启用 TLS, 但无法加载证书 (%s). 在问题解决之前, 服务器通过未加密的 http 应答.",
 
     "adapter_not_running": "适配器实例未运行。请启动后重试。",
-    "adapter_no_response": "适配器未及时响应。"
+    "adapter_no_response": "适配器未及时响应。",
+    "adapter_unknown_command": "正在运行的适配器实例不识别此请求. 适配器与设置页面的版本似乎不一致 - 请重启实例.",
+    "adapter_not_configured": "正在运行的实例尚未配置控制器主机或 API 令牌. 请填写两者, 保存后重试."
 }
