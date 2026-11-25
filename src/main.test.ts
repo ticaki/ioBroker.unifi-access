@@ -3799,43 +3799,34 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				/key values mismatch|mismatch/i,
 			],
 		] as [string, Record<string, string>, RegExp][]) {
-			it(`TLS enabled but ${name}: clear error, server runs on http and no https URL is registered or handed out`, async () => {
+			// K-17: fail closed — no silent fall-back to clear text
+			it(`TLS enabled but ${name}: clear error, the server is not started, no URL is registered or handed out`, async () => {
 				const instance = await startWithCertificates(certificates);
-				await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+				await waitFor(() => instance.val('info.connection') === true, { description: 'connected' });
 
 				const errors = instance.log.of('error');
 				expect(errors).to.have.length(1);
 				expect(errors[0]).to.contain('TLS is enabled for the built-in HTTP server, but the certificates');
 				expect(errors[0]).to.match(reason);
-				expect(errors[0]).to.contain('WITHOUT TLS');
+				expect(errors[0]).to.contain('The server is NOT started (no fall-back to plain http)');
 
-				expect((await httpRequest({ url: `http://127.0.0.1:${listenPort}/nothing-here` })).status).to.equal(
-					404,
-				);
-				expect(mock.webhookEndpoints.map(e => e.endpoint)).to.deep.equal([
-					`http://127.0.0.1:${listenPort}/unifi-access-webhook`,
-				]);
+				expect(await isPortFree(listenPort), 'port not opened').to.equal(true);
+				expect(mock.webhookEndpoints, 'no webhook URL registered').to.deep.equal([]);
+				expect(instance.val('info.webhookRegistered')).to.equal(false);
 				const info = await instance.request('getServerInfo');
 				expect(info).to.include({
-					running: true,
-					scheme: 'http',
-					baseUrl: `http://127.0.0.1:${listenPort}`,
+					running: false,
+					scheme: null,
+					baseUrl: null,
 					tlsEnabled: true,
 					tlsActive: false,
 				});
 				expect(info.tlsError).to.match(reason);
-
-				const event = fixtures.webhookEvents.doorUnlock({
-					door: door(DOOR_3855),
-					device: hub(),
-					readerId: DEVICE_G2_PRO,
+				expect(await instance.request('reregisterWebhook')).to.deep.equal({
+					ok: false,
+					error: 'receiver-not-running',
 				});
-				await mock.deliverWebhook(event);
-				await waitFor(() => instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`), {
-					description: 'thumbnail url',
-				});
-				expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`)).to.match(/^http:\/\//);
-				expect(JSON.stringify([...instance.states.values()])).to.not.contain('https://127.0.0.1');
+				expect(instance.log.of('warn').filter(m => m.includes('no usable network address'))).to.deep.equal([]);
 			});
 		}
 

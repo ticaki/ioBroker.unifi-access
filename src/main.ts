@@ -493,8 +493,8 @@ class UnifiAccess extends utils.Adapter {
 	 * Load key and certificate for the built-in HTTP server from the ioBroker certificate store.
 	 *
 	 * @returns The TLS options, or `undefined` when TLS is off or the certificates are not usable. In
-	 * the latter case the reason is logged as error and kept in `tlsError`; the server then runs
-	 * without TLS and every URL the adapter hands out says `http`.
+	 * the latter case the reason is logged as error and kept in `tlsError`; the server is then not
+	 * started at all (fail closed — no silent fall-back to plain http).
 	 */
 	private async loadTlsOptions(): Promise<SharedHttpServerTls | undefined> {
 		const cfg = this.config;
@@ -524,7 +524,8 @@ class UnifiAccess extends utils.Adapter {
 			this.tlsError = errorText(err);
 			this.log.error(
 				`TLS is enabled for the built-in HTTP server, but the certificates (public "${cfg.certPublic ?? ''}", private "${cfg.certPrivate ?? ''}") ` +
-					`could not be loaded: ${this.tlsError}. The server runs WITHOUT TLS (plain http) and all webhook/media URLs use http. ` +
+					`could not be loaded: ${this.tlsError}. The server is NOT started (no fall-back to plain http): webhook receiver, ` +
+					`thumbnail server and generic webhook are unavailable and no webhook URL is registered. ` +
 					`Select valid certificates in the instance settings or disable TLS.`,
 			);
 			return undefined;
@@ -568,6 +569,12 @@ class UnifiAccess extends utils.Adapter {
 		const port = normalizePort(cfg.listenPort, 8095);
 		const ip = cfg.listenIp && cfg.listenIp !== '0.0.0.0' ? cfg.listenIp : undefined;
 		const tls = await this.loadTlsOptions();
+		if (cfg.enableTls === true && !tls) {
+			// fail closed: credentials of the generic webhook and the webhook payloads must not travel in
+			// clear text because a certificate expired or was deleted (reason logged in loadTlsOptions)
+			this.httpServer = null;
+			return;
+		}
 
 		const logger = {
 			debug: (m: string) => this.log.debug(m),
