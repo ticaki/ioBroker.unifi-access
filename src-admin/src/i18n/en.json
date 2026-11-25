@@ -41,7 +41,7 @@
     "generic_webhook_server_not_running": "The HTTP server of the adapter is not running at the moment, so this URL does not answer yet. Save the settings and check the log of the instance if it still does not start (port in use?).",
     "generic_webhook_tls_inactive": "TLS is enabled, but the certificates could not be loaded (%s). The built-in server is not started until this is fixed.",
     "generic_webhook_public_base_unsaved": "The public base URL in the form differs from the saved one. The URL shown follows the form; save the settings to apply it.",
-    "generic_webhook_unsaved": "Port or listen path in the form differ from the saved settings. The URL shown follows the form; save the settings to apply it.",
+    "generic_webhook_unsaved": "Listen address, port, TLS or listen path in the form differ from the saved settings. The URL shown follows the form; save the settings to apply it.",
     "generic_webhook_public_base_invalid": "The saved public base URL \"%s\" is not usable (expected http(s)://host[:port][/path], no user name or password, port 1-65535). The adapter builds the URLs from the listen address instead; correct it on the \"HTTP server\" tab.",
 
     "adapter_not_running": "The adapter instance is not running. Start it and try again.",

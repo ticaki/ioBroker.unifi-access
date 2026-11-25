@@ -41,7 +41,7 @@
     "generic_webhook_server_not_running": "Le serveur HTTP de l'adaptateur ne fonctionne pas pour le moment, cette URL ne répond donc pas encore. Enregistrez les paramètres et, s'il ne démarre toujours pas, consultez le journal de l'instance (port déjà utilisé ?).",
     "generic_webhook_tls_inactive": "TLS est activé, mais les certificats n'ont pas pu être chargés (%s). Le serveur intégré ne démarre pas tant que ce n'est pas corrigé.",
     "generic_webhook_public_base_unsaved": "L'URL de base publique du formulaire diffère de celle enregistrée. L'URL affichée suit le formulaire ; enregistrez les paramètres pour l'appliquer.",
-    "generic_webhook_unsaved": "Le port ou le chemin du formulaire diffèrent des paramètres enregistrés. L'URL affichée suit le formulaire ; enregistrez les paramètres pour l'appliquer.",
+    "generic_webhook_unsaved": "L'adresse d'écoute, le port, TLS ou le chemin du formulaire diffèrent des paramètres enregistrés. L'URL affichée suit le formulaire ; enregistrez les paramètres pour l'appliquer.",
     "generic_webhook_public_base_invalid": "L'URL de base publique enregistrée \"%s\" n'est pas utilisable (attendu http(s)://host[:port][/path], sans nom d'utilisateur ni mot de passe, port 1-65535). L'adaptateur construit les URL à partir de l'adresse d'écoute ; corrigez-la dans l'onglet \"HTTP server\".",
 
     "adapter_not_running": "L'instance de l'adaptateur n'est pas en cours d'exécution. Démarrez-la et réessayez.",

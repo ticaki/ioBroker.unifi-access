@@ -307,7 +307,11 @@ describe('GenericWebhookUrl and the running HTTP server', () => {
 		render(<GenericWebhookUrl {...props} />);
 
 		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.77:8095/webhook']));
-		expect(screen.getByRole('alert').textContent).toContain('The HTTP server of the adapter is not running');
+		const alerts = screen.getAllByRole('alert').map(alert => alert.textContent ?? '');
+		// the running instance has TLS on: the http URL only answers once the change is saved (R2F-03)
+		expect(alerts[0]).toContain('differ from the saved settings');
+		expect(alerts[1]).toContain('The HTTP server of the adapter is not running');
+		expect(alerts).toHaveLength(2);
 	});
 
 	it('says so if the HTTP server is not running', async () => {
@@ -469,7 +473,7 @@ describe('GenericWebhookUrl: hints about the shown URL (RF-05, RF-06)', () => {
 	};
 	const ALERTS = (): string[] => screen.queryAllByRole('alert').map(alert => alert.textContent ?? '');
 	const UNSAVED =
-		'Port or listen path in the form differ from the saved settings. The URL shown follows the form; save the settings to apply it.';
+		'Listen address, port, TLS or listen path in the form differ from the saved settings. The URL shown follows the form; save the settings to apply it.';
 	const answers = { getNetworkInterfaces: { addresses: ['192.0.2.5'] }, getServerInfo: HTTP_SERVER };
 
 	it('parseServerInfo takes the port of the running configuration', () => {
@@ -516,6 +520,77 @@ describe('GenericWebhookUrl: hints about the shown URL (RF-05, RF-06)', () => {
 		});
 		render(<GenericWebhookUrl {...props} />);
 		await waitFor(() => expect(ALERTS()).toEqual([UNSAVED]));
+	});
+
+	it('an unsaved listen IP: the URL follows the form and the page says it is not saved yet (R2F-03)', async () => {
+		const saved = { ...DATA, listenIp: '192.0.2.5' };
+		const { props } = makeHarness({ data: { ...saved, listenIp: '192.0.2.6' }, originalData: saved, answers });
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.6:8095/alarm']));
+		await waitFor(() => expect(ALERTS()).toEqual([UNSAVED]));
+	});
+
+	it('no hint for a listen IP written differently that means the same (empty = 0.0.0.0)', async () => {
+		const { props, socket } = makeHarness({ data: { ...DATA, listenIp: '' }, originalData: DATA, answers });
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(socket.sendTo).toHaveBeenCalledWith('unifi-access.0', 'getServerInfo', {}));
+		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.5:8095/alarm']));
+		expect(ALERTS()).toEqual([]);
+	});
+
+	it('TLS switched on in the form: https is shown and the page says it is not saved yet (R2F-03)', async () => {
+		const saved = { ...DATA, enableTls: false };
+		const { props } = makeHarness({ data: { ...saved, enableTls: true }, originalData: saved, answers });
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(urls()).toEqual(['https://192.0.2.5:8095/alarm']));
+		await waitFor(() => expect(ALERTS()).toEqual([UNSAVED]));
+	});
+
+	it('TLS changed while the instance is stopped: compared with the saved setting (R2F-03)', async () => {
+		const saved = { ...DATA, enableTls: true };
+		const { props } = makeHarness({
+			data: { ...saved, enableTls: false },
+			originalData: saved,
+			answers: { getNetworkInterfaces: { addresses: ['192.0.2.5'] } },
+		});
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.5:8095/alarm']));
+		await waitFor(() => expect(ALERTS()).toContain(UNSAVED));
+	});
+
+	it('no TLS or listen IP hint with a public base URL: they are not part of the URL', async () => {
+		const base = 'https://proxy.example.com';
+		const saved = { ...DATA, publicBaseUrl: base, listenIp: '192.0.2.5', enableTls: false };
+		const { props } = makeHarness({
+			data: { ...saved, listenIp: '192.0.2.6', enableTls: true },
+			originalData: saved,
+			answers: { getServerInfo: { ...HTTP_SERVER, publicBaseUrl: base } },
+		});
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(urls()).toEqual(['https://proxy.example.com/alarm']));
+		expect(ALERTS()).toEqual([]);
+	});
+
+	const UNUSABLE = 'is not usable';
+
+	it('the warning about an unusable saved base URL is also shown when no listen address is known (R2F-04)', async () => {
+		const data = { ...DATA, publicBaseUrl: 'https://user:pw@proxy.example.com' };
+		const { props } = makeHarness({
+			data,
+			answers: { getNetworkInterfaces: { addresses: [] }, getServerInfo: HTTP_SERVER },
+		});
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(document.body.textContent).toContain('No network interface addresses found'));
+		await waitFor(() => expect(ALERTS().some(a => a.includes(UNUSABLE))).toBe(true));
+	});
+
+	it('… and while the listen addresses are still loading (R2F-04)', async () => {
+		const data = { ...DATA, publicBaseUrl: 'https://proxy.example.com:99999' };
+		// getNetworkInterfaces is never answered
+		const { props } = makeHarness({ data, answers: { getServerInfo: HTTP_SERVER } });
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(document.body.textContent).toContain('Loading'));
+		expect(ALERTS().some(a => a.includes(UNUSABLE))).toBe(true);
 	});
 
 	it.each(['https://user:pw@proxy.example.com', 'https://proxy.example.com:99999', 'https://%zz'])(

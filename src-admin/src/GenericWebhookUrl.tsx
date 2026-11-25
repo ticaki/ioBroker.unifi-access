@@ -118,6 +118,15 @@ export function unusablePublicBaseUrl(saved: unknown): boolean {
 }
 
 /**
+ * The listen IP as the adapter uses it: empty (or not set) and `0.0.0.0` both mean "all interfaces".
+ *
+ * @param value the setting `listenIp`
+ */
+export function normalizeListenIp(value: unknown): string {
+	return typeof value === 'string' && value !== '' && value !== '0.0.0.0' ? value : '0.0.0.0';
+}
+
+/**
  * Which parts of the displayed URL come from form values that are not saved (and therefore not in use).
  *
  * @param data the adapter configuration that is currently edited
@@ -128,7 +137,7 @@ export function unsavedUrlParts(
 	data: Record<string, unknown> | undefined,
 	saved: Record<string, unknown> | undefined,
 	info: ServerInfo | null,
-): { publicBase: boolean; portOrPath: boolean } {
+): { publicBase: boolean; listen: boolean } {
 	const formBase = normalizePublicBaseUrl(data?.publicBaseUrl);
 	// the saved value as the adapter reports it, otherwise as saved
 	const publicBase =
@@ -136,13 +145,17 @@ export function unsavedUrlParts(
 			? formBase !== info.publicBaseUrl
 			: !!saved && formBase !== normalizePublicBaseUrl(saved.publicBaseUrl);
 	const formPort = normalizePort(data?.listenPort);
-	// with a public base URL the port is not part of the URL
+	// with a public base URL, address, port and scheme are not part of the URL
 	const port =
 		!formBase &&
 		(info?.port != null ? formPort !== info.port : !!saved && formPort !== normalizePort(saved.listenPort));
+	const ip = !formBase && !!saved && normalizeListenIp(data?.listenIp) !== normalizeListenIp(saved.listenIp);
+	const formTls = data?.enableTls === true;
+	const tls =
+		!formBase && (info !== null ? formTls !== info.tlsEnabled : !!saved && formTls !== (saved.enableTls === true));
 	const path =
 		!!saved && normalizeWebhookPath(data?.genericWebhookPath) !== normalizeWebhookPath(saved.genericWebhookPath);
-	return { publicBase, portOrPath: port || path };
+	return { publicBase, listen: port || ip || tls || path };
 }
 
 class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhookUrlState> {
@@ -302,29 +315,47 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 		// A saved but unusable value is reported as such; the unsaved hint is about form changes only.
 		const savedBaseUnusable = unusablePublicBaseUrl(saved?.publicBaseUrl);
 		const publicBaseUnsaved = unsaved.publicBase;
+		// also while the addresses load or when none is known: the saved base URL was meant to replace them
+		const unusableAlert = savedBaseUnusable ? (
+			<Alert
+				severity="warning"
+				variant="outlined"
+				sx={{ mt: 1 }}
+			>
+				{I18n.t(
+					'generic_webhook_public_base_invalid',
+					typeof saved?.publicBaseUrl === 'string' ? saved.publicBaseUrl.trim() : '',
+				)}
+			</Alert>
+		) : null;
 
 		if (!publicBase && loading) {
 			return (
-				<Stack
-					direction="row"
-					spacing={1}
-					sx={{ alignItems: 'center', mt: 1 }}
-				>
-					<CircularProgress size={16} />
-					<Typography variant="body2">{I18n.t('generic_webhook_url_loading')}</Typography>
-				</Stack>
+				<Box sx={{ width: '100%', mt: 1 }}>
+					<Stack
+						direction="row"
+						spacing={1}
+						sx={{ alignItems: 'center' }}
+					>
+						<CircularProgress size={16} />
+						<Typography variant="body2">{I18n.t('generic_webhook_url_loading')}</Typography>
+					</Stack>
+					{unusableAlert}
+				</Box>
 			);
 		}
 
 		if (!publicBase && addresses.length === 0) {
 			return (
-				<Typography
-					variant="body2"
-					color="text.secondary"
-					sx={{ mt: 1 }}
-				>
-					{error ?? I18n.t('generic_webhook_url_no_addresses')}
-				</Typography>
+				<Box sx={{ width: '100%', mt: 1 }}>
+					<Typography
+						variant="body2"
+						color="text.secondary"
+					>
+						{error ?? I18n.t('generic_webhook_url_no_addresses')}
+					</Typography>
+					{unusableAlert}
+				</Box>
 			);
 		}
 
@@ -371,18 +402,7 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 						);
 					})}
 				</Stack>
-				{savedBaseUnusable ? (
-					<Alert
-						severity="warning"
-						variant="outlined"
-						sx={{ mt: 1 }}
-					>
-						{I18n.t(
-							'generic_webhook_public_base_invalid',
-							typeof saved?.publicBaseUrl === 'string' ? saved.publicBaseUrl.trim() : '',
-						)}
-					</Alert>
-				) : null}
+				{unusableAlert}
 				{publicBaseUnsaved ? (
 					<Alert
 						severity="info"
@@ -392,7 +412,7 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 						{I18n.t('generic_webhook_public_base_unsaved')}
 					</Alert>
 				) : null}
-				{unsaved.portOrPath ? (
+				{unsaved.listen ? (
 					<Alert
 						severity="info"
 						variant="outlined"
