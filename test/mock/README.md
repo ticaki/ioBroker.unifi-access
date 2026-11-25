@@ -91,6 +91,14 @@ curl -k -X POST $M/webhook -d '{"type":"door_unlock","signature":"invalid"}'    
 # Fehler injizieren: der nächste passende API-Request schlägt fehl
 curl -k -X POST $M/fail -d '{"method":"PUT","path":"/doors/<door-id>/unlock","status":500}'
 curl -k -X POST $M/fail -d '{"path":"/devices","hangUp":true,"times":3}'        # Verbindung abreißen lassen
+curl -k -X POST $M/fail -d '{"path":"/doors","delayMs":20000}'                  # Controller „hängt“ (Antwort kommt spät)
+
+# Daten zur Laufzeit austauschen / Controller-Neustart (Zustand bleibt erhalten)
+curl -k -X POST $M/data -d '{"devices":[],"users":[{"id":"u1","first_name":"A","last_name":"B"}]}'
+curl -k -X POST $M/data -d '{"door":{"id":"<door-id>","door_lock_relay_status":"lock"}}'   # einzelne Tür ändern
+curl -k -X POST $M/static -d '{"path":"/preview/reader_x.jpg","base64":"<jpeg>"}'
+curl -k -X POST $M/options -d '{"wsAccepting":false}'                           # WebSocket-Upgrade mit 503 ablehnen
+curl -k -X POST $M/restart -d '{"downMs":5000}'                                 # 5 s weg, dann wieder auf demselben Port
 ```
 
 `signature` kennt `valid` (Default), `invalid` (falsches Secret), `tampered` (Body nach dem Signieren

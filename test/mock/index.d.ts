@@ -85,6 +85,8 @@ export interface MockFault extends RequestFilter {
 	msg?: string;
 	body?: unknown;
 	hangUp?: boolean;
+	/** Wait this long before answering; without any other field the regular answer is sent afterwards */
+	delayMs?: number;
 	times?: number;
 }
 

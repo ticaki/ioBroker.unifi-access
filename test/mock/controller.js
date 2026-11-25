@@ -280,6 +280,7 @@ class MockUnifiController extends EventEmitter {
 	 * @param {string} [fault.msg] Message for the response envelope
 	 * @param {unknown} [fault.body] Send exactly this body instead of an error envelope (objects as JSON)
 	 * @param {boolean} [fault.hangUp] Destroy the socket without answering (network error)
+	 * @param {number} [fault.delayMs] Wait this long before answering (alone: the regular answer comes late)
 	 * @param {number} [fault.times] How many requests to fail (default 1, Infinity = until reset)
 	 */
 	failNext(fault) {
@@ -588,7 +589,21 @@ class MockUnifiController extends EventEmitter {
 			respond(status ?? DEFAULT_ERROR_STATUS[code] ?? 400, { code, msg: msg ?? ERROR_MESSAGES[code] ?? code });
 
 		const fault = this.takeFault(record);
-		if (fault) {
+		if (fault?.delayMs) {
+			// a controller that "hangs": answer late (or never, if the client gave up in the meantime)
+			await new Promise(resolve => setTimeout(resolve, fault.delayMs));
+			if (req.socket.destroyed || res.destroyed) {
+				record.status = -2;
+				this.requests.push(record);
+				this.log(`${record.method} ${record.url} -> client gave up after ${fault.delayMs} ms (fault)`);
+				this.emit('request', record);
+				return;
+			}
+		}
+		// a fault that only delays lets the request through afterwards
+		const delayOnly =
+			fault?.delayMs && !fault.hangUp && fault.body === undefined && fault.status === undefined && !fault.code;
+		if (fault && !delayOnly) {
 			if (fault.hangUp) {
 				record.status = -1;
 				this.requests.push(record);
@@ -999,6 +1014,79 @@ class MockUnifiController extends EventEmitter {
 				send(200, { ok: true, faults: this.faults.length });
 				return;
 
+			case 'POST /data': {
+				// replace fixture data at runtime (devices may be given flat or grouped as the API returns them)
+				if (Array.isArray(body.devices)) {
+					this.devices = body.devices.every(Array.isArray) ? body.devices : [body.devices];
+				}
+				if (Array.isArray(body.doors)) {
+					this.doors = body.doors;
+				}
+				if (Array.isArray(body.users)) {
+					this.users = body.users;
+				}
+				if (body.emergency && typeof body.emergency === 'object') {
+					this.emergency = { ...this.emergency, ...body.emergency };
+				}
+				if (body.door && typeof body.door.id === 'string') {
+					const door = this.findDoor(body.door.id);
+					if (!door) {
+						send(404, { error: `unknown door: ${body.door.id}` });
+						return;
+					}
+					Object.assign(door, body.door);
+				}
+				send(200, {
+					ok: true,
+					devices: this.flatDevices.length,
+					doors: this.doors.length,
+					users: this.users.length,
+				});
+				return;
+			}
+
+			case 'POST /static': {
+				if (typeof body.path !== 'string' || !body.path) {
+					send(400, { error: 'body must contain "path" (and optional "base64", "contentType")' });
+					return;
+				}
+				this.addStaticResource(
+					body.path,
+					typeof body.base64 === 'string' ? Buffer.from(body.base64, 'base64') : undefined,
+					typeof body.contentType === 'string' ? body.contentType : undefined,
+				);
+				send(200, { ok: true, resources: this.staticResources.size });
+				return;
+			}
+
+			case 'POST /options':
+				for (const key of ['wsAccepting', 'omitSecretInList', 'autoEvents', 'serveAnyStatic']) {
+					if (typeof body[key] === 'boolean') {
+						this[key] = body[key];
+					}
+				}
+				send(200, {
+					wsAccepting: this.wsAccepting,
+					omitSecretInList: this.omitSecretInList,
+					autoEvents: this.autoEvents,
+					serveAnyStatic: this.serveAnyStatic,
+				});
+				return;
+
+			case 'POST /restart': {
+				// answered first: the restart drops this connection as well
+				const downMs = Number.isFinite(Number(body.downMs)) ? Math.max(0, Number(body.downMs)) : 0;
+				send(200, { ok: true, downMs });
+				const port = this.port;
+				setTimeout(() => {
+					this.stop()
+						.then(() => new Promise(resolve => setTimeout(resolve, downMs)))
+						.then(() => this.start({ port }))
+						.catch(err => this.log(`mock restart failed: ${err.stack ?? err}`));
+				}, 20);
+				return;
+			}
+
 			case 'POST /ws/drop':
 				send(200, { dropped: this.dropWsConnections({ graceful: body.graceful === true }) });
 				return;
@@ -1109,7 +1197,15 @@ const CONTROL_ROUTES = {
 	'GET /__mock/requests': 'all recorded API requests',
 	'DELETE /__mock/requests': 'forget recorded requests',
 	'POST /__mock/reset': 'restore fixtures, forget endpoints/requests/faults',
-	'POST /__mock/fail': 'make upcoming API requests fail: {method?, path?, status?, code?, msg?, times?, hangUp?}',
+	'POST /__mock/fail':
+		'make upcoming API requests fail: {method?, path?, status?, code?, msg?, times?, hangUp?, delayMs?} (delayMs alone: answer late)',
+	'POST /__mock/data':
+		'replace data at runtime: {devices?: Device[] | Device[][], doors?: Door[], users?: User[], emergency?: {...}, door?: {id, ...fields to change}}',
+	'POST /__mock/static':
+		'content for GET /system/static/<path>: {"path": "...", "base64"?: "...", "contentType"?: "image/jpeg"}',
+	'POST /__mock/options':
+		'switches: {wsAccepting?, omitSecretInList?, autoEvents?, serveAnyStatic?} (answers the current values)',
+	'POST /__mock/restart': 'stop and start again on the same port, state is kept: {"downMs"?: 0}',
 	'POST /__mock/ws/event':
 		'push a WebSocket notification: {"type":"remote_view"|"remote_view_change"|"remote_unlock", reasonCode?, doorId?, data?} or a full envelope {"event":...}',
 	'POST /__mock/ws/raw': 'push an arbitrary text frame: {"text": "..."}',

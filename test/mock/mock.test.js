@@ -267,6 +267,82 @@ describe('mock UniFi Access controller (self-test)', () => {
 		});
 	});
 
+	describe('control routes for manual and end-to-end testing', () => {
+		it('POST /__mock/data replaces devices, doors and users and changes a single door', async () => {
+			const answer = await control('POST', '/data', {
+				devices: [{ id: 'aa', name: 'Only one', type: 'UA-ULTRA' }],
+				users: [],
+				door: { id: fixtures.IDS.DOOR_3855, door_lock_relay_status: 'unlock' },
+			});
+			expect(answer.body).to.deep.include({ ok: true, devices: 1, doors: 2, users: 0 });
+
+			// a flat device list is wrapped into one group, as GET /devices returns groups
+			expect(JSON.parse((await api('/devices')).text).data).to.deep.equal([
+				[{ id: 'aa', name: 'Only one', type: 'UA-ULTRA' }],
+			]);
+			expect(JSON.parse((await api('/users')).text).data).to.deep.equal([]);
+			expect(mock.findDoor(fixtures.IDS.DOOR_3855).door_lock_relay_status).to.equal('unlock');
+			expect((await control('POST', '/data', { door: { id: 'nope' } })).status).to.equal(404);
+		});
+
+		it('POST /__mock/static registers content for /system/static', async () => {
+			const image = Buffer.from([0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9]);
+			await control('POST', '/static', { path: '/preview/reader_x.jpg', base64: image.toString('base64') });
+
+			const response = await api('/system/static/preview/reader_x.jpg');
+			expect(response.status).to.equal(200);
+			expect(response.headers['content-type']).to.equal('image/jpeg');
+			expect(Buffer.compare(response.body, image)).to.equal(0);
+			expect((await control('POST', '/static', {})).status).to.equal(400);
+		});
+
+		it('POST /__mock/options switches the WebSocket endpoint off and on', async () => {
+			expect((await control('POST', '/options', { wsAccepting: false })).body.wsAccepting).to.equal(false);
+			expect(mock.wsAccepting).to.equal(false);
+			expect((await control('POST', '/options', { wsAccepting: true, somethingElse: 1 })).body).to.deep.equal({
+				wsAccepting: true,
+				omitSecretInList: false,
+				autoEvents: false,
+				serveAnyStatic: false,
+			});
+		});
+
+		it('POST /__mock/restart comes back on the same port and keeps its state', async () => {
+			const port = mock.port;
+			mock.addWebhookEndpoint({ endpoint: 'http://127.0.0.1:9/hook' });
+
+			expect((await control('POST', '/restart', { downMs: 150 })).body).to.deep.equal({ ok: true, downMs: 150 });
+			await waitFor(() => mock.server === null, { timeoutMs: 2000 });
+			await waitFor(() => mock.server !== null, { timeoutMs: 3000 });
+
+			expect(mock.port).to.equal(port);
+			expect((await control('GET', '/state')).body.webhookEndpoints).to.have.length(1);
+		});
+
+		it('a fault with delayMs alone answers late but regularly; a client that gave up is recorded', async () => {
+			mock.failNext({ path: '/doors', delayMs: 150 });
+			const started = Date.now();
+			const late = await api('/doors');
+			expect(late.status).to.equal(200);
+			expect(Date.now() - started).to.be.at.least(140);
+
+			mock.failNext({ path: '/doors', delayMs: 400 });
+			const error = await api('/doors', { timeoutMs: 100 }).then(
+				() => null,
+				err => err,
+			);
+			expect(error, 'the request must time out').to.be.an('error');
+			await waitFor(() => mock.findRequests({ path: '/doors' }).some(request => request.status === -2), {
+				timeoutMs: 2000,
+			});
+		});
+
+		it('a fault with delayMs and a status answers late with that status', async () => {
+			mock.failNext({ path: '/devices', delayMs: 50, status: 500 });
+			expect((await api('/devices')).status).to.equal(500);
+		});
+	});
+
 	describe('CLI', () => {
 		it('node test/mock/cli.js starts a controller on the requested port and stops on SIGTERM', async function () {
 			this.timeout(15_000);
