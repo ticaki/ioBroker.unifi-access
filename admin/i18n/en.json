@@ -83,5 +83,6 @@
 	"protect_enable": "Enable Protect integration",
 	"protect_username": "Username",
 	"protect_password": "Password",
-	"protect_verify_tls": "Verify TLS certificate"
+	"protect_verify_tls": "Verify TLS certificate",
+	"protect_verify_tls_help": "Disabled by default — UniFi consoles use a self-signed certificate. Enable only if the console has a certificate that is valid or can be verified with a CA certificate."
 }

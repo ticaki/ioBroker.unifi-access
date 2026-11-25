@@ -496,7 +496,8 @@
 				"protectVerifyTLS": {
 					"type": "checkbox",
 					"label": "protect_verify_tls",
-					"default": true,
+					"help": "protect_verify_tls_help",
+					"default": false,
 					"disabled": "!data.enableProtect",
 					"newLine": true,
 					"xs": 12,

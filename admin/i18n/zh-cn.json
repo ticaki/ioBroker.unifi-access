@@ -83,5 +83,6 @@
 	"protect_enable": "启用 Protect 集成",
 	"protect_username": "用户名",
 	"protect_password": "密码",
-	"protect_verify_tls": "验证 TLS 证书"
+	"protect_verify_tls": "验证 TLS 证书",
+	"protect_verify_tls_help": "默认禁用 — UniFi 控制台使用自签名证书。仅当控制台的证书有效或可通过 CA 证书验证时才启用。"
 }

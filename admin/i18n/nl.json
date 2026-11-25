@@ -83,5 +83,6 @@
 	"protect_enable": "Protect-integratie inschakelen",
 	"protect_username": "Gebruikersnaam",
 	"protect_password": "Wachtwoord",
-	"protect_verify_tls": "TLS-certificaat verifiëren"
+	"protect_verify_tls": "TLS-certificaat verifiëren",
+	"protect_verify_tls_help": "Standaard uitgeschakeld — UniFi-consoles gebruiken een zelfondertekend certificaat. Alleen inschakelen als de console een geldig certificaat heeft of een certificaat dat met een CA-certificaat kan worden gecontroleerd."
 }

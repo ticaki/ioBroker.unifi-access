@@ -83,5 +83,6 @@
 	"protect_enable": "Włącz integrację Protect",
 	"protect_username": "Nazwa użytkownika",
 	"protect_password": "Hasło",
-	"protect_verify_tls": "Weryfikuj certyfikat TLS"
+	"protect_verify_tls": "Weryfikuj certyfikat TLS",
+	"protect_verify_tls_help": "Domyślnie wyłączone — konsole UniFi używają samopodpisanego certyfikatu. Włącz tylko wtedy, gdy konsola ma ważny certyfikat lub taki, który można zweryfikować za pomocą certyfikatu CA."
 }

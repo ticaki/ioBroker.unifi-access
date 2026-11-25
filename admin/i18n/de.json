@@ -83,5 +83,6 @@
 	"protect_enable": "Protect-Integration aktivieren",
 	"protect_username": "Benutzername",
 	"protect_password": "Passwort",
-	"protect_verify_tls": "TLS-Zertifikat prüfen"
+	"protect_verify_tls": "TLS-Zertifikat prüfen",
+	"protect_verify_tls_help": "Standardmäßig deaktiviert — UniFi-Konsolen nutzen ein selbstsigniertes Zertifikat. Nur aktivieren, wenn die Konsole ein gültiges bzw. per CA-Zertifikat prüfbares Zertifikat hat."
 }

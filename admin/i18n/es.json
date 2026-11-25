@@ -83,5 +83,6 @@
 	"protect_enable": "Activar integración Protect",
 	"protect_username": "Usuario",
 	"protect_password": "Contraseña",
-	"protect_verify_tls": "Verificar certificado TLS"
+	"protect_verify_tls": "Verificar certificado TLS",
+	"protect_verify_tls_help": "Desactivado por defecto — las consolas UniFi usan un certificado autofirmado. Actívalo solo si la consola tiene un certificado válido o verificable con un certificado CA."
 }
