@@ -1,20 +1,32 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { DEFAULTS, parseSettings, useSettingsProvider } from './settings';
-import { setIobState, setStates, updateState } from './test/socketMock';
+import {
+    deliverAll,
+    deliverNext,
+    holdDeliveries,
+    pendingDeliveries,
+    resetSocketMock,
+    setAdapterRunning,
+    setIobState,
+    setStates,
+    updateState,
+} from './test/socketMock';
 
 vi.mock('./socket', () => import('./test/socketMock'));
 
 beforeEach(() => {
-    setIobState.mockClear();
-    setIobState.mockImplementation(() => Promise.resolve());
+    resetSocketMock();
     setStates({});
 });
 
 describe('parseSettings', () => {
-    it.each([undefined, null, '', 'not json', '42', '"text"', '[1,2]', 'null'])('falls back to the defaults for %j', raw => {
-        expect(parseSettings(raw)).toEqual(DEFAULTS);
-    });
+    it.each([undefined, null, '', 'not json', '42', '"text"', '[1,2]', 'null'])(
+        'falls back to the defaults for %j',
+        raw => {
+            expect(parseSettings(raw)).toEqual(DEFAULTS);
+        },
+    );
 
     it('takes valid values and keeps the default for everything else', () => {
         const raw = JSON.stringify({
@@ -152,45 +164,111 @@ describe('useSettingsProvider', () => {
             const { result } = renderHook(() => useSettingsProvider());
             act(() => result.current.update({ thumbWidth: 0 }));
             act(() => setStates({}));
-            expect(setIobState).toHaveBeenCalledWith('admin.uiSettings', JSON.stringify({ ...DEFAULTS, thumbWidth: 0 }));
+            expect(setIobState).toHaveBeenCalledWith(
+                'admin.uiSettings',
+                JSON.stringify({ ...DEFAULTS, thumbWidth: 0 }),
+            );
         });
     });
 });
 
-describe('echoes of the own writes (R2F unconfirmed: flicker)', () => {
+describe('echoes and confirmations of the own writes (flicker: R2F, R3F-03)', () => {
     const ID = 'admin.uiSettings';
-    const written = (): string[] => setIobState.mock.calls.map(call => String(call[1]));
+    const both = { showDoorList: false, showEventLog: false };
 
-    it('two switches in quick succession: the echo of the first does not flip the second back', () => {
+    /**
+     * Deliver the changes on their way one by one; after each the screen must still show both changes.
+     *
+     * @param result the hook
+     * @param result.current current value of the hook
+     * @param result.current.settings what is shown
+     * @param expected what the screen has to show throughout
+     */
+    function deliverOneByOne(result: { current: { settings: object } }, expected: object): string[] {
+        const order: string[] = [];
+        for (;;) {
+            let delivered: ReturnType<typeof deliverNext>;
+            act(() => {
+                delivered = deliverNext();
+            });
+            if (!delivered!) {
+                return order;
+            }
+            order.push(
+                `${delivered.ack ? 'ack' : 'echo'} ${JSON.parse(String(delivered.val)).showEventLog === false ? 'Y' : 'X'}`,
+            );
+            expect(result.current.settings, order.join(', ')).toMatchObject(expected);
+        }
+    }
+
+    it('order echo X, echo Y, ack X, ack Y: the confirmation of the first does not flip the second back', () => {
+        setStates({ [ID]: JSON.stringify(DEFAULTS) });
+        holdDeliveries();
+        const { result } = renderHook(() => useSettingsProvider());
+        act(() => result.current.update({ showDoorList: false }));
+        act(() => result.current.update({ showEventLog: false }));
+        expect(deliverOneByOne(result, both)).toEqual(['echo X', 'echo Y', 'ack X', 'ack Y']);
+        expect(setIobState).toHaveBeenCalledTimes(2);
+    });
+
+    it('order echo X, ack X, echo Y, ack Y (Y written before the confirmation of X arrived)', () => {
+        setStates({ [ID]: JSON.stringify(DEFAULTS) });
+        holdDeliveries();
+        const { result } = renderHook(() => useSettingsProvider());
+        act(() => result.current.update({ showDoorList: false }));
+        act(() => {
+            deliverNext();
+        });
+        act(() => result.current.update({ showEventLog: false }));
+        expect(deliverOneByOne(result, both)).toEqual(['ack X', 'echo Y', 'ack Y']);
+        expect(setIobState).toHaveBeenCalledTimes(2);
+    });
+
+    it('stopped adapter (only echoes, no confirmations): both changes stay, a later change from elsewhere is taken over', () => {
+        setStates({ [ID]: JSON.stringify(DEFAULTS) });
+        setAdapterRunning(false);
+        holdDeliveries();
+        const { result } = renderHook(() => useSettingsProvider());
+        act(() => result.current.update({ showDoorList: false }));
+        act(() => result.current.update({ showEventLog: false }));
+        expect(deliverOneByOne(result, both)).toEqual(['echo X', 'echo Y']);
+        act(() => updateState(ID, JSON.stringify({ ...DEFAULTS, maxWidth: 900 }), Date.now(), { ack: false }));
+        expect(result.current.settings).toEqual({ ...DEFAULTS, maxWidth: 900 });
+    });
+
+    it('a slider that is being dragged does not jump back when the echo or confirmation of an earlier change arrives', () => {
+        setStates({ [ID]: JSON.stringify(DEFAULTS) });
+        holdDeliveries();
+        const { result } = renderHook(() => useSettingsProvider());
+        act(() => result.current.update({ showDoorbell: false }));
+        act(() => result.current.update({ thumbWidth: 150 }, false));
+        act(() => deliverAll());
+        expect(result.current.settings).toMatchObject({ showDoorbell: false, thumbWidth: 150 });
+        act(() => result.current.update({ thumbWidth: 160 }));
+        act(() => deliverAll());
+        expect(result.current.settings).toMatchObject({ showDoorbell: false, thumbWidth: 160 });
+        expect(setIobState).toHaveBeenCalledTimes(2);
+    });
+
+    it('a change from elsewhere is still taken over, also between the own deliveries', () => {
+        setStates({ [ID]: JSON.stringify(DEFAULTS) });
+        holdDeliveries();
+        const { result } = renderHook(() => useSettingsProvider());
+        act(() => updateState(ID, JSON.stringify({ ...DEFAULTS, maxWidth: 900 })));
+        expect(result.current.settings.maxWidth).toBe(900);
+        act(() => result.current.update({ showDoorList: false }));
+        act(() => deliverAll());
+        act(() => updateState(ID, JSON.stringify({ ...DEFAULTS, maxWidth: 700 })));
+        expect(result.current.settings).toEqual({ ...DEFAULTS, maxWidth: 700 });
+    });
+
+    it('with deliveries right away (default) a change is stored once and stays', () => {
         setStates({ [ID]: JSON.stringify(DEFAULTS) });
         const { result } = renderHook(() => useSettingsProvider());
         act(() => result.current.update({ showDoorList: false }));
         act(() => result.current.update({ showEventLog: false }));
-        const [first, second] = written();
-
-        act(() => updateState(ID, first));
-        expect(result.current.settings).toMatchObject({ showDoorList: false, showEventLog: false });
-        act(() => updateState(ID, second));
-        expect(result.current.settings).toMatchObject({ showDoorList: false, showEventLog: false });
+        expect(result.current.settings).toMatchObject(both);
         expect(setIobState).toHaveBeenCalledTimes(2);
-    });
-
-    it('a slider that is being dragged does not jump back when the echo of an earlier change arrives', () => {
-        setStates({ [ID]: JSON.stringify(DEFAULTS) });
-        const { result } = renderHook(() => useSettingsProvider());
-        act(() => result.current.update({ showDoorbell: false }));
-        act(() => result.current.update({ thumbWidth: 150 }, false));
-        act(() => updateState(ID, written()[0]));
-        expect(result.current.settings).toMatchObject({ showDoorbell: false, thumbWidth: 150 });
-        act(() => result.current.update({ thumbWidth: 160 }));
-        act(() => updateState(ID, written()[1]));
-        expect(result.current.settings).toMatchObject({ showDoorbell: false, thumbWidth: 160 });
-    });
-
-    it('a change from elsewhere is still taken over', () => {
-        setStates({ [ID]: JSON.stringify(DEFAULTS) });
-        const { result } = renderHook(() => useSettingsProvider());
-        act(() => updateState(ID, JSON.stringify({ ...DEFAULTS, maxWidth: 900 })));
-        expect(result.current.settings.maxWidth).toBe(900);
+        expect(pendingDeliveries()).toEqual([]);
     });
 });

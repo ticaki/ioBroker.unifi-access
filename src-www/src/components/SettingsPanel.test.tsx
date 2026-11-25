@@ -3,7 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import type { JSX } from 'react';
 import { SettingsPanel } from './SettingsPanel';
 import { DEFAULTS, SettingsContext, useSettingsProvider, type AppSettings } from '../settings';
-import { setIobState, setStates } from '../test/socketMock';
+import { resetSocketMock, setIobState, setStates } from '../test/socketMock';
 
 vi.mock('../socket', () => import('../test/socketMock'));
 
@@ -30,8 +30,7 @@ function open(): void {
 }
 
 beforeEach(() => {
-    setIobState.mockClear();
-    setIobState.mockImplementation(() => Promise.resolve());
+    resetSocketMock();
     setStates({});
 });
 

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { collectDoors, DoorList } from './DoorList';
 import { describeLockRule } from './DoorCard';
-import { setIobState, setStates } from '../test/socketMock';
+import { resetSocketMock, setIobState, setStates } from '../test/socketMock';
 
 vi.mock('../socket', () => import('../test/socketMock'));
 
@@ -39,8 +39,7 @@ function lockChip(doorName: string): { label: string | null; icon: string | null
 }
 
 beforeEach(() => {
-    setIobState.mockClear();
-    setIobState.mockImplementation(() => Promise.resolve());
+    resetSocketMock();
     setStates({});
 });
 

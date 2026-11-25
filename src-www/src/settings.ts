@@ -21,6 +21,50 @@ export const DEFAULTS: AppSettings = {
     thumbWidth: 96,
 };
 const SETTINGS_ID = 'admin.uiSettings';
+/** Own writes remembered at most (only reached while the adapter confirms nothing, e.g. stopped) */
+const MAX_IN_FLIGHT = 20;
+
+/** An own write of the settings that is not confirmed by the adapter yet. */
+interface OwnWrite {
+    json: string;
+    /** its echo (ack=false) has arrived */
+    echoed: boolean;
+}
+
+/**
+ * Whether a value that arrived for the settings state is one of the own writes - and must then not be
+ * taken over while newer own writes are still on their way, or the screen would flip back.
+ *
+ * Every write comes back twice: first as its echo (`ack: false`), then as the confirmation of the adapter
+ * (`ack: true`, same value; src/main.ts handleUiSettings). Echoes and confirmations of several writes
+ * may interleave (echo X, echo Y, ack X, ack Y), but the adapter confirms them in the order of writing:
+ * a confirmation also settles every older write. An echo settles nothing - the confirmation of an older
+ * write may still come after it. Without a running adapter there are only echoes; the list is limited.
+ *
+ * @param inFlight own writes, oldest first (changed in place)
+ * @param state the value that arrived
+ * @returns true: an own value older than the newest own write - ignore it
+ */
+export function isOutdatedOwnValue(inFlight: OwnWrite[], state: ioBroker.State | null): boolean {
+    if (typeof state?.val !== 'string') {
+        return false;
+    }
+    const val = state.val;
+    if (state.ack) {
+        const index = inFlight.findIndex(write => write.json === val);
+        if (index < 0) {
+            return false;
+        }
+        inFlight.splice(0, index + 1);
+        return inFlight.length > 0;
+    }
+    const index = inFlight.findIndex(write => write.json === val && !write.echoed);
+    if (index < 0) {
+        return false;
+    }
+    inFlight[index].echoed = true;
+    return index < inFlight.length - 1;
+}
 
 /** Allowed range per numeric setting - the same limits the sliders of the settings panel have */
 const NUMBER_LIMITS: Record<'maxWidth' | 'snapshotHeight' | 'thumbWidth', [min: number, max: number]> = {
@@ -86,8 +130,8 @@ export function useSettingsProvider(): SettingsCtx {
     const loaded = useRef(false);
     /** Changes made before the stored settings were read: merged into them, not written over them */
     const pending = useRef<{ patch: Partial<AppSettings>; persist: boolean } | null>(null);
-    /** Values written and not echoed yet, oldest first */
-    const inFlight = useRef<string[]>([]);
+    /** Own writes not confirmed by the adapter yet, oldest first */
+    const inFlight = useRef<OwnWrite[]>([]);
     /** Shown but not stored yet (a slider that is being dragged) */
     const draft = useRef<Partial<AppSettings>>({});
 
@@ -98,10 +142,14 @@ export function useSettingsProvider(): SettingsCtx {
 
     const store = useCallback((next: AppSettings) => {
         const json = JSON.stringify(next);
-        inFlight.current.push(json);
+        const write: OwnWrite = { json, echoed: false };
+        inFlight.current.push(write);
+        if (inFlight.current.length > MAX_IN_FLIGHT) {
+            inFlight.current.splice(0, inFlight.current.length - MAX_IN_FLIGHT);
+        }
         draft.current = {};
         setIobState(SETTINGS_ID, json).catch((err: unknown) => {
-            inFlight.current = inFlight.current.filter(value => value !== json);
+            inFlight.current = inFlight.current.filter(entry => entry !== write);
             // eslint-disable-next-line no-console
             console.error('Cannot store the UI settings:', err);
         });
@@ -112,14 +160,10 @@ export function useSettingsProvider(): SettingsCtx {
             return;
         }
         loaded.current = true;
-        const own = typeof raw?.val === 'string' ? inFlight.current.indexOf(raw.val) : -1;
-        if (own >= 0) {
-            // the echo of an own write: what is on screen already contains it. While later writes are still
-            // on their way, it is older than the screen - taking it over would flip those changes back.
-            inFlight.current = inFlight.current.slice(own + 1);
-            if (inFlight.current.length > 0) {
-                return;
-            }
+        // an echo or confirmation of an own write: what is on screen already contains it. While later writes
+        // are still on their way, it is older than the screen - taking it over would flip those changes back.
+        if (isOutdatedOwnValue(inFlight.current, raw)) {
+            return;
         }
         const stored = typeof raw?.val === 'string' && raw.val ? parseSettings(raw.val) : undefined;
         const waiting = pending.current;

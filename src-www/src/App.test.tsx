@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { App } from './App';
 import { useThemeMode } from './theme';
-import { setIobState, setSocketLoadError, setStates } from './test/socketMock';
+import { resetSocketMock, setIobState, setSocketLoadError, setStates } from './test/socketMock';
 
 vi.mock('./socket', () => import('./test/socketMock'));
 
@@ -29,7 +29,7 @@ function installMatchMedia(prefersDark: boolean): { setSystemDark: (dark: boolea
 
 beforeEach(() => {
     localStorage.clear();
-    setIobState.mockClear();
+    resetSocketMock();
     setSocketLoadError(null);
     setStates({});
 });
