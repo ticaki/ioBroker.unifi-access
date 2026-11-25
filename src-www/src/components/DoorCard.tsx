@@ -8,9 +8,36 @@ interface DoorCardProps {
     doorId: string;
     name: string;
     locked: boolean | null | undefined;
+    /** Active temporary lock rule as the controller reports it (`doors.<id>.lockRuleType`) */
+    lockRuleType?: string;
+    /** End of the rule in ms epoch (`doors.<id>.lockRuleEndsAt`) */
+    lockRuleEndsAt?: number | null;
 }
 
-export function DoorCard({ doorId, name, locked }: DoorCardProps): JSX.Element {
+/**
+ * Text for the temporary lock rule of a door. `schedule` is the normal state (the door follows its
+ * schedule) and an empty type means "no rule" or "unknown" - both are not worth a line.
+ *
+ * @param type value of `doors.<id>.lockRuleType`
+ * @param endsAt value of `doors.<id>.lockRuleEndsAt` (ms epoch)
+ */
+export function describeLockRule(type: string | undefined, endsAt: number | null | undefined): string | null {
+    const until = typeof endsAt === 'number' && endsAt > 0 ? ` until ${new Date(endsAt).toLocaleString()}` : '';
+    switch (type) {
+        case 'custom':
+            return `Unlocked for a limited time${until}`;
+        case 'keep_unlock':
+            return `Kept unlocked${until}`;
+        case 'keep_lock':
+            return `Kept locked${until}`;
+        case 'lock_early':
+            return `Unlock schedule ended early${until}`;
+        default:
+            return null;
+    }
+}
+
+export function DoorCard({ doorId, name, locked, lockRuleType, lockRuleEndsAt }: DoorCardProps): JSX.Element {
     const [failed, setFailed] = useState(false);
 
     const handleUnlock = (): void => {
@@ -26,6 +53,7 @@ export function DoorCard({ doorId, name, locked }: DoorCardProps): JSX.Element {
 
     const lockedKnown = typeof locked === 'boolean';
     const isLocked = locked === true;
+    const rule = describeLockRule(lockRuleType, lockRuleEndsAt);
 
     return (
         <Card variant="outlined">
@@ -42,6 +70,14 @@ export function DoorCard({ doorId, name, locked }: DoorCardProps): JSX.Element {
                         label={!lockedKnown ? 'unknown' : isLocked ? 'locked' : 'unlocked'}
                     />
                 </Stack>
+                {rule ? (
+                    <Typography
+                        variant="caption"
+                        color="text.secondary"
+                    >
+                        {rule}
+                    </Typography>
+                ) : null}
             </CardContent>
             <CardActions>
                 <Button

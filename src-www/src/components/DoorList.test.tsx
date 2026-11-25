@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { collectDoors, DoorList } from './DoorList';
+import { describeLockRule } from './DoorCard';
 import { setIobState, setStates } from '../test/socketMock';
 
 vi.mock('../socket', () => import('../test/socketMock'));
@@ -74,6 +75,54 @@ describe('collectDoors', () => {
             { id: 'door-a', locked: null },
             { id: 'door-c', locked: null },
         ]);
+    });
+});
+
+describe('temporary lock rule of a door', () => {
+    const END = new Date(2026, 10, 25, 14, 30).getTime();
+
+    it('is read from lockRuleType / lockRuleEndsAt', () => {
+        const { doors } = collectDoors(
+            {
+                [`${NS}.doors.door-a.lockRuleType`]: state('custom'),
+                [`${NS}.doors.door-a.lockRuleEndsAt`]: state(END),
+                [`${NS}.doors.door-b.lockRuleType`]: state(''),
+                [`${NS}.doors.door-b.lockRuleEndsAt`]: state(null),
+                [`${NS}.doors.door-c.lockRuleType`]: state(4),
+                [`${NS}.doors.door-c.lockRuleEndsAt`]: state('soon'),
+            },
+            NS,
+        );
+
+        expect(doors).toEqual([
+            { id: 'door-a', lockRuleType: 'custom', lockRuleEndsAt: END },
+            { id: 'door-b', lockRuleType: undefined, lockRuleEndsAt: null },
+            { id: 'door-c', lockRuleType: undefined, lockRuleEndsAt: null },
+        ]);
+    });
+
+    it('is described for the rule types of the controller', () => {
+        const until = ` until ${new Date(END).toLocaleString()}`;
+
+        expect(describeLockRule('custom', END)).toBe(`Unlocked for a limited time${until}`);
+        expect(describeLockRule('keep_unlock', null)).toBe('Kept unlocked');
+        expect(describeLockRule('keep_lock', 0)).toBe('Kept locked');
+        expect(describeLockRule('lock_early', END)).toBe(`Unlock schedule ended early${until}`);
+    });
+
+    it('is not mentioned while the door just follows its schedule or nothing is known', () => {
+        expect(describeLockRule('schedule', END)).toBeNull();
+        expect(describeLockRule('', null)).toBeNull();
+        expect(describeLockRule(undefined, undefined)).toBeNull();
+        expect(describeLockRule('toString', null)).toBeNull();
+    });
+
+    it('is shown on the card of the door only', () => {
+        setStates({ ...BOOTSTRAP, 'doors.door-a.lockRuleType': 'keep_unlock', 'doors.door-b.lockRuleType': 'schedule' });
+        render(<DoorList />);
+
+        expect(screen.getAllByText('Kept unlocked')).toHaveLength(1);
+        expect(screen.queryByText(/schedule/i)).toBeNull();
     });
 });
 

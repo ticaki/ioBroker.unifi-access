@@ -10,7 +10,7 @@ export interface ThumbnailDevice {
 }
 
 /** Models the adapter gives the `event-thumbnail` capability, see `featuresFor()` in src/lib/deviceModels.ts */
-const THUMBNAIL_MODELS = new Set(['UA-Ultra', 'UA-G3-Pro', 'UA-G2-Pro']);
+export const THUMBNAIL_MODELS = new Set(['UA-Ultra', 'UA-G3-Pro', 'UA-G2-Pro', 'UA-Intercom']);
 const THUMBNAIL_STATES = new Set(['lastThumbnailPath', 'lastThumbnailUrl', 'lastThumbnailAt']);
 
 /**
@@ -105,7 +105,7 @@ export function LastThumbnailCard(): JSX.Element {
                         variant="body2"
                         color="text.secondary"
                     >
-                        No thumbnail-capable devices discovered (UA Ultra, UA G3 Pro or UA G2 Pro required).
+                        No thumbnail-capable devices discovered (a reader with camera is required: UA Ultra, UA G3 Pro, UA G2 Pro or UA Intercom).
                     </Typography>
                 </CardContent>
             </Card>

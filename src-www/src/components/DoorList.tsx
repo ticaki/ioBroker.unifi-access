@@ -10,6 +10,10 @@ export interface DoorEntry {
     id: string;
     locked?: boolean | null;
     name?: string;
+    /** `doors.<id>.lockRuleType`: active temporary lock rule, empty = none */
+    lockRuleType?: string;
+    /** `doors.<id>.lockRuleEndsAt`: end of the rule (ms epoch), if it has one */
+    lockRuleEndsAt?: number | null;
 }
 
 export interface DoorOverview {
@@ -49,6 +53,12 @@ export function collectDoors(states: Record<string, ioBroker.State | null | unde
         if (leaf === 'name') {
             map[doorId].name = typeof s?.val === 'string' && s.val ? s.val : undefined;
         }
+        if (leaf === 'lockRuleType') {
+            map[doorId].lockRuleType = typeof s?.val === 'string' && s.val ? s.val : undefined;
+        }
+        if (leaf === 'lockRuleEndsAt') {
+            map[doorId].lockRuleEndsAt = typeof s?.val === 'number' && s.val > 0 ? s.val : null;
+        }
     }
     const doors = Object.values(map).sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id));
     return { doors, emergency };
@@ -80,6 +90,8 @@ export function DoorList(): JSX.Element {
                         doorId={d.id}
                         name={d.name ?? d.id}
                         locked={d.locked}
+                        lockRuleType={d.lockRuleType}
+                        lockRuleEndsAt={d.lockRuleEndsAt}
                     />
                 ))
             )}

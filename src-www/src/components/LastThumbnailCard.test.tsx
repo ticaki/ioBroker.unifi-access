@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import { collectThumbnailDevices, LastThumbnailCard, thumbnailView } from './LastThumbnailCard';
+import { collectThumbnailDevices, LastThumbnailCard, THUMBNAIL_MODELS, thumbnailView } from './LastThumbnailCard';
+import { featuresFor, type UnifiDeviceModel } from '../../../src/lib/deviceModels';
 import { setStates } from '../test/socketMock';
 
 vi.mock('../socket', () => import('../test/socketMock'));
@@ -44,6 +45,33 @@ describe('collectThumbnailDevices', () => {
             { id: 'g3', name: undefined, model: 'UA-G3-Pro' },
             { id: 'g2', name: 'Back reader', model: 'UA-G2-Pro' },
         ]);
+    });
+
+    it('knows exactly the models the adapter gives the event-thumbnail capability', () => {
+        // every value of UnifiDeviceModel - a new one must be added here and is then checked against the panel
+        const models: Record<UnifiDeviceModel, true> = {
+            'UA-Ultra': true,
+            'UA-G2-Pro': true,
+            'UA-G3-Pro': true,
+            'UA-Intercom': true,
+            'UA-Lite': true,
+            'UA-Hub': true,
+            unknown: true,
+        };
+        const withThumbnail = (Object.keys(models) as UnifiDeviceModel[]).filter(model =>
+            featuresFor(model).includes('event-thumbnail'),
+        );
+
+        expect([...THUMBNAIL_MODELS].sort()).toEqual(withThumbnail.sort());
+    });
+
+    it('offers a UA Intercom, but no UA Lite (reader without camera)', () => {
+        const states = {
+            [`${NS}.devices.i.model`]: state('UA-Intercom'),
+            [`${NS}.devices.l.model`]: state('UA-Lite'),
+        };
+
+        expect(collectThumbnailDevices(states, NS)).toEqual([{ id: 'i', name: undefined, model: 'UA-Intercom' }]);
     });
 
     it('offers a device of another model once a thumbnail was stored for it', () => {
