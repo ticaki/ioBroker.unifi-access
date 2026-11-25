@@ -4851,7 +4851,12 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				expect(protect.logins, 'no login retry after the stop').to.have.length(logins);
 			});
 
-			/** Stops the instance as soon as the Protect login has been sent. */
+			/**
+			 * Stops the instance as soon as the Protect login has been sent.
+			 *
+			 * @param _inst The adapter (unused)
+			 * @param stop Stops the instance
+			 */
 			function stopDuringProtectLogin(_inst: FakeAdapter, stop: () => void): void {
 				const original = ProtectHttp.prototype.login;
 				stubs.push(
