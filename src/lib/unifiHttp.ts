@@ -2,6 +2,7 @@ import axios, { type AxiosInstance, type AxiosResponse, AxiosError } from 'axios
 import https from 'node:https';
 import { sanitizeStaticPath } from './pathSafety';
 import { trustedCertificates } from './caCert';
+import { throwIfStopped } from './stopSignal';
 import type {
 	UnifiDeviceRaw,
 	UnifiDoorLockRule,
@@ -21,6 +22,11 @@ export interface UnifiHttpOptions {
 	verifyTLS?: boolean;
 	caCert?: string;
 	debugLog?: (msg: string) => void;
+	/**
+	 * Stop signal of the adapter: once it is true, every new request is refused with `StoppedError`
+	 * before anything is sent. A request already on its way is answered as usual.
+	 */
+	isStopped?: () => boolean;
 }
 
 const STATIC_PREFIX = '/api/v1/developer/system/static/';
@@ -207,6 +213,11 @@ export class UnifiHttp {
 				// system CAs plus the configured certificate(s), repaired if the admin field mangled them
 				ca: trustedCertificates(options.caCert),
 			}),
+		});
+		// After the stop nothing more is sent to the controller, whichever path the request comes from.
+		this.client.interceptors.request.use(config => {
+			throwIfStopped(options.isStopped);
+			return config;
 		});
 		// The response envelope is evaluated in one place for all calls: a `code` other than SUCCESS is an
 		// error even with HTTP 2xx, and an HTTP error gets the API code, the endpoint and — for 403 — the

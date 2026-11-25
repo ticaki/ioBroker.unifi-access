@@ -24,6 +24,7 @@ import {
 	type ParsedAccessEvent,
 } from './lib/eventNormalizer';
 import { Library } from './lib/library';
+import { isStoppedError, StoppedError } from './lib/stopSignal';
 import {
 	PROTECT_SNAPSHOT_CACHE_MAX_BYTES,
 	PROTECT_SNAPSHOT_CACHE_MAX_ENTRIES,
@@ -273,6 +274,11 @@ class UnifiAccess extends utils.Adapter {
 		this.on('ready', () =>
 			this.onReady()
 				.catch((err: unknown) => {
+					if (isStoppedError(err) || this.unloading) {
+						// stopped while starting: the start was abandoned on purpose
+						this.log.debug(`Adapter start ended by the stop: ${errorText(err)}`);
+						return;
+					}
 					this.log.error(`Adapter start failed: ${errorText(err)}`);
 				})
 				// whatever happened: messages must not wait for a start that is over
@@ -284,13 +290,13 @@ class UnifiAccess extends utils.Adapter {
 	}
 
 	private async onReady(): Promise<void> {
-		this.library = new Library(this);
-		await this.setState('info.connection', false, true);
+		this.library = new Library(this, () => this.unloading);
+		await this.writeState('info.connection', { val: false, ack: true });
 		await this.removeObsoleteObjects();
 		await this.library.ensureBaseObjects();
 		// what an earlier run left behind is not true for this one until proven
-		await this.setState('info.webhookRegistered', { val: false, ack: true });
-		await this.setState('info.protectConnected', { val: false, ack: true });
+		await this.writeState('info.webhookRegistered', { val: false, ack: true });
+		await this.writeState('info.protectConnected', { val: false, ack: true });
 		// a call that was ringing when the adapter stopped has ended since — its end event is lost
 		await this.clearActiveDoorbellCall();
 		await this.loadInstallationId();
@@ -325,7 +331,15 @@ class UnifiAccess extends utils.Adapter {
 				`The public base URL "${String(cfg.publicBaseUrl)}" is not usable (${publicBase.problem}) — the URLs are built from the listen address instead.`,
 			);
 		}
-		this.http = new UnifiHttp({ host, port, token, verifyTLS, caCert, debugLog: (m: string) => this.log.debug(m) });
+		this.http = new UnifiHttp({
+			host,
+			port,
+			token,
+			verifyTLS,
+			caCert,
+			debugLog: (m: string) => this.log.debug(m),
+			isStopped: () => this.unloading,
+		});
 
 		this.subscribeStates('doors.*.unlock');
 		this.subscribeStates('doors.*.unlock_duration');
@@ -426,6 +440,7 @@ class UnifiAccess extends utils.Adapter {
 			// exactly as configured — there is no silent fallback to an unverified connection
 			verifyTLS: cfg.protectVerifyTLS === true,
 			caCert,
+			isStopped: () => this.unloading,
 		});
 		await this.tryProtectLogin(1);
 	}
@@ -458,10 +473,16 @@ class UnifiAccess extends utils.Adapter {
 			encrypt: plain => this.encrypt(plain),
 		});
 		if (stored.kind === 'plaintext') {
+			this.throwIfStopped();
 			this.log.info('[protect] the stored Protect password is not encrypted yet — encrypting it now.');
 			try {
+				this.throwIfStopped();
+				// eslint-disable-next-line no-restricted-syntax -- checked right above
 				await this.extendForeignObjectAsync(instanceId, { native: { protectPassword: stored.encrypted } });
 			} catch (err) {
+				if (isStoppedError(err)) {
+					throw err;
+				}
 				this.log.warn(`[protect] could not store the encrypted Protect password: ${errorText(err)}`);
 			}
 		} else if (stored.kind === 'ambiguous') {
@@ -491,7 +512,7 @@ class UnifiAccess extends utils.Adapter {
 				return;
 			}
 			this.log.info(attempt === 1 ? 'UniFi Protect API client initialized' : 'Protect login retry succeeded.');
-			await this.setState('info.protectConnected', { val: true, ack: true });
+			await this.writeState('info.protectConnected', { val: true, ack: true });
 			return;
 		} catch (err) {
 			this.protectLoginRunning = false;
@@ -527,7 +548,7 @@ class UnifiAccess extends utils.Adapter {
 				} else {
 					this.log.debug(text);
 				}
-				this.protectRetryTimer = this.setTimeout(() => {
+				this.protectRetryTimer = this.startTimer(() => {
 					this.protectRetryTimer = undefined;
 					this.tryProtectLogin(attempt + 1).catch((e: unknown) => {
 						this.log.debug(`Protect login retry failed unexpectedly: ${errorText(e)}`);
@@ -535,7 +556,7 @@ class UnifiAccess extends utils.Adapter {
 				}, delayMs);
 			}
 		}
-		await this.setState('info.protectConnected', { val: false, ack: true });
+		await this.writeState('info.protectConnected', { val: false, ack: true });
 	}
 
 	private requireProtect(): ProtectHttp {
@@ -645,11 +666,7 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 
-		const logger = {
-			debug: (m: string) => this.log.debug(m),
-			info: (m: string) => this.log.info(m),
-			warn: (m: string) => this.log.warn(m),
-		};
+		const logger = this.helperLogger();
 
 		const server = new SharedHttpServer({ port, ip, tls, logger });
 		let webhookHandlerMounted = false;
@@ -785,11 +802,7 @@ class UnifiAccess extends utils.Adapter {
 	}
 
 	private registrationLogger(): { debug: (m: string) => void; info: (m: string) => void; warn: (m: string) => void } {
-		return {
-			debug: (m: string) => this.log.debug(m),
-			info: (m: string) => this.log.info(m),
-			warn: (m: string) => this.log.warn(m),
-		};
+		return this.helperLogger();
 	}
 
 	/**
@@ -834,20 +847,36 @@ class UnifiAccess extends utils.Adapter {
 				storedSecret,
 				events: DEFAULT_WEBHOOK_EVENTS,
 				logger: this.registrationLogger(),
+				isStopped: () => this.unloading,
 			});
 			this.webhookEndpointId = result.id;
 			this.webhookSecret = result.secret;
+			// Only write to native when credentials actually changed — extendForeignObjectAsync
+			// triggers a js-controller restart, so we must not call it on every start.
+			const changed = result.id !== storedId || result.secret !== storedSecret;
+			if (this.unloading) {
+				// Stopped while the controller answered: the stopped instance does not claim "registered",
+				// but the credentials of an endpoint the controller has created are stored, so the
+				// configuration matches the controller at the next start.
+				if (changed) {
+					await this.persistWebhookCredentials(result.id, result.secret);
+				}
+				return;
+			}
 			this.webhookRegistered = true;
 			this.webhookRegistrationStale = false;
 			this.webhookRegistrationFailureLog = '';
-			await this.setState('info.webhookRegistered', { val: true, ack: true });
-			// Only write to native when credentials actually changed — extendForeignObjectAsync
-			// triggers a js-controller restart, so we must not call it on every start.
-			if (result.id !== storedId || result.secret !== storedSecret) {
+			await this.writeState('info.webhookRegistered', { val: true, ack: true });
+			if (changed) {
 				await this.persistWebhookCredentials(result.id, result.secret);
 			}
 			this.webhookRegistrationFailures = 0;
 		} catch (err) {
+			if (isStoppedError(err) || this.unloading) {
+				// stopped in between: no further request, no state, no retry — the next start checks anyway
+				this.log.debug(`Webhook registration ended by the stop: ${errorText(err)}`);
+				return;
+			}
 			const text = `Webhook registration failed: ${errorText(err)}`;
 			if (text !== this.webhookRegistrationFailureLog) {
 				this.webhookRegistrationFailureLog = text;
@@ -856,7 +885,7 @@ class UnifiAccess extends utils.Adapter {
 				this.log.debug(text);
 			}
 			this.webhookRegistered = false;
-			await this.setState('info.webhookRegistered', { val: false, ack: true });
+			await this.writeState('info.webhookRegistered', { val: false, ack: true });
 			this.scheduleWebhookRegistrationRetry();
 		} finally {
 			this.webhookRegistrationRunning = false;
@@ -881,7 +910,7 @@ class UnifiAccess extends utils.Adapter {
 		) {
 			return;
 		}
-		this.webhookCheckInterval = this.setInterval(() => {
+		this.webhookCheckInterval = this.startInterval(() => {
 			if (this.unloading || !this.connectedToController || this.webhookRegistrationRunning) {
 				// without connection the reconnect checks the registration anyway
 				return;
@@ -901,7 +930,7 @@ class UnifiAccess extends utils.Adapter {
 		}
 		this.webhookRegistrationFailures += 1;
 		const delayMs = Math.min(60_000 * 2 ** Math.min(this.webhookRegistrationFailures - 1, 6), 5 * 60_000);
-		this.webhookRegistrationRetryTimer = this.setTimeout(() => {
+		this.webhookRegistrationRetryTimer = this.startTimer(() => {
 			this.webhookRegistrationRetryTimer = undefined;
 			this.runDetached('webhook registration', this.ensureWebhookRegistration());
 		}, delayMs);
@@ -940,6 +969,8 @@ class UnifiAccess extends utils.Adapter {
 			for (const door of doors) {
 				await this.refreshLockRule(door.id);
 			}
+			// stopped meanwhile: no "Connected" for the stopped instance
+			this.throwIfStopped();
 			if (this.bootstrapFailures > 0 || !this.bootstrapSucceededOnce) {
 				this.log.info(
 					`Connected to UniFi Access controller. ${devices.length} devices, ${doors.length} doors.`,
@@ -955,6 +986,10 @@ class UnifiAccess extends utils.Adapter {
 			this.lastBootstrapFailureLog = '';
 			return true;
 		} catch (err) {
+			if (isStoppedError(err) || this.unloading) {
+				// abandoned by the stop: neither a failure to report nor a reason for a retry
+				return false;
+			}
 			const kind = classifyError(err);
 			this.setConnectionStatus(false, kind);
 			this.bootstrapFailures += 1;
@@ -1042,7 +1077,7 @@ class UnifiAccess extends utils.Adapter {
 		}
 		const delayMs = this.nextBootstrapRetryDelay();
 		this.log.debug(`Next bootstrap attempt in ${Math.round(delayMs / 1000)} s.`);
-		this.bootstrapRetryTimer = this.setTimeout(() => {
+		this.bootstrapRetryTimer = this.startTimer(() => {
 			this.bootstrapRetryTimer = undefined;
 			this.runDetached('bootstrap retry', this.bootstrapAndConnect());
 		}, delayMs);
@@ -1084,7 +1119,7 @@ class UnifiAccess extends utils.Adapter {
 
 		if (this.config.enableProtect) {
 			const connected = this.protectHttp?.isLoggedIn() === true;
-			await this.setState('info.protectConnected', { val: connected, ack: true });
+			await this.writeState('info.protectConnected', { val: connected, ack: true });
 			this.log.debug(`[protect] info.protectConnected = ${String(connected)}`);
 		}
 	}
@@ -1092,9 +1127,9 @@ class UnifiAccess extends utils.Adapter {
 	/** The adapter's timer functions for helper classes (tracked by js-controller, cleared on unload). */
 	private timerHost(): TimerHost {
 		return {
-			setTimeout: (callback, ms) => this.setTimeout(callback, ms),
+			setTimeout: (callback, ms) => this.startTimer(callback, ms),
 			clearTimeout: handle => this.clearTimeout(handle as ioBroker.Timeout | undefined),
-			setInterval: (callback, ms) => this.setInterval(callback, ms),
+			setInterval: (callback, ms) => this.startInterval(callback, ms),
 			clearInterval: handle => this.clearInterval(handle as ioBroker.Interval | undefined),
 		};
 	}
@@ -1119,7 +1154,7 @@ class UnifiAccess extends utils.Adapter {
 		this.log.debug(
 			`UniFi Access WebSocket reconnected — refreshing devices and doors in ${Math.ceil(waitMs / 1000)} s.`,
 		);
-		this.resyncTimer = this.setTimeout(() => {
+		this.resyncTimer = this.startTimer(() => {
 			this.resyncTimer = undefined;
 			this.lastResyncAt = Date.now();
 			this.runDetached('resync after reconnect', this.bootstrapAndConnect());
@@ -1193,6 +1228,9 @@ class UnifiAccess extends utils.Adapter {
 			}
 		});
 		ws.on('event', msg => {
+			if (this.ws !== ws || this.unloading) {
+				return;
+			}
 			this.runDetached('WebSocket event', this.handleAccessEvent(msg, 'ws'));
 		});
 		ws.start();
@@ -1207,22 +1245,39 @@ class UnifiAccess extends utils.Adapter {
 		for (const id of ['info.webhookSecret']) {
 			try {
 				if (await this.getObjectAsync(id)) {
+					this.throwIfStopped();
+					// eslint-disable-next-line no-restricted-syntax -- checked right above
 					await this.delObjectAsync(id);
 					this.log.info(`Removed obsolete state ${id}.`);
 				}
 				// the state may exist without an object
+				this.throwIfStopped();
+				// eslint-disable-next-line no-restricted-syntax -- checked right above
 				await this.delStateAsync(id);
 			} catch (err) {
+				if (isStoppedError(err)) {
+					throw err;
+				}
 				this.log.debug(`Could not remove obsolete state ${id}: ${errorText(err)}`);
 			}
 		}
 	}
 
+	/**
+	 * Store id and secret of the endpoint the controller has created. The one write that is still made
+	 * after the stop: the endpoint exists at the controller, and only with its secret do the webhooks of
+	 * the next start pass the signature check.
+	 *
+	 * @param id Endpoint id
+	 * @param secret Signing secret of the endpoint
+	 */
 	private async persistWebhookCredentials(id: string, secret: string): Promise<void> {
+		// eslint-disable-next-line no-restricted-syntax -- deliberately also after the stop (see above)
 		await this.setState('info.webhookEndpointId', { val: id, ack: true });
 		// webhookSecret ist `encryptedNative`: js-controller entschlüsselt es beim
 		// Adapter-Start automatisch — daher hier symmetrisch verschlüsseln, sonst
 		// landet beim nächsten Start Müll in cfg.webhookSecret.
+		// eslint-disable-next-line no-restricted-syntax -- deliberately also after the stop (see above)
 		await this.extendForeignObjectAsync(`system.adapter.${this.namespace}`, {
 			native: { webhookEndpointId: id, webhookSecret: this.encrypt(secret) },
 		});
@@ -1287,7 +1342,7 @@ class UnifiAccess extends utils.Adapter {
 			this.clearTimeout(existing);
 		}
 		this.unlockPendingEvents.set(doorId, event);
-		const t = this.setTimeout(() => {
+		const t = this.startTimer(() => {
 			this.unlockPendingTimers.delete(doorId);
 			const pending = this.unlockPendingEvents.get(doorId);
 			if (pending) {
@@ -1467,9 +1522,9 @@ class UnifiAccess extends utils.Adapter {
 			this.noteFinishedDoorbellCall(current.requestId);
 		}
 		this.activeDoorbellCall = { requestId, fromWebhook: !authoritative };
-		await this.setState('doorbell.activeCallId', { val: callId, ack: true });
-		await this.setState('doorbell.activeFromDevice', { val: from, ack: true });
-		await this.setState('doorbell.activeStartedAt', { val: startedAt, ack: true });
+		await this.writeState('doorbell.activeCallId', { val: callId, ack: true });
+		await this.writeState('doorbell.activeFromDevice', { val: from, ack: true });
+		await this.writeState('doorbell.activeStartedAt', { val: startedAt, ack: true });
 		this.scheduleDoorbellExpiry();
 	}
 
@@ -1479,7 +1534,7 @@ class UnifiAccess extends utils.Adapter {
 			this.clearTimeout(this.doorbellExpiryTimer);
 		}
 		const requestId = this.activeDoorbellCall?.requestId;
-		this.doorbellExpiryTimer = this.setTimeout(() => {
+		this.doorbellExpiryTimer = this.startTimer(() => {
 			this.doorbellExpiryTimer = undefined;
 			this.log.debug('Doorbell call without end event — cleared after the time limit.');
 			this.runDetached('doorbell call expiry', this.endDoorbellCall(requestId, 'time limit'));
@@ -1545,9 +1600,9 @@ class UnifiAccess extends utils.Adapter {
 			this.doorbellExpiryTimer = undefined;
 		}
 		this.activeDoorbellCall = null;
-		await this.setState('doorbell.activeCallId', { val: null, ack: true });
-		await this.setState('doorbell.activeFromDevice', { val: null, ack: true });
-		await this.setState('doorbell.activeStartedAt', { val: null, ack: true });
+		await this.writeState('doorbell.activeCallId', { val: null, ack: true });
+		await this.writeState('doorbell.activeFromDevice', { val: null, ack: true });
+		await this.writeState('doorbell.activeStartedAt', { val: null, ack: true });
 	}
 
 	/**
@@ -1580,7 +1635,7 @@ class UnifiAccess extends utils.Adapter {
 		if (this.doorRefreshTimer) {
 			return;
 		}
-		this.doorRefreshTimer = this.setTimeout(() => {
+		this.doorRefreshTimer = this.startTimer(() => {
 			this.doorRefreshTimer = undefined;
 			const lockRules = this.doorRefreshWithLockRules;
 			this.doorRefreshWithLockRules = false;
@@ -1602,7 +1657,7 @@ class UnifiAccess extends utils.Adapter {
 		}
 		const timers: ioBroker.Timeout[] = [];
 		for (const delayMs of delaysMs) {
-			const timer = this.setTimeout(() => {
+			const timer = this.startTimer(() => {
 				const pending = this.doorCheckTimers.get(doorId);
 				if (pending) {
 					const remaining = pending.filter(t => t !== timer);
@@ -1636,7 +1691,7 @@ class UnifiAccess extends utils.Adapter {
 		if (this.unloading || !this.http) {
 			return;
 		}
-		const timer = this.setTimeout(() => {
+		const timer = this.startTimer(() => {
 			this.doorRuleEndTimers.delete(doorId);
 			this.runDetached('door status check', this.refreshDoor(doorId));
 		}, delayMs);
@@ -1676,6 +1731,7 @@ class UnifiAccess extends utils.Adapter {
 				await this.refreshLockRule(door.id);
 			}
 		} catch (err) {
+			this.rethrowIfStopped(err);
 			this.log.debug(`Door status refresh for ${doorId} failed: ${errorText(err)}`);
 		}
 	}
@@ -1704,6 +1760,7 @@ class UnifiAccess extends utils.Adapter {
 				}
 			}
 		} catch (err) {
+			this.rethrowIfStopped(err);
 			this.log.debug(`Door status refresh failed: ${errorText(err)}`);
 		}
 	}
@@ -1739,6 +1796,7 @@ class UnifiAccess extends utils.Adapter {
 			await this.library.setDoorLockRule(doorId, rule);
 			this.scheduleRuleEndFromController(doorId, rule?.ended_time);
 		} catch (err) {
+			this.rethrowIfStopped(err);
 			const status =
 				(err as { response?: { status?: number } }).response?.status ??
 				(err instanceof UnifiApiError ? err.httpStatus : undefined);
@@ -1813,12 +1871,12 @@ class UnifiAccess extends utils.Adapter {
 		const isoTs = new Date(ts).toISOString();
 		const firmware = asString(dataDevice.firmware);
 		if (firmware !== undefined) {
-			await this.setState(`devices.${safe}.firmware`, { val: firmware, ack: true });
+			await this.writeState(`devices.${safe}.firmware`, { val: firmware, ack: true });
 			cached.firmware = firmware;
 		}
 		// `online` is deliberately not taken from event payloads: every documented webhook sample carries
 		// `"online": false`, even for the reader that just rang. The online state comes from GET /devices.
-		await this.setState(`devices.${safe}.lastSeenAt`, { val: isoTs, ack: true });
+		await this.writeState(`devices.${safe}.lastSeenAt`, { val: isoTs, ack: true });
 		cached.lastSeenAt = isoTs;
 	}
 
@@ -1851,11 +1909,11 @@ class UnifiAccess extends utils.Adapter {
 		// models without the thumbnail capability flag get their thumbnail states on first use
 		await this.library.ensureThumbnailStates(deviceId);
 		const safe = this.safeId(deviceId);
-		await this.setState(`devices.${safe}.lastThumbnailPath`, { val: path, ack: true });
-		await this.setState(`devices.${safe}.lastThumbnailAt`, { val: ts, ack: true });
+		await this.writeState(`devices.${safe}.lastThumbnailPath`, { val: path, ack: true });
+		await this.writeState(`devices.${safe}.lastThumbnailAt`, { val: ts, ack: true });
 		// An empty URL says "there is an image, but it is not served" (thumbnail server off) — a URL from
 		// an earlier configuration must not stay behind and point to nothing.
-		await this.setState(`devices.${safe}.lastThumbnailUrl`, { val: this.thumbnailUrl(deviceId, ts), ack: true });
+		await this.writeState(`devices.${safe}.lastThumbnailUrl`, { val: this.thumbnailUrl(deviceId, ts), ack: true });
 	}
 
 	/**
@@ -1893,9 +1951,10 @@ class UnifiAccess extends utils.Adapter {
 				const ts = typeof at?.val === 'number' && at.val > 0 ? at.val : 0;
 				const url = hasThumbnail ? this.thumbnailUrl(deviceId, ts) : '';
 				if ((stored.val ?? '') !== url) {
-					await this.setState(`devices.${safe}.lastThumbnailUrl`, { val: url, ack: true });
+					await this.writeState(`devices.${safe}.lastThumbnailUrl`, { val: url, ack: true });
 				}
 			} catch (err) {
+				this.rethrowIfStopped(err);
 				this.log.debug(`Could not refresh the thumbnail URL of ${deviceId}: ${errorText(err)}`);
 			}
 		}
@@ -1915,8 +1974,11 @@ class UnifiAccess extends utils.Adapter {
 				continue;
 			}
 			try {
-				await this.setForeignStateAsync(rule.targetState, { val: JSON.stringify(event), ack: true });
+				await this.writeForeignState(rule.targetState, { val: JSON.stringify(event), ack: true });
 			} catch (err) {
+				if (isStoppedError(err)) {
+					throw err;
+				}
 				this.log.debug(`Forward to ${rule.targetState} failed: ${(err as Error).message}`);
 			}
 		}
@@ -1928,7 +1990,7 @@ class UnifiAccess extends utils.Adapter {
 		this.lastErrorKind = lastError;
 		if (changed) {
 			this.connectionStatusWritten = true;
-			this.runDetached('info.connection', this.setState('info.connection', connected, true));
+			this.runDetached('info.connection', this.writeState('info.connection', { val: connected, ack: true }));
 		}
 	}
 
@@ -1941,8 +2003,110 @@ class UnifiAccess extends utils.Adapter {
 	 */
 	private runDetached(what: string, promise: Promise<unknown>): void {
 		promise.catch((err: unknown) => {
+			if (isStoppedError(err) || this.unloading) {
+				// abandoned because the instance stopped — nothing failed
+				this.log.debug(`${what} ended by the stop: ${errorText(err)}`);
+				return;
+			}
 			this.log.warn(`${what} failed: ${errorText(err)}`);
 		});
+	}
+
+	// ----- effects that must not happen after the stop (see lib/stopSignal.ts) -----------------------
+	// Every state/object write and every timer of this class goes through these wrappers (enforced by
+	// the lint rule `no-restricted-syntax` for src/main.ts). The HTTP clients refuse requests by
+	// themselves (`isStopped`).
+
+	/** Throw {@link StoppedError} once the instance is stopping: the operation ends before its next effect. */
+	private throwIfStopped(): void {
+		if (this.unloading) {
+			throw new StoppedError();
+		}
+	}
+
+	/**
+	 * First statement of a `catch` that would report or repair a failure: after the stop there is
+	 * nothing to report (a request that fails then failed because of the stop, or is of no interest any
+	 * more) and nothing to repair — the operation ends quietly.
+	 *
+	 * @param err The caught error
+	 */
+	private rethrowIfStopped(err: unknown): void {
+		if (isStoppedError(err)) {
+			throw err;
+		}
+		if (this.unloading) {
+			throw new StoppedError(`the instance is stopping (${errorText(err)})`);
+		}
+	}
+
+	/** Logger for helpers (receivers, registration): what they report after the stop goes to debug only. */
+	private helperLogger(): { debug: (m: string) => void; info: (m: string) => void; warn: (m: string) => void } {
+		return {
+			debug: (m: string) => this.log.debug(m),
+			info: (m: string) => (this.unloading ? this.log.debug(m) : this.log.info(m)),
+			warn: (m: string) => (this.unloading ? this.log.debug(m) : this.log.warn(m)),
+		};
+	}
+
+	/**
+	 * `setState` that refuses after the stop.
+	 *
+	 * @param id State id without namespace
+	 * @param state Value and ack
+	 */
+	private async writeState(id: string, state: ioBroker.SettableState): Promise<void> {
+		this.throwIfStopped();
+		// eslint-disable-next-line no-restricted-syntax -- the wrapper itself
+		await this.setState(id, state);
+	}
+
+	/**
+	 * `setForeignStateAsync` that refuses after the stop.
+	 *
+	 * @param id Full state id
+	 * @param state Value and ack
+	 */
+	private async writeForeignState(id: string, state: ioBroker.SettableState): Promise<void> {
+		this.throwIfStopped();
+		// eslint-disable-next-line no-restricted-syntax -- the wrapper itself
+		await this.setForeignStateAsync(id, state);
+	}
+
+	/**
+	 * Adapter timer that is not created after the stop and does not run its callback after it.
+	 *
+	 * @param callback What to run
+	 * @param ms Delay
+	 */
+	private startTimer(callback: () => void, ms: number): ioBroker.Timeout | undefined {
+		if (this.unloading) {
+			return undefined;
+		}
+		// eslint-disable-next-line no-restricted-syntax -- the wrapper itself
+		return this.setTimeout(() => {
+			if (!this.unloading) {
+				callback();
+			}
+		}, ms);
+	}
+
+	/**
+	 * Adapter interval that is not created after the stop and does not run its callback after it.
+	 *
+	 * @param callback What to run
+	 * @param ms Period
+	 */
+	private startInterval(callback: () => void, ms: number): ioBroker.Interval | undefined {
+		if (this.unloading) {
+			return undefined;
+		}
+		// eslint-disable-next-line no-restricted-syntax -- the wrapper itself
+		return this.setInterval(() => {
+			if (!this.unloading) {
+				callback();
+			}
+		}, ms);
 	}
 
 	private safeId(raw: string): string {
@@ -1982,16 +2146,16 @@ class UnifiAccess extends utils.Adapter {
 		const userName = (userId && this.userNameCache.get(userId)) || text(first.user_name) || userId;
 		const time = text(first.time);
 
-		await this.setState('notifications.lastRaw', { val: raw, ack: true });
-		await this.setState('notifications.lastAlarmId', { val: text(body.alarm_id), ack: true });
-		await this.setState('notifications.lastEventType', { val: text(first.id), ack: true });
-		await this.setState('notifications.lastLocationId', { val: locationId, ack: true });
-		await this.setState('notifications.lastLocationName', { val: locationName, ack: true });
-		await this.setState('notifications.lastUserId', { val: userId, ack: true });
-		await this.setState('notifications.lastUserName', { val: userName, ack: true });
-		await this.setState('notifications.lastDirection', { val: text(first.direction), ack: true });
-		await this.setState('notifications.lastUnlockMethod', { val: text(first.unlock_method_text), ack: true });
-		await this.setState('notifications.lastTimestamp', {
+		await this.writeState('notifications.lastRaw', { val: raw, ack: true });
+		await this.writeState('notifications.lastAlarmId', { val: text(body.alarm_id), ack: true });
+		await this.writeState('notifications.lastEventType', { val: text(first.id), ack: true });
+		await this.writeState('notifications.lastLocationId', { val: locationId, ack: true });
+		await this.writeState('notifications.lastLocationName', { val: locationName, ack: true });
+		await this.writeState('notifications.lastUserId', { val: userId, ack: true });
+		await this.writeState('notifications.lastUserName', { val: userName, ack: true });
+		await this.writeState('notifications.lastDirection', { val: text(first.direction), ack: true });
+		await this.writeState('notifications.lastUnlockMethod', { val: text(first.unlock_method_text), ack: true });
+		await this.writeState('notifications.lastTimestamp', {
 			val: (time && Date.parse(time)) || Date.now(),
 			ack: true,
 		});
@@ -2110,7 +2274,7 @@ class UnifiAccess extends utils.Adapter {
 		this.log.warn(
 			`Command ${localId} not executed: ${reason}. The state was reset — write it again once the controller is connected.`,
 		);
-		this.setState(localId, { val: restore, ack: true }).catch((err: unknown) => {
+		this.writeState(localId, { val: restore, ack: true }).catch((err: unknown) => {
 			this.log.debug(`Could not reset ${localId}: ${errorText(err)}`);
 		});
 	}
@@ -2129,6 +2293,7 @@ class UnifiAccess extends utils.Adapter {
 			this.log.debug(`[${localId}] ignoring write for unknown door id: ${doorId}`);
 			return;
 		}
+		this.throwIfStopped();
 		this.refuseCommand(localId, `the controller does not report a door with the id ${doorId} (any more)`, restore);
 	}
 
@@ -2141,6 +2306,10 @@ class UnifiAccess extends utils.Adapter {
 	 */
 	private runCommand(what: string, promise: Promise<void>): void {
 		promise.catch((err: unknown) => {
+			if (isStoppedError(err) || this.unloading) {
+				this.log.debug(`Command ${what} ended by the stop: ${errorText(err)}`);
+				return;
+			}
 			this.log.warn(`Command ${what} failed unexpectedly: ${errorText(err)}`);
 		});
 	}
@@ -2158,7 +2327,7 @@ class UnifiAccess extends utils.Adapter {
 		this.log.warn(
 			`Ignoring invalid value ${describeValue(val)} for ${localId}: ${expected}. No door action taken.`,
 		);
-		this.setState(localId, { val: restore, ack: true }).catch((err: unknown) => {
+		this.writeState(localId, { val: restore, ack: true }).catch((err: unknown) => {
 			this.log.debug(`Could not reset ${localId}: ${errorText(err)}`);
 		});
 	}
@@ -2180,13 +2349,13 @@ class UnifiAccess extends utils.Adapter {
 		}
 		if (valid) {
 			this.lastValidUiSettings = val as string;
-			await this.setState('admin.uiSettings', { val: val as string, ack: true });
+			await this.writeState('admin.uiSettings', { val: val as string, ack: true });
 			return;
 		}
 		this.log.warn(
 			`Ignoring invalid value ${describeValue(val)} for admin.uiSettings: expected a JSON object (max. ${UI_SETTINGS_MAX_LENGTH} characters).`,
 		);
-		await this.setState('admin.uiSettings', { val: this.lastValidUiSettings, ack: true });
+		await this.writeState('admin.uiSettings', { val: this.lastValidUiSettings, ack: true });
 	}
 
 	private async handleEmergencyChange(field: 'lockdown' | 'evacuation', val: unknown): Promise<void> {
@@ -2220,6 +2389,7 @@ class UnifiAccess extends utils.Adapter {
 			// local state may be stale or hold a command that never went through (ack=false), and
 			// sending that along could switch evacuation/lockdown on by accident.
 			const current = await this.http.readEmergencyStatus();
+			this.throwIfStopped();
 			if (!current) {
 				// never send a guessed value for the other flag
 				this.log.warn(
@@ -2233,11 +2403,12 @@ class UnifiAccess extends utils.Adapter {
 			await this.http.setEmergencyStatus(payload);
 			this.lastEmergency.lockdown = payload.lockdown;
 			this.lastEmergency.evacuation = payload.evacuation;
-			await this.setState(localId, { val, ack: true });
+			await this.writeState(localId, { val, ack: true });
 			const sibling = field === 'lockdown' ? 'evacuation' : 'lockdown';
-			await this.setState(`doors.emergency.${sibling}`, { val: payload[sibling], ack: true });
+			await this.writeState(`doors.emergency.${sibling}`, { val: payload[sibling], ack: true });
 			this.log.info(`Emergency status: lockdown=${payload.lockdown}, evacuation=${payload.evacuation}`);
 		} catch (err) {
+			this.rethrowIfStopped(err);
 			this.log.warn(`Set emergency status failed: ${errorText(err)}`);
 			await this.restoreEmergencyStates();
 		}
@@ -2252,8 +2423,8 @@ class UnifiAccess extends utils.Adapter {
 		if (await this.refreshEmergencyStatus()) {
 			return;
 		}
-		await this.setState('doors.emergency.lockdown', { val: this.lastEmergency.lockdown ?? null, ack: true });
-		await this.setState('doors.emergency.evacuation', { val: this.lastEmergency.evacuation ?? null, ack: true });
+		await this.writeState('doors.emergency.lockdown', { val: this.lastEmergency.lockdown ?? null, ack: true });
+		await this.writeState('doors.emergency.evacuation', { val: this.lastEmergency.evacuation ?? null, ack: true });
 	}
 
 	/** @returns false when the controller could not be asked */
@@ -2265,10 +2436,11 @@ class UnifiAccess extends utils.Adapter {
 			const emergency = await this.http.getEmergencyStatus();
 			this.lastEmergency.lockdown = emergency.lockdown;
 			this.lastEmergency.evacuation = emergency.evacuation;
-			await this.setState('doors.emergency.lockdown', { val: emergency.lockdown, ack: true });
-			await this.setState('doors.emergency.evacuation', { val: emergency.evacuation, ack: true });
+			await this.writeState('doors.emergency.lockdown', { val: emergency.lockdown, ack: true });
+			await this.writeState('doors.emergency.evacuation', { val: emergency.evacuation, ack: true });
 			return true;
-		} catch {
+		} catch (err) {
+			this.rethrowIfStopped(err);
 			// Endpoint requires UniFi Access >= 1.24.6 — silently ignore on older firmware.
 			this.log.debug('Emergency status endpoint not available (requires UniFi Access >= 1.24.6).');
 			return false;
@@ -2317,8 +2489,9 @@ class UnifiAccess extends utils.Adapter {
 		const minutes = normalizeDefaultUnlockMinutes(this.config.defaultUnlockDuration);
 		try {
 			await this.unlockDoorFor(safeDoorId, minutes);
-			await this.setState(`doors.${safeDoorId}.unlock`, { val: true, ack: true });
+			await this.writeState(`doors.${safeDoorId}.unlock`, { val: true, ack: true });
 		} catch (err) {
+			this.rethrowIfStopped(err);
 			this.log.warn(`Unlock door ${safeDoorId} failed: ${errorText(err)}`);
 		}
 	}
@@ -2333,9 +2506,10 @@ class UnifiAccess extends utils.Adapter {
 		}
 		try {
 			await this.unlockDoorFor(safeDoorId, minutes);
-			await this.setState(`doors.${safeDoorId}.unlock_duration`, { val: minutes, ack: true });
+			await this.writeState(`doors.${safeDoorId}.unlock_duration`, { val: minutes, ack: true });
 			this.lastAckedControlValues.set(`doors.${safeDoorId}.unlock_duration`, minutes);
 		} catch (err) {
+			this.rethrowIfStopped(err);
 			this.log.warn(`Unlock door ${safeDoorId} (duration) failed: ${errorText(err)}`);
 		}
 	}
@@ -2368,8 +2542,9 @@ class UnifiAccess extends utils.Adapter {
 			// acknowledged last (as for unlock / unlock_duration): whoever waits for the ack finds `locked`
 			// and the status check already in place (T-03)
 			this.lastAckedControlValues.set(`doors.${safeDoorId}.lock_rule`, ruleIndex);
-			await this.setState(`doors.${safeDoorId}.lock_rule`, { val: ruleIndex, ack: true });
+			await this.writeState(`doors.${safeDoorId}.lock_rule`, { val: ruleIndex, ack: true });
 		} catch (err) {
+			this.rethrowIfStopped(err);
 			this.log.warn(`Set lock_rule for door ${safeDoorId} failed: ${errorText(err)}`);
 		}
 	}
@@ -2512,11 +2687,11 @@ class UnifiAccess extends utils.Adapter {
 	 * @param maxMs Give up waiting after this time (the controller may not answer at all)
 	 */
 	private async waitForStartup(maxMs = STARTUP_WAIT_MS): Promise<void> {
-		if (this.startupFinished) {
+		if (this.startupFinished || this.unloading) {
 			return;
 		}
 		await new Promise<void>(resolve => {
-			const timer = this.setTimeout(resolve, maxMs);
+			const timer = this.startTimer(resolve, maxMs);
 			void this.startup.then(() => {
 				if (timer) {
 					this.clearTimeout(timer);
@@ -2547,7 +2722,14 @@ class UnifiAccess extends utils.Adapter {
 			return { ok: false, error: 'missing-fields' };
 		}
 		// A probe with its own client: nothing of the running connection is touched.
-		const probe = new UnifiHttp({ host, port, token, verifyTLS, caCert: caCert || undefined });
+		const probe = new UnifiHttp({
+			host,
+			port,
+			token,
+			verifyTLS,
+			caCert: caCert || undefined,
+			isStopped: () => this.unloading,
+		});
 		try {
 			const devices = await probe.listDevices();
 			// The API has no endpoint that names the controller — the answer only says what was found.
@@ -2617,7 +2799,7 @@ class UnifiAccess extends utils.Adapter {
 			this.webhookSecret = result.secret;
 			this.webhookRegistered = true;
 			if (!this.unloading) {
-				await this.setState('info.webhookRegistered', { val: true, ack: true });
+				await this.writeState('info.webhookRegistered', { val: true, ack: true });
 			}
 			// Stopped while the controller created the endpoint: its credentials are still stored, so the
 			// configuration matches the controller at the next start.
@@ -2634,7 +2816,7 @@ class UnifiAccess extends utils.Adapter {
 			}
 			// The old endpoint may already be deleted: do not keep claiming it is registered, and make
 			// up for it with the regular registration.
-			await this.setState('info.webhookRegistered', { val: false, ack: true });
+			await this.writeState('info.webhookRegistered', { val: false, ack: true });
 			defer(() => {
 				this.scheduleWebhookRegistrationRetry();
 				return Promise.resolve();
@@ -2685,7 +2867,7 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		const http = this.http;
-		this.setTimeout(() => {
+		this.startTimer(() => {
 			this.runDetached('system log lookup', this.lookupSystemLogs(http, ts, doorId));
 		}, 3000);
 	}
@@ -2703,6 +2885,7 @@ class UnifiAccess extends utils.Adapter {
 			try {
 				raw = await http.fetchSystemLogsRaw(topic, since, until);
 			} catch (err) {
+				this.rethrowIfStopped(err);
 				const text = `[system-logs:${topic}] fetch failed: ${errorText(err)}`;
 				if (topic === 'door_openings' && !this.systemLogFailureLogged) {
 					this.systemLogFailureLogged = true;
@@ -2805,6 +2988,7 @@ class UnifiAccess extends utils.Adapter {
 			});
 			this.log.debug(`[protect] snapshot cached for camera ${cameraId} (${buf.length} bytes)`);
 		} catch (err) {
+			this.rethrowIfStopped(err);
 			this.log.warn(`[protect] snapshot fetch for camera ${cameraId} failed: ${(err as Error).message}`);
 		}
 		return true;

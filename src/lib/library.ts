@@ -2,6 +2,7 @@ import type { UnifiAccess } from '../UnifiAccess';
 import { detectModel, featuresFor, type UnifiDeviceModel } from './deviceModels';
 import type { UnifiDeviceRaw, UnifiDoorLockRule, UnifiDoorRaw } from './types';
 import { LOCK_RULE_STATES, MAX_UNLOCK_MINUTES } from './controlValues';
+import { throwIfStopped } from './stopSignal';
 
 /**
  * `doors.<id>.locked` for a door record: true/false for the documented relay states, `null` when unknown.
@@ -30,9 +31,15 @@ export function doorPosition(door: UnifiDoorRaw): string {
  */
 export class Library {
 	private readonly adapter: UnifiAccess;
+	private readonly isStopped: () => boolean;
 
-	constructor(adapter: UnifiAccess) {
+	/**
+	 * @param adapter The adapter instance
+	 * @param isStopped Stop signal: once it is true, every write is refused with `StoppedError`
+	 */
+	constructor(adapter: UnifiAccess, isStopped: () => boolean = () => false) {
 		this.adapter = adapter;
+		this.isStopped = isStopped;
 	}
 
 	private baseObjectsReady = false;
@@ -66,7 +73,7 @@ export class Library {
 		await this.ensureSimpleState('events.last', 'string', 'Last 50 events as JSON');
 		// Written by the www panel (socket setState): must be writable. extendObject also corrects the
 		// object of earlier versions, which was created read-only.
-		await this.adapter.extendObject('admin.uiSettings', {
+		await this.extend('admin.uiSettings', {
 			type: 'state',
 			common: { name: 'Persistent UI settings (JSON)', type: 'string', role: 'json', read: true, write: true },
 			native: {},
@@ -120,22 +127,22 @@ export class Library {
 			await this.ensureThumbnailStates(device.id);
 		}
 
-		await this.adapter.setState(`${channelId}.name`, { val: device.name ?? device.id, ack: true });
-		await this.adapter.setState(`${channelId}.alias`, { val: device.alias ?? '', ack: true });
-		await this.adapter.setState(`${channelId}.type`, { val: device.type ?? '', ack: true });
-		await this.adapter.setState(`${channelId}.model`, { val: model, ack: true });
+		await this.set(`${channelId}.name`, { val: device.name ?? device.id, ack: true });
+		await this.set(`${channelId}.alias`, { val: device.alias ?? '', ack: true });
+		await this.set(`${channelId}.type`, { val: device.type ?? '', ack: true });
+		await this.set(`${channelId}.model`, { val: model, ack: true });
 		// `firmware` and `online` are not part of the documented response of GET /devices (API reference
 		// 8.1 lists id, name, type, alias only). They are used when the controller sends them: firmware is
 		// written only then (a value learned from an event is kept), and a device counts as online unless
 		// the controller explicitly reports `online: false`.
 		if (typeof device.firmware === 'string' && device.firmware !== '') {
-			await this.adapter.setState(`${channelId}.firmware`, { val: device.firmware, ack: true });
+			await this.set(`${channelId}.firmware`, { val: device.firmware, ack: true });
 		} else if ((await this.adapter.getStateAsync(`${channelId}.firmware`)) === null) {
-			await this.adapter.setState(`${channelId}.firmware`, { val: '', ack: true });
+			await this.set(`${channelId}.firmware`, { val: '', ack: true });
 		}
-		await this.adapter.setState(`${channelId}.online`, { val: device.online !== false, ack: true });
+		await this.set(`${channelId}.online`, { val: device.online !== false, ack: true });
 		if ((await this.adapter.getStateAsync(`${channelId}.lastSeenAt`)) === null) {
-			await this.adapter.setState(`${channelId}.lastSeenAt`, { val: '', ack: true });
+			await this.set(`${channelId}.lastSeenAt`, { val: '', ack: true });
 		}
 
 		return { model };
@@ -164,7 +171,7 @@ export class Library {
 			role: 'value.time',
 		});
 		await this.ensureControlState(`${channelId}.unlock`, 'Trigger door unlock', 'boolean');
-		await this.adapter.extendObject(`${channelId}.unlock_duration`, {
+		await this.extend(`${channelId}.unlock_duration`, {
 			type: 'state',
 			common: {
 				name: 'Unlock for N minutes (0 = pulse)',
@@ -180,9 +187,9 @@ export class Library {
 			native: {},
 		});
 		if ((await this.adapter.getStateAsync(`${channelId}.unlock_duration`)) === null) {
-			await this.adapter.setState(`${channelId}.unlock_duration`, { val: 0, ack: true });
+			await this.set(`${channelId}.unlock_duration`, { val: 0, ack: true });
 		}
-		await this.adapter.extendObject(`${channelId}.lock_rule`, {
+		await this.extend(`${channelId}.lock_rule`, {
 			type: 'state',
 			common: {
 				name: 'Lock rule',
@@ -196,15 +203,15 @@ export class Library {
 			native: {},
 		});
 		if ((await this.adapter.getStateAsync(`${channelId}.lock_rule`)) === null) {
-			await this.adapter.setState(`${channelId}.lock_rule`, { val: 0, ack: true });
+			await this.set(`${channelId}.lock_rule`, { val: 0, ack: true });
 		}
 
-		await this.adapter.setState(`${channelId}.name`, { val: door.name ?? door.id, ack: true });
-		await this.adapter.setState(`${channelId}.fullName`, { val: door.full_name ?? '', ack: true });
+		await this.set(`${channelId}.name`, { val: door.name ?? door.id, ack: true });
+		await this.set(`${channelId}.fullName`, { val: door.full_name ?? '', ack: true });
 		// a reload (reconnect) must not produce state updates for doors whose status did not change
 		await this.writeState(`${channelId}.locked`, doorLocked(door), true);
 		await this.writeState(`${channelId}.position`, doorPosition(door), true);
-		await this.adapter.setState(`${channelId}.isBindHub`, { val: door.is_bind_hub === true, ack: true });
+		await this.set(`${channelId}.isBindHub`, { val: door.is_bind_hub === true, ack: true });
 	}
 
 	/**
@@ -268,7 +275,7 @@ export class Library {
 			return;
 		}
 		this.lastWritten.set(id, val);
-		await this.adapter.setState(id, { val, ack: true });
+		await this.set(id, { val, ack: true });
 	}
 
 	async ensureNotificationsContainer(): Promise<void> {
@@ -357,6 +364,8 @@ export class Library {
 	}
 
 	private async writeEventList(list: unknown[]): Promise<void> {
+		throwIfStopped(this.isStopped);
+		// eslint-disable-next-line no-restricted-syntax -- checked right above
 		await this.adapter.setForeignStateAsync(`${this.adapter.namespace}.events.last`, {
 			val: JSON.stringify(list),
 			ack: true,
@@ -403,7 +412,7 @@ export class Library {
 		const previous: unknown = (existing?.native as Record<string, unknown> | undefined)?.controllerName;
 		const userRenamed =
 			existing !== null && existing !== undefined && typeof previous === 'string' && existingName !== previous;
-		await this.adapter.extendObject(id, {
+		await this.extend(id, {
 			type: 'channel',
 			common: userRenamed ? {} : { name },
 			native: { ...native, controllerName: name },
@@ -411,11 +420,11 @@ export class Library {
 	}
 
 	private async ensureContainer(id: string, name: string): Promise<void> {
-		await this.adapter.extendObject(id, { type: 'channel', common: { name }, native: {} });
+		await this.extend(id, { type: 'channel', common: { name }, native: {} });
 	}
 
 	private async ensureSimpleState(id: string, type: ioBroker.CommonType, name: string): Promise<void> {
-		await this.adapter.setObjectNotExistsAsync(id, {
+		await this.create(id, {
 			type: 'state',
 			common: {
 				name,
@@ -441,7 +450,7 @@ export class Library {
 		id: string,
 		common: { name: string; type: ioBroker.CommonType; role: string },
 	): Promise<void> {
-		await this.adapter.setObjectNotExistsAsync(id, {
+		await this.create(id, {
 			type: 'state',
 			common: { ...common, read: true, write: false },
 			native: {},
@@ -449,7 +458,7 @@ export class Library {
 	}
 
 	private async ensureSwitchState(id: string, name: string, type: ioBroker.CommonType = 'boolean'): Promise<void> {
-		await this.adapter.setObjectNotExistsAsync(id, {
+		await this.create(id, {
 			type: 'state',
 			common: {
 				name,
@@ -463,7 +472,7 @@ export class Library {
 	}
 
 	private async ensureControlState(id: string, name: string, type: ioBroker.CommonType = 'string'): Promise<void> {
-		await this.adapter.setObjectNotExistsAsync(id, {
+		await this.create(id, {
 			type: 'state',
 			common: {
 				name,
@@ -474,6 +483,26 @@ export class Library {
 			},
 			native: {},
 		});
+	}
+
+	// The only places that write to ioBroker: after the stop they refuse (see stopSignal.ts).
+
+	private async set(id: string, state: ioBroker.SettableState): Promise<void> {
+		throwIfStopped(this.isStopped);
+		// eslint-disable-next-line no-restricted-syntax -- checked right above
+		await this.adapter.setState(id, state);
+	}
+
+	private async extend(id: string, obj: ioBroker.PartialObject): Promise<void> {
+		throwIfStopped(this.isStopped);
+		// eslint-disable-next-line no-restricted-syntax -- checked right above
+		await this.adapter.extendObject(id, obj);
+	}
+
+	private async create(id: string, obj: ioBroker.SettableObject): Promise<void> {
+		throwIfStopped(this.isStopped);
+		// eslint-disable-next-line no-restricted-syntax -- checked right above
+		await this.adapter.setObjectNotExistsAsync(id, obj);
 	}
 
 	private safeId(raw: string): string {

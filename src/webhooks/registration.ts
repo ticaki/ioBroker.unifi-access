@@ -1,5 +1,6 @@
 import type { UnifiHttp } from '../lib/unifiHttp';
 import type { UnifiWebhookEndpoint } from '../lib/types';
+import { isStoppedError, StoppedError, throwIfStopped } from '../lib/stopSignal';
 
 export const DEFAULT_WEBHOOK_EVENTS = [
 	'access.doorbell.incoming',
@@ -38,17 +39,42 @@ export interface RegistrationOptions {
 	events?: readonly string[];
 	logger: { debug: (msg: string) => void; info: (msg: string) => void; warn: (msg: string) => void };
 	/**
-	 * True once the adapter stops: {@link reregister} then sends no further DELETE or POST to the
-	 * controller and fails with {@link RegistrationStoppedError}.
+	 * True once the adapter stops: {@link ensureRegistration} and {@link reregister} then send no
+	 * further PUT, DELETE or POST to the controller and fail with {@link RegistrationStoppedError}.
 	 */
 	isStopped?: () => boolean;
 }
 
-/** {@link reregister} was abandoned because the adapter stopped. */
-export class RegistrationStoppedError extends Error {
+/** The registration was abandoned because the adapter stopped. */
+export class RegistrationStoppedError extends StoppedError {
 	public constructor() {
-		super('Webhook re-registration abandoned: the instance is stopping');
+		super('Webhook registration abandoned: the instance is stopping');
 		this.name = 'RegistrationStoppedError';
+	}
+}
+
+/**
+ * Before every request that changes something at the controller.
+ *
+ * @param options Registration options (stop signal)
+ */
+function stopCheck(options: RegistrationOptions): void {
+	try {
+		throwIfStopped(options.isStopped);
+	} catch {
+		throw new RegistrationStoppedError();
+	}
+}
+
+/**
+ * A failed step that the registration may get over (logged, next step) — but never a stop: that
+ * ends the registration at once.
+ *
+ * @param err The error of the step
+ */
+function rethrowStop(err: unknown): void {
+	if (isStoppedError(err)) {
+		throw err instanceof RegistrationStoppedError ? err : new RegistrationStoppedError();
 	}
 }
 
@@ -74,23 +100,22 @@ function isOwn(endpoint: UnifiWebhookEndpoint, options: RegistrationOptions): bo
 	return endpoint.name === options.name || (!!options.storedId && endpoint.id === options.storedId);
 }
 
-async function deleteEndpoints(
-	http: UnifiHttp,
-	ids: Iterable<string>,
-	logger: RegistrationOptions['logger'],
-	what: string,
-): Promise<void> {
+async function deleteEndpoints(options: RegistrationOptions, ids: Iterable<string>, what: string): Promise<void> {
+	const { http, logger } = options;
 	for (const id of ids) {
+		stopCheck(options);
 		try {
 			await http.deleteWebhookEndpoint(id);
 			logger.info(`Deleted ${what} ${id}.`);
 		} catch (err) {
+			rethrowStop(err);
 			logger.warn(`Failed to delete ${what} ${id}: ${(err as Error).message}`);
 		}
 	}
 }
 
 async function createEndpoint(options: RegistrationOptions, events: readonly string[]): Promise<RegistrationResult> {
+	stopCheck(options);
 	const result = await options.http.createWebhookEndpoint({
 		name: options.name,
 		endpoint: options.publicUrl,
@@ -127,6 +152,7 @@ async function updateEndpoint(
 	endpoint: UnifiWebhookEndpoint,
 	events: readonly string[],
 ): Promise<string | undefined> {
+	stopCheck(options);
 	const updated = await options.http.updateWebhookEndpoint(endpoint.id, {
 		name: options.name,
 		endpoint: options.publicUrl,
@@ -153,6 +179,7 @@ async function updateEndpoint(
 export async function ensureRegistration(options: RegistrationOptions): Promise<RegistrationResult> {
 	const events = options.events ?? DEFAULT_WEBHOOK_EVENTS;
 	const { logger } = options;
+	stopCheck(options);
 	const list = await options.http.listWebhookEndpoints();
 
 	let current = list.find(e => e.endpoint === options.publicUrl);
@@ -177,6 +204,7 @@ export async function ensureRegistration(options: RegistrationOptions): Promise<
 					secret: updatedSecret ?? secret,
 				};
 			} catch (err) {
+				rethrowStop(err);
 				logger.warn(
 					`Could not update webhook endpoint ${candidate.id} (${(err as Error).message}) — registering a new one.`,
 				);
@@ -186,10 +214,12 @@ export async function ensureRegistration(options: RegistrationOptions): Promise<
 
 	// Remove what is left of this installation's endpoints with an outdated URL.
 	for (const e of staleOwn) {
+		stopCheck(options);
 		logger.info(`Removing stale webhook endpoint ${e.id} with outdated URL ${e.endpoint}.`);
 		try {
 			await options.http.deleteWebhookEndpoint(e.id);
 		} catch (err) {
+			rethrowStop(err);
 			logger.warn(`Could not remove stale endpoint ${e.id}: ${(err as Error).message}`);
 		}
 	}
@@ -203,6 +233,7 @@ export async function ensureRegistration(options: RegistrationOptions): Promise<
 					logger.info(`Webhook endpoint ${current.id} updated (name / subscribed events).`);
 					return { id: current.id, secret: updatedSecret ?? secret, endpoint: options.publicUrl };
 				} catch (err) {
+					rethrowStop(err);
 					logger.warn(
 						`Webhook endpoint ${current.id} could not be updated: ${(err as Error).message} — some event types may not be delivered.`,
 					);
@@ -212,10 +243,12 @@ export async function ensureRegistration(options: RegistrationOptions): Promise<
 			}
 			return { id: current.id, secret, endpoint: current.endpoint };
 		}
+		stopCheck(options);
 		logger.info(`Webhook endpoint exists but its secret is not available — recreating.`);
 		try {
 			await options.http.deleteWebhookEndpoint(current.id);
 		} catch (err) {
+			rethrowStop(err);
 			logger.warn(`Failed to delete stale webhook endpoint: ${(err as Error).message}`);
 		}
 	}
@@ -233,34 +266,30 @@ export async function ensureRegistration(options: RegistrationOptions): Promise<
 export async function reregister(options: RegistrationOptions, storedId: string | null): Promise<RegistrationResult> {
 	const events = options.events ?? DEFAULT_WEBHOOK_EVENTS;
 	const scoped: RegistrationOptions = { ...options, storedId };
-	const stopCheck = (): void => {
-		if (options.isStopped?.()) {
-			throw new RegistrationStoppedError();
-		}
-	};
 	const cleanup = async (): Promise<void> => {
 		let list: UnifiWebhookEndpoint[];
 		try {
 			list = await options.http.listWebhookEndpoints();
 		} catch (err) {
+			rethrowStop(err);
 			options.logger.warn(`Could not list webhook endpoints before delete: ${(err as Error).message}`);
 			return;
 		}
-		stopCheck();
+		stopCheck(options);
 		const ids = new Set(list.filter(e => e.endpoint === options.publicUrl || isOwn(e, scoped)).map(e => e.id));
-		await deleteEndpoints(options.http, ids, options.logger, 'webhook endpoint');
+		await deleteEndpoints(options, ids, 'webhook endpoint');
 	};
 
-	stopCheck();
+	stopCheck(options);
 	await cleanup();
-	stopCheck();
+	stopCheck(options);
 	const payload = { name: options.name, endpoint: options.publicUrl, events: [...events] };
 	const result = await options.http.createWebhookEndpoint(payload);
 	if (result.code === 'CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED') {
 		// Delete failed silently above — clean up and retry once.
 		options.logger.warn(`Webhook endpoint still duplicated after delete — retrying cleanup.`);
 		await cleanup();
-		stopCheck();
+		stopCheck(options);
 		const retry = await options.http.createWebhookEndpoint(payload);
 		if (!retry.endpoint?.id || !retry.endpoint?.secret) {
 			throw new Error(

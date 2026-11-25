@@ -6,6 +6,10 @@ import config from '@iobroker/eslint-config';
 // The default config does not register the plugin, so we do it below for the one rule we use.
 import pluginUnicorn from 'eslint-plugin-unicorn';
 
+/** Adapter methods with an effect outside the process (state/object writes, timers). */
+const EFFECT_METHODS =
+	'/^(setState|setStateAsync|setStateChanged|setStateChangedAsync|setForeignState|setForeignStateAsync|extendObject|extendObjectAsync|extendForeignObject|extendForeignObjectAsync|setObject|setObjectAsync|setObjectNotExists|setObjectNotExistsAsync|setForeignObject|setForeignObjectAsync|delObject|delObjectAsync|delState|delStateAsync|setTimeout|setInterval)$/';
+
 export default [
 	...config,
 	{
@@ -50,6 +54,34 @@ export default [
 					hexadecimal: { minimumDigits: 0, groupLength: 2 },
 					binary: { minimumDigits: 0, groupLength: 4 },
 					octal: { minimumDigits: 0, groupLength: 3 },
+				},
+			],
+		},
+	},
+	{
+		// Work that continues after the stop must not write anything or start timers (src/lib/stopSignal.ts):
+		// the adapter class and the state manager only write through their stop-aware wrappers.
+		files: ['src/main.ts'],
+		rules: {
+			'no-restricted-syntax': [
+				'error',
+				{
+					selector: `CallExpression[callee.object.type='ThisExpression'][callee.property.name=${EFFECT_METHODS}]`,
+					message:
+						'Use the stop-aware wrappers (writeState, writeForeignState, startTimer, startInterval) or call this.throwIfStopped() right before.',
+				},
+			],
+		},
+	},
+	{
+		files: ['src/lib/library.ts'],
+		rules: {
+			'no-restricted-syntax': [
+				'error',
+				{
+					selector: `CallExpression[callee.object.property.name='adapter'][callee.property.name=${EFFECT_METHODS}]`,
+					message:
+						'Write through set/extend/create (they refuse after the stop) or call throwIfStopped() right before.',
 				},
 			],
 		},

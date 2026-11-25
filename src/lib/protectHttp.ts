@@ -4,6 +4,7 @@ import type { Readable } from 'node:stream';
 import { isSafeProtectId, sanitizeProtectClipPath } from './pathSafety';
 import { tlsCertificateErrorCode } from './tlsErrors';
 import { trustedCertificates } from './caCert';
+import { throwIfStopped } from './stopSignal';
 
 export interface ProtectHttpOptions {
 	/** Host name or address of the UniFi OS console (a `host:port` value is used as it is). */
@@ -24,6 +25,8 @@ export interface ProtectHttpOptions {
 	reloginIntervalMs?: number;
 	/** Clock (tests). */
 	now?: () => number;
+	/** Stop signal of the adapter: once it is true, every new request is refused with `StoppedError`. */
+	isStopped?: () => boolean;
 }
 
 /** Default for {@link ProtectHttpOptions.reloginIntervalMs}. */
@@ -85,6 +88,11 @@ export class ProtectHttp {
 				// in addition to the system CAs (Node's `ca` alone would replace them)
 				ca: trustedCertificates(options.caCert),
 			}),
+		});
+		// after the stop nothing more is sent to the console (login, snapshot, clip)
+		this.client.interceptors.request.use(config => {
+			throwIfStopped(options.isStopped);
+			return config;
 		});
 	}
 
