@@ -128,6 +128,23 @@ function windowKey(event: EventEntry): string {
     return JSON.stringify([event.ts, event.type, event.doorName ?? '', event.deviceName ?? '', event.userName ?? '']);
 }
 
+/**
+ * React keys of the list entries: the same event keeps its key when a new event is put in front of it (an
+ * index key would change for every entry - the entries would be built anew and the focused snapshot button
+ * would lose the keyboard focus). Identical events are numbered in their order.
+ *
+ * @param events the events in the order shown
+ */
+export function entryKeys(events: EventEntry[]): string[] {
+    const seen = new Map<string, number>();
+    return events.map(event => {
+        const key = windowKey(event);
+        const n = seen.get(key) ?? 0;
+        seen.set(key, n + 1);
+        return n === 0 ? key : `${key}#${n}`;
+    });
+}
+
 function isSnapshotPending({ event, startedAt }: TimedEvent, now: number): boolean {
     return PROTECT_SNAPSHOT_EVENTS.has(event.type) && !event.protectSnapshotUrl && now - startedAt < SNAPSHOT_WAIT_MS;
 }
@@ -202,6 +219,7 @@ export function EventLogCard(): JSX.Element {
         windows.current = next;
         return placed;
     }, [last, receivedAt, liveList]);
+    const keys = useMemo(() => entryKeys(timed.map(t => t.event)), [timed]);
 
     useEffect(() => {
         // Tick while any access.door.unlock event is still in its waiting window.
@@ -280,7 +298,7 @@ export function EventLogCard(): JSX.Element {
                                 const countdown = Math.max(1, 3 - Math.floor(elapsed / 1000));
                                 return (
                                     <ListItem
-                                        key={`${e.ts}-${i}`}
+                                        key={keys[i]}
                                         disableGutters
                                         sx={{ gap: 1, alignItems: 'flex-start' }}
                                     >

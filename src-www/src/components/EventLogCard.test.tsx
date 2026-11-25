@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { EventLogCard, parseEvents } from './EventLogCard';
+import { entryKeys, EventLogCard, parseEvents } from './EventLogCard';
 import { setStates, updateState } from '../test/socketMock';
 import { SettingsContext, useSettingsProvider } from '../settings';
 import { createPanelTheme, focusRingColor } from '../theme';
@@ -515,6 +515,46 @@ describe('EventLogCard', () => {
                 vi.advanceTimersByTime(1000);
             });
             expect(screen.getByText('1')).toBeTruthy();
+        });
+    });
+
+    describe('stable entries (R3F-01)', () => {
+        const front = { ts: NOW - 60_000, type: 'access.door.unlock', doorName: 'Front door', protectSnapshotUrl: SNAPSHOT };
+        const back = { ts: NOW - 1000, type: 'access.door.unlock', doorName: 'Back door' };
+        const frontButton = (): HTMLElement => screen.getByRole('button', { name: /^Show camera image of Front door, / });
+
+        it('keys: an entry keeps its key when a new event is put in front; identical events get keys of their own', () => {
+            const [a] = entryKeys([front]);
+            const [, a2] = entryKeys([back, front]);
+            expect(a2).toBe(a);
+            const keys = entryKeys([front, front, back, front]);
+            expect(new Set(keys).size).toBe(4);
+        });
+
+        it('the focused thumbnail button keeps the focus when a new event is prepended', () => {
+            setStates({ 'events.last': JSON.stringify([front]) });
+            render(<EventLogCard />);
+            const button = frontButton();
+            button.focus();
+            act(() => updateState('events.last', JSON.stringify([back, front])));
+            expect(frontButton()).toBe(button);
+            expect(document.activeElement).toBe(button);
+        });
+
+        it('closing the image dialog returns the focus to the thumbnail after a new event arrived meanwhile', () => {
+            setStates({ 'events.last': JSON.stringify([front]) });
+            render(<EventLogCard />);
+            const button = frontButton();
+            button.focus();
+            fireEvent.click(button);
+            expect(screen.getByRole('dialog')).toBeTruthy();
+            act(() => updateState('events.last', JSON.stringify([back, front])));
+            fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+            act(() => {
+                vi.advanceTimersByTime(1000);
+            });
+            expect(screen.queryByRole('dialog')).toBeNull();
+            expect(document.activeElement).toBe(frontButton());
         });
     });
 
