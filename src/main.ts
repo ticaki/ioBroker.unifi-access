@@ -52,6 +52,12 @@ const DOOR_REFRESH_DEBOUNCE_MS = 2000;
 const DOOR_CHECK_AFTER_COMMAND_MS = 2000;
 /** After a pulse unlock / an unlock event: the relay has dropped again by then. */
 const DOOR_CHECK_AFTER_EVENT_MS = 7000;
+/**
+ * A published doorbell call is cleared after this time at the latest: the event that ends it may be
+ * lost (adapter restart, WebSocket reconnect, webhook not delivered). UniFi ends unanswered calls
+ * well before (reason 105 "timeout").
+ */
+const DOORBELL_CALL_MAX_MS = 3 * 60_000;
 /** Upper bound for the JSON the www panel may store in admin.uiSettings. */
 const UI_SETTINGS_MAX_LENGTH = 10_000;
 
@@ -187,6 +193,8 @@ class UnifiAccess extends utils.Adapter {
 	private lockRuleSupported = true;
 	/** The doorbell call currently published in doorbell.active*. */
 	private activeDoorbellCall: { requestId?: string; fromWebhook: boolean } | null = null;
+	/** Clears the published doorbell call when its end event never arrives. */
+	private doorbellExpiryTimer: ioBroker.Timeout | undefined;
 	/** Emergency flags as last confirmed by the controller (what a failed command is put back to). */
 	private readonly lastEmergency: { lockdown?: boolean; evacuation?: boolean } = {};
 	/** Serialises emergency commands (read-modify-write of two flags). */
@@ -243,6 +251,8 @@ class UnifiAccess extends utils.Adapter {
 		// what an earlier run left behind is not true for this one until proven
 		await this.setState('info.webhookRegistered', { val: false, ack: true });
 		await this.setState('info.protectConnected', { val: false, ack: true });
+		// a call that was ringing when the adapter stopped has ended since — its end event is lost
+		await this.clearActiveDoorbellCall();
 		await this.loadInstallationId();
 
 		const cfg = this.config;
@@ -1232,8 +1242,12 @@ class UnifiAccess extends utils.Adapter {
 	): Promise<void> {
 		const current = this.activeDoorbellCall;
 		if (current) {
-			if (!authoritative) {
-				// a call is already published — the webhook must not replace it
+			const sameCall =
+				requestId === undefined || current.requestId === undefined || current.requestId === requestId;
+			if (!authoritative && sameCall) {
+				// the webhook of the call that is already published (or one that cannot be told apart from
+				// it) must not replace it; a different request id is a new call whose predecessor's end
+				// event was missed
 				return;
 			}
 			if (current.fromWebhook && requestId !== undefined && current.requestId === requestId) {
@@ -1245,9 +1259,26 @@ class UnifiAccess extends utils.Adapter {
 		await this.setState('doorbell.activeCallId', { val: callId, ack: true });
 		await this.setState('doorbell.activeFromDevice', { val: from, ack: true });
 		await this.setState('doorbell.activeStartedAt', { val: startedAt, ack: true });
+		this.scheduleDoorbellExpiry();
+	}
+
+	/** (Re)start the upper time limit of the published call. */
+	private scheduleDoorbellExpiry(): void {
+		if (this.doorbellExpiryTimer) {
+			this.clearTimeout(this.doorbellExpiryTimer);
+		}
+		this.doorbellExpiryTimer = this.setTimeout(() => {
+			this.doorbellExpiryTimer = undefined;
+			this.log.debug('Doorbell call without end event — cleared after the time limit.');
+			this.runDetached('doorbell call expiry', this.clearActiveDoorbellCall());
+		}, DOORBELL_CALL_MAX_MS);
 	}
 
 	private async clearActiveDoorbellCall(): Promise<void> {
+		if (this.doorbellExpiryTimer) {
+			this.clearTimeout(this.doorbellExpiryTimer);
+			this.doorbellExpiryTimer = undefined;
+		}
 		this.activeDoorbellCall = null;
 		await this.setState('doorbell.activeCallId', { val: null, ack: true });
 		await this.setState('doorbell.activeFromDevice', { val: null, ack: true });
@@ -2471,6 +2502,10 @@ class UnifiAccess extends utils.Adapter {
 			if (this.webhookRegistrationRetryTimer) {
 				this.clearTimeout(this.webhookRegistrationRetryTimer);
 				this.webhookRegistrationRetryTimer = undefined;
+			}
+			if (this.doorbellExpiryTimer) {
+				this.clearTimeout(this.doorbellExpiryTimer);
+				this.doorbellExpiryTimer = undefined;
 			}
 			for (const timer of this.unlockPendingTimers.values()) {
 				this.clearTimeout(timer);

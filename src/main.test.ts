@@ -950,6 +950,93 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			});
 		});
 
+		// K-04 A: the end event of a call that rang while the adapter was stopped is lost
+		it('a call left behind by an earlier run is cleared at start', async () => {
+			adapter = createAdapterWithFakeCore(MAIN, {
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				listenPort,
+				listenIp: '127.0.0.1',
+				enableWebhooks: false,
+			});
+			const instance = adapter;
+			await instance.setState('doorbell.activeCallId', { val: 'old-call', ack: true });
+			await instance.setState('doorbell.activeFromDevice', { val: 'Door 3855', ack: true });
+			await instance.setState('doorbell.activeStartedAt', { val: 1_700_000_000_000, ack: true });
+			await instance.fireReady();
+			expect(active()).to.deep.equal([null, null, null]);
+		});
+
+		// K-04: the end event may be missed (reconnect) — a call does not stay "ringing" forever
+		it('a call without end event is cleared after 3 minutes', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			const ring = mock.emitRemoteView();
+			await waitFor(() => instance.val('doorbell.activeCallId') === ring.event_object_id, {
+				description: 'ring',
+			});
+			await clock.tickAsync(3 * 60_000 - 1);
+			expect(instance.val('doorbell.activeCallId')).to.equal(ring.event_object_id);
+			await clock.tickAsync(1);
+			await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'expired' });
+			expect(active()).to.deep.equal([null, null, null]);
+		});
+
+		it('a new ring restarts the time limit; a regular end of the call cancels it', async () => {
+			// rings by webhook: the long fake-time steps may let the WebSocket heartbeat drop the connection
+			const instance = await startConnected();
+			const ring = (requestId: string): Promise<unknown> =>
+				mock.deliverWebhook(
+					fixtures.webhookEvents.doorbellIncoming({
+						door: door(DOOR_3855),
+						device: mock.findDevice(DEVICE_G2_PRO)!,
+						requestId,
+					}),
+				);
+			await ring('request-1');
+			await waitFor(() => instance.val('doorbell.activeCallId') === 'request-1', { description: 'ring 1' });
+			await clock.tickAsync(2 * 60_000);
+			await ring('request-2');
+			await waitFor(() => instance.val('doorbell.activeCallId') === 'request-2', { description: 'ring 2' });
+			await clock.tickAsync(2 * 60_000);
+			expect(instance.val('doorbell.activeCallId'), 'the limit counts from the new ring').to.equal('request-2');
+
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorbellCompleted({
+					door: door(DOOR_3855),
+					device: hub(),
+					reasonCode: 108,
+					requestId: 'request-2',
+				}),
+			);
+			await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'call ended' });
+			await clock.tickAsync(3 * 60_000);
+			expect(instance.log.of('debug').filter(m => m.startsWith('Doorbell call without end event'))).to.deep.equal(
+				[],
+			);
+		});
+
+		// K-04 B: the end event of call 1 was missed, call 2 arrives by webhook only (WebSocket reconnecting)
+		it('a webhook call with another request id replaces a call whose end event was missed', async () => {
+			const instance = await startConnected();
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorbellIncoming({
+					door: door(DOOR_3855),
+					device: mock.findDevice(DEVICE_G2_PRO)!,
+					requestId: 'request-1',
+				}),
+			);
+			await waitFor(() => instance.val('doorbell.activeCallId') === 'request-1', { description: 'call 1' });
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorbellIncoming({
+					door: door(DOOR_A2),
+					device: mock.findDevice(DEVICE_G2_PRO)!,
+					requestId: 'request-2',
+				}),
+			);
+			await waitFor(() => instance.val('doorbell.activeCallId') === 'request-2', { description: 'call 2' });
+		});
+
 		it('the webhook does not replace the call id already set by the WebSocket event of the same call', async () => {
 			const instance = await startConnected();
 			const ring = mock.emitRemoteView({ data: { request_id: 'request-0815' } });
