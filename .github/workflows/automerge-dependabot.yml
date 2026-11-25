@@ -9,6 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.actor == 'dependabot[bot]'
 
+    # Hard stop a little above max-wait-time, so a hanging run cannot block a runner for the 6 h default.
+    timeout-minutes: 195
+
     permissions:
       contents: write
       pull-requests: write
@@ -21,4 +24,10 @@ jobs:
           config-file-path: '.github/auto-merge.yml'
           merge-method: 'squash'
           wait-for-checks: 'true'
-          max-wait-time: '3600'
+          # This job only polls the "Test and Release" checks of the PR and occupies a runner while doing so.
+          # On 2026-11-14 the checks sat in the runner queue for up to 86 min (all 20 concurrent runners of the
+          # account were busy, up to 16 of them with waiting auto-merge jobs like this one), so the former
+          # limit of 3600 s expired seconds before the last check finished and the job failed with
+          # "Timeout waiting for checks to complete". The main fix is the dedicated Dependabot time slot in
+          # .github/dependabot.yml; the longer limit is the safety margin for a full runner queue.
+          max-wait-time: '10800'

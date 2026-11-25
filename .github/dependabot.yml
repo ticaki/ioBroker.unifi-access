@@ -2,6 +2,11 @@
 # Cooldown delays updating normal npm dependencies by 7 days but allows security updates to be processed immediately.
 # Note: Cooldown is not supported for the github-actions ecosystem.
 # Reference: https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+#
+# Schedule: day 11 of each month, 03:17 (Europe/Berlin). Keep this slot unique among all repositories of the
+# account. Until 2026-11 this repo shared '5 4 14 * *' with ioBroker.icloud and ioBroker.nspanel-lovelace-ui:
+# the three Dependabot runs opened ~40 PRs at once, ~390 workflow jobs competed for the 20 concurrent runners of
+# the account, checks were queued for more than an hour and the auto-merge jobs ran into their timeout.
 version: 2
 updates:
 
@@ -10,7 +15,7 @@ updates:
       - '**/*'
     schedule:
       interval: 'cron'
-      cronjob: '5 4 14 * *'
+      cronjob: '17 3 11 * *'
       timezone: 'Europe/Berlin'
     open-pull-requests-limit: 15
     assignees:
@@ -28,7 +33,7 @@ updates:
     directory: '/'
     schedule:
       interval: 'cron'
-      cronjob: '5 4 14 * *'
+      cronjob: '17 3 11 * *'
       timezone: 'Europe/Berlin'
     open-pull-requests-limit: 15
     assignees:
