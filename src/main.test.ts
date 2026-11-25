@@ -704,6 +704,28 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			).to.deep.equal([]);
 		});
 
+		// T-03: whoever waits for the ack of the command must find `locked` already written
+		for (const [index, locked] of [
+			[1, false],
+			[2, true],
+			[3, true],
+		] as const) {
+			it(`lock_rule = ${index}: locked=${locked} is written before the command is acknowledged`, async () => {
+				const instance = await startConnected();
+				const from = instance.stateWrites.length;
+				instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, index);
+				await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.lock_rule`)?.ack === true, {
+					description: 'ack',
+				});
+				const writes = instance.stateWrites.slice(from);
+				const lockedAt = writes.findIndex(w => w.id === `${NS}.doors.${DOOR_3855}.locked` && w.val === locked);
+				const ackAt = writes.findIndex(w => w.id === `${NS}.doors.${DOOR_3855}.lock_rule` && w.ack);
+				expect(lockedAt, 'locked written').to.be.greaterThan(-1);
+				expect(lockedAt, 'locked before ack').to.be.lessThan(ackAt);
+				expect(instance.timers.size, 'status check planned before the ack').to.be.greaterThan(0);
+			});
+		}
+
 		it('lock_rule = 4 sends lock_early and reads the status back (D-22)', async () => {
 			const instance = await startConnected();
 			instance.fireStateChange(`doors.${DOOR_A2}.lock_rule`, 4);
@@ -1101,19 +1123,138 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(endsAt).to.equal(mock.lockRules.get(DOOR_3855)!.ended_time * 1000);
 		});
 
-		it('stops asking as well when the refusal comes as an API error code with HTTP 200', async () => {
+		// K-11: a refusal for one door must not stop the lock rule status of all others
+		it('a refusal as API error code with HTTP 200 stops the requests for that door only', async () => {
 			mock.failNext({
 				method: 'GET',
-				path: /\/lock_rule$/,
+				path: `/doors/${DOOR_A2}/lock_rule`,
 				status: 200,
 				code: 'CODE_OPERATION_FORBIDDEN',
 				times: Number.POSITIVE_INFINITY,
 			});
 			const instance = await startConnected();
-			await waitFor(() => instance.log.of('debug').some(m => m.includes('Lock rule status not available')), {
+			await waitFor(() => instance.log.of('debug').some(m => m.includes(`Lock rule status of door ${DOOR_A2}`)), {
 				description: 'debug note',
 			});
-			expect(mock.findRequests({ method: 'GET', path: /\/lock_rule$/ })).to.have.length(1);
+			const askedA = (): number =>
+				mock.findRequests({ method: 'GET', path: `/doors/${DOOR_A2}/lock_rule` }).length;
+			expect(askedA()).to.equal(1);
+
+			// the other door keeps being updated
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 5);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === false, { description: 'unlocked' });
+			await clock.tickAsync(2000);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.lockRuleType`) === 'custom', {
+				description: 'rule of the other door',
+			});
+			// and the refused one is not asked again until the next load
+			instance.fireStateChange(`doors.${DOOR_A2}.lock_rule`, 2);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_A2}.lock_rule`)?.ack === true, {
+				description: 'lock_rule ack',
+			});
+			await clock.tickAsync(2000);
+			await waitFor(() => mock.findRequests({ method: 'GET', path: `/doors/${DOOR_A2}` }).length === 1, {
+				description: 'door status read back',
+			});
+			await delay(30);
+			expect(askedA()).to.equal(1);
+		});
+
+		it('a refusal for one door with an HTTP client error (400) does not affect the other doors', async () => {
+			mock.failNext({
+				method: 'GET',
+				path: `/doors/${DOOR_A2}/lock_rule`,
+				status: 400,
+				code: 'CODE_NOT_EXISTS',
+				times: Number.POSITIVE_INFINITY,
+			});
+			mock.lockRules.set(DOOR_3855, { type: 'keep_lock', ended_time: 0 });
+			const instance = await startConnected();
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.lockRuleType`) === 'keep_lock', {
+				description: 'rule of the other door',
+			});
+		});
+
+		it('a temporary failure (server error, device offline) stops nothing: the next refresh asks again', async () => {
+			mock.failNext({ method: 'GET', path: /\/lock_rule$/, status: 500, times: 2 });
+			mock.failNext({
+				method: 'GET',
+				path: /\/lock_rule$/,
+				status: 200,
+				code: 'CODE_DEVICE_DEVICE_OFFLINE',
+				times: 2,
+			});
+			const instance = await startConnected();
+			const asked = mock.findRequests({ method: 'GET', path: /\/lock_rule$/ }).length;
+			instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, 2);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.lock_rule`)?.ack === true, {
+				description: 'lock_rule ack',
+			});
+			await clock.tickAsync(2000);
+			await waitFor(() => mock.findRequests({ method: 'GET', path: /\/lock_rule$/ }).length > asked, {
+				description: 'asked again',
+			});
+			expect(instance.log.of('debug').some(m => m.includes('not asking again'))).to.equal(false);
+		});
+
+		// K-09: the end of a timed unlock must be checked also when the adapter did not set the rule in this run
+		it('plans the check at the end of a rule that was active at start (adapter restart, rule from the app)', async () => {
+			const endsAt = Math.floor(Date.now() / 1000) + 60;
+			mock.lockRules.set(DOOR_3855, { type: 'custom', ended_time: endsAt });
+			mock.findDoor(DOOR_3855)!.door_lock_relay_status = 'unlock';
+			const instance = await startConnected({ enableWebhooks: false });
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.lockRuleType`) === 'custom', { description: 'rule' });
+			expect(instance.val(`doors.${DOOR_3855}.locked`)).to.equal(false);
+			const checks = (): number => mock.findRequests({ method: 'GET', path: `/doors/${DOOR_3855}` }).length;
+			const before = checks();
+
+			// the rule runs out on the controller
+			mock.lockRules.delete(DOOR_3855);
+			mock.findDoor(DOOR_3855)!.door_lock_relay_status = 'lock';
+			await clock.tickAsync(endsAt * 1000 - Date.now() - 1000);
+			await delay(30);
+			expect(checks(), 'not before the end').to.equal(before);
+			// end + 2 s, with some margin for the real time that passed since the check was planned
+			await clock.tickAsync(1000 + 2000 + 500);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === true, { description: 'locked again' });
+			expect(checks()).to.equal(before + 1);
+		});
+
+		it('plans the check for a rule the controller reports after an event (set in the UniFi app)', async () => {
+			const instance = await startConnected();
+			const endsAt = Math.floor(Date.now() / 1000) + 120;
+			mock.lockRules.set(DOOR_3855, { type: 'custom', ended_time: endsAt });
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.generic('access.temporary_unlock.start', {
+					door: door(DOOR_3855),
+					device: hub(),
+				}),
+			);
+			await clock.tickAsync(2000);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.lockRuleType`) === 'custom', { description: 'rule' });
+			const before = mock.findRequests({ method: 'GET', path: `/doors/${DOOR_3855}` }).length;
+			await clock.tickAsync(endsAt * 1000 - Date.now() + 2000 + 500);
+			await waitFor(
+				() => mock.findRequests({ method: 'GET', path: `/doors/${DOOR_3855}` }).length === before + 1,
+				{
+					description: 'check at the end of the rule',
+				},
+			);
+		});
+
+		it('plans no check for a rule without end time, one that has ended, or one beyond 24 h', async () => {
+			const now = Math.floor(Date.now() / 1000);
+			mock.lockRules.set(DOOR_3855, { type: 'keep_unlock', ended_time: now + 25 * 3600 });
+			mock.lockRules.set(DOOR_A2, { type: 'custom', ended_time: now - 10 });
+			const instance = await startConnected({ enableWebhooks: false });
+			await waitFor(() => instance.val(`doors.${DOOR_A2}.lockRuleType`) === 'custom', { description: 'rules' });
+			await delay(30);
+			// timers: only the adapter's own (none for rule ends)
+			const doorChecks = (): number => mock.findRequests({ method: 'GET', path: /^\/doors\/[^/]+$/ }).length;
+			const before = doorChecks();
+			await clock.tickAsync(24 * 3600_000);
+			await delay(30);
+			expect(doorChecks()).to.equal(before);
 		});
 
 		it('stops asking when the controller does not support the endpoint (older firmware) and keeps working', async () => {

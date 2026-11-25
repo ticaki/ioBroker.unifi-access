@@ -6,7 +6,7 @@
 
 import * as utils from '@iobroker/adapter-core';
 
-import { classifyError, UnifiApiError, UnifiHttp } from './lib/unifiHttp';
+import { apiErrorCode, classifyError, UnifiApiError, UnifiHttp } from './lib/unifiHttp';
 import { classifyProtectError, ProtectHttp, type ProtectClipStream } from './lib/protectHttp';
 import { classifyStoredSecret } from './lib/secretMigration';
 import { parseCaCert } from './lib/caCert';
@@ -58,6 +58,12 @@ const DOOR_CHECK_AFTER_EVENT_MS = 7000;
  * well before (reason 105 "timeout").
  */
 const DOORBELL_CALL_MAX_MS = 3 * 60_000;
+/** Rules ending later than this are not given a timer of their own (the next reload plans it). */
+const RULE_END_CHECK_HORIZON_MS = 24 * 60 * 60_000;
+/** A planned end-of-rule check that differs by less than this from the controller's end time is kept. */
+const RULE_END_TOLERANCE_MS = 5000;
+/** API codes that say "not now" rather than "not for this door". */
+const TEMPORARY_API_CODES = new Set(['CODE_DEVICE_DEVICE_OFFLINE', 'CODE_SYSTEM_ERROR', 'CODE_DEVICE_DEVICE_BUSY']);
 /** Upper bound for the JSON the www panel may store in admin.uiSettings. */
 const UI_SETTINGS_MAX_LENGTH = 10_000;
 
@@ -189,8 +195,10 @@ class UnifiAccess extends utils.Adapter {
 	private doorRefreshWithLockRules = false;
 	/** Pending status checks per door (GET /doors/:id). */
 	private readonly doorCheckTimers = new Map<string, ioBroker.Timeout[]>();
-	/** False once the controller turned out not to offer GET /doors/:id/lock_rule. */
+	/** False once the controller turned out not to offer GET /doors/:id/lock_rule (route missing). */
 	private lockRuleSupported = true;
+	/** Doors whose lock rule the controller refuses to report (e.g. not bound to a hub) — until the next load. */
+	private readonly lockRuleUnavailableDoors = new Set<string>();
 	/** The doorbell call currently published in doorbell.active*. */
 	private activeDoorbellCall: { requestId?: string; fromWebhook: boolean } | null = null;
 	/** Clears the published doorbell call when its end event never arrives. */
@@ -200,7 +208,7 @@ class UnifiAccess extends utils.Adapter {
 	/** Serialises emergency commands (read-modify-write of two flags). */
 	private emergencyQueue: Promise<void> = Promise.resolve();
 	/** One check per door at the end of a timed unlock — survives the short checks after later events. */
-	private readonly doorRuleEndTimers = new Map<string, ioBroker.Timeout>();
+	private readonly doorRuleEndTimers = new Map<string, { timer: ioBroker.Timeout; at: number }>();
 	private webhookRegistrationRetryTimer: ioBroker.Timeout | undefined;
 	private webhookRegistrationFailures = 0;
 	/** First characters of the ioBroker installation UUID — part of the webhook endpoint name. */
@@ -793,6 +801,7 @@ class UnifiAccess extends utils.Adapter {
 			await this.applyBootstrap({ devices, doors });
 			await this.refreshEmergencyStatus();
 			this.lockRuleSupported = true;
+			this.lockRuleUnavailableDoors.clear();
 			for (const door of doors) {
 				await this.refreshLockRule(door.id);
 			}
@@ -1374,14 +1383,14 @@ class UnifiAccess extends utils.Adapter {
 			this.runDetached('door status check', this.refreshDoor(doorId));
 		}, delayMs);
 		if (timer) {
-			this.doorRuleEndTimers.set(doorId, timer);
+			this.doorRuleEndTimers.set(doorId, { timer, at: Date.now() + delayMs });
 		}
 	}
 
 	private cancelRuleEndCheck(doorId: string): void {
-		const timer = this.doorRuleEndTimers.get(doorId);
-		if (timer) {
-			this.clearTimeout(timer);
+		const entry = this.doorRuleEndTimers.get(doorId);
+		if (entry) {
+			this.clearTimeout(entry.timer);
 			this.doorRuleEndTimers.delete(doorId);
 		}
 	}
@@ -1453,33 +1462,78 @@ class UnifiAccess extends utils.Adapter {
 	}
 
 	/**
-	 * Mirror the temporary lock rule of a door into doors.<id>.lockRuleType / lockRuleEndsAt.
-	 * The endpoint needs UniFi Access 1.24.6 or later; on a controller that does not offer it the
-	 * adapter stops asking until the next (re)connect.
+	 * Mirror the temporary lock rule of a door into doors.<id>.lockRuleType / lockRuleEndsAt, and make
+	 * sure the door is checked again when a rule with an end time runs out — also for rules set in the
+	 * UniFi app or before an adapter restart; without webhooks nothing else reports the end.
+	 *
+	 * The endpoint needs UniFi Access 1.24.6 or later. A controller without the route (HTTP 404) is not
+	 * asked again until the next (re)load; a refusal for one door only stops the requests for that door.
+	 * Temporary failures (server error, device offline, network) stop nothing.
 	 *
 	 * @param doorId Door id as used by the controller
 	 */
 	private async refreshLockRule(doorId: string): Promise<void> {
-		if (!this.http || this.unloading || !this.lockRuleSupported) {
+		if (!this.http || this.unloading || !this.lockRuleSupported || this.lockRuleUnavailableDoors.has(doorId)) {
 			return;
 		}
 		try {
-			await this.library.setDoorLockRule(doorId, await this.http.getDoorLockRule(doorId));
+			const rule = await this.http.getDoorLockRule(doorId);
+			await this.library.setDoorLockRule(doorId, rule);
+			this.scheduleRuleEndFromController(doorId, rule?.ended_time);
 		} catch (err) {
-			const status = (err as { response?: { status?: number } }).response?.status;
-			const clientError =
-				status !== undefined && status >= 400 && status < 500 && ![401, 403, 429].includes(status);
-			// an API error code delivered with HTTP 200 (not an authentication problem) means the same
-			const apiRefusal = err instanceof UnifiApiError && classifyError(err) !== 'unauthorized';
-			if (clientError || apiRefusal) {
+			const status =
+				(err as { response?: { status?: number } }).response?.status ??
+				(err instanceof UnifiApiError ? err.httpStatus : undefined);
+			const code = apiErrorCode(err);
+			if (status === 404) {
+				// the route itself is missing: the controller is too old for it
 				this.lockRuleSupported = false;
 				this.log.debug(
 					`Lock rule status not available (requires UniFi Access >= 1.24.6): ${errorText(err)} — not asking again until the next reconnect.`,
+				);
+				return;
+			}
+			const temporary =
+				status === undefined ||
+				status >= 500 ||
+				[401, 403, 408, 429].includes(status) ||
+				(code !== undefined && TEMPORARY_API_CODES.has(code)) ||
+				classifyError(err) === 'unauthorized';
+			const refusal =
+				!temporary && ((status !== undefined && status >= 400 && status < 500) || err instanceof UnifiApiError);
+			if (refusal) {
+				this.lockRuleUnavailableDoors.add(doorId);
+				this.log.debug(
+					`Lock rule status of door ${doorId} not available: ${errorText(err)} — not asking again for this door until the next reconnect.`,
 				);
 			} else {
 				this.log.debug(`Lock rule refresh for ${doorId} failed: ${errorText(err)}`);
 			}
 		}
+	}
+
+	/**
+	 * Plan the end-of-rule check from the end time the controller reports.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param endedTime `ended_time` of the rule (unix seconds), 0/absent = no end
+	 */
+	private scheduleRuleEndFromController(doorId: string, endedTime: unknown): void {
+		if (typeof endedTime !== 'number' || !Number.isFinite(endedTime) || endedTime <= 0) {
+			return;
+		}
+		const remainingMs = endedTime * 1000 - Date.now();
+		// a rule that has ended already needs no check; very long rules are picked up by a later load
+		if (remainingMs <= 0 || remainingMs > RULE_END_CHECK_HORIZON_MS) {
+			return;
+		}
+		const at = Date.now() + remainingMs + DOOR_CHECK_AFTER_COMMAND_MS;
+		const planned = this.doorRuleEndTimers.get(doorId);
+		if (planned && Math.abs(planned.at - at) <= RULE_END_TOLERANCE_MS) {
+			// the check planned with the own command already covers it (ended_time has whole seconds)
+			return;
+		}
+		this.scheduleRuleEndCheck(doorId, remainingMs + DOOR_CHECK_AFTER_COMMAND_MS);
 	}
 
 	private async updateDeviceFromEventData(
@@ -2043,8 +2097,6 @@ class UnifiAccess extends utils.Adapter {
 		try {
 			await this.http.setDoorLockRule(safeDoorId, { type });
 			this.log.info(`Door ${safeDoorId} lock_rule set to ${type}.`);
-			await this.setState(`doors.${safeDoorId}.lock_rule`, { val: ruleIndex, ack: true });
-			this.lastAckedControlValues.set(`doors.${safeDoorId}.lock_rule`, ruleIndex);
 			if (type === 'keep_unlock') {
 				await this.library.setDoorLocked(safeDoorId, false);
 			} else if (type === 'keep_lock' || type === 'lock_now') {
@@ -2055,6 +2107,10 @@ class UnifiAccess extends utils.Adapter {
 			// read back; the new rule replaces an earlier timed unlock, so its end-of-time check is dropped.
 			this.cancelRuleEndCheck(safeDoorId);
 			this.scheduleDoorChecks(safeDoorId, [DOOR_CHECK_AFTER_COMMAND_MS]);
+			// acknowledged last (as for unlock / unlock_duration): whoever waits for the ack finds `locked`
+			// and the status check already in place (T-03)
+			this.lastAckedControlValues.set(`doors.${safeDoorId}.lock_rule`, ruleIndex);
+			await this.setState(`doors.${safeDoorId}.lock_rule`, { val: ruleIndex, ack: true });
 		} catch (err) {
 			this.log.warn(`Set lock_rule for door ${safeDoorId} failed: ${errorText(err)}`);
 		}
