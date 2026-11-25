@@ -121,7 +121,7 @@ describe('instance selection', () => {
         expect(socket.ADAPTER_NAMESPACE).toBe('unifi-access.0');
         expect(socket.fullId('doors.d1.unlock')).toBe('unifi-access.0.doors.d1.unlock');
         expect(socket.fullId('unifi-access.0.doors.*')).toBe('unifi-access.0.doors.*');
-        // ids of other objects are passed on unchanged — the event list reads the alive state (R2T-02)
+        // ids of other objects (system.*) are passed on unchanged (R2T-02)
         expect(socket.fullId('system.adapter.unifi-access.0.alive')).toBe('system.adapter.unifi-access.0.alive');
     });
 

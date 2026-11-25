@@ -407,16 +407,18 @@ describe('EventLogCard', () => {
         });
     });
 
+    // RF-02 / R2F-01: only a list that arrives as a change can still wait for a snapshot. (The alive state of
+    // the instance that used to tell an old list apart is not needed for that any more - R3T-01.)
     describe('a list written long ago does not count down again (RF-02)', () => {
         it('the page is opened 10 minutes after the door opening: "Not available" right away', () => {
             const T = NOW - 600_000;
-            // events.last was written at T; the running adapter renewed its alive state a few seconds ago
+            // events.last was written at T
             setStates(
                 {
                     'info.protectConnected': true,
                     'events.last': JSON.stringify([{ ts: T, type: 'access.door.unlock' }]),
                 },
-                { ts: T, perId: { 'system.adapter.unifi-access.0.alive': { val: true, ts: NOW - 5000 } } },
+                { ts: T },
             );
             render(<EventLogCard />);
             expect(screen.getByText('Not available')).toBeTruthy();
@@ -442,11 +444,11 @@ describe('EventLogCard', () => {
             expect(screen.getByText('2')).toBeTruthy();
         });
 
-        it('page opened 10 s after a door opening, alive renewed 12 s ago: no countdown (R2F-01)', () => {
+        it('page opened 10 s after a door opening: no countdown (R2F-01)', () => {
             const T = NOW - 10_000;
             setStates(
                 { 'info.protectConnected': true, 'events.last': JSON.stringify([{ ts: T, type: 'access.door.unlock' }]) },
-                { ts: T, perId: { 'system.adapter.unifi-access.0.alive': { val: true, ts: NOW - 12_000 } } },
+                { ts: T },
             );
             render(<EventLogCard />);
             expect(screen.queryByText(/^[123]$/)).toBeNull();

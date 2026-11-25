@@ -1,6 +1,6 @@
 import { Box, ButtonBase, Card, CardContent, List, ListItem, ListItemText, Stack, Typography } from '@mui/material';
 import { type JSX, useEffect, useMemo, useRef, useState } from 'react';
-import { ADAPTER_NAMESPACE, useIobState, useIobStateArrival } from '../socket';
+import { useIobState, useIobStateArrival } from '../socket';
 import { useSettings } from '../settings';
 import { focusRingColor } from '../theme';
 import { EventMediaModal } from './EventMediaModal';
@@ -100,25 +100,23 @@ function usableTs(value: unknown): number | undefined {
 }
 
 /**
- * Places the events on the clock of the browser without trusting its date and time: a wall tablet whose
- * clock is minutes off must not count down for minutes or skip the countdown.
+ * Places the events of a list that arrived as a change (live) on the clock of the browser without trusting
+ * its date and time: a wall tablet whose clock is minutes off must not count down for minutes or skip the
+ * countdown.
  *
  * How old an event was when the list arrived is measured from the event's own `ts` on the clock of
- * ioBroker. "Now" on that clock is the newest of two time stamps written by ioBroker: `ts` of the state
- * `events.last` (when the list was last written - only "now" for a list that was just written) and `ts`
- * of `system.adapter.<instance>.alive` (renewed by the running adapter every 15 s). The second one keeps
- * a list that was written long ago - the page is opened or reconnects later - from counting down again.
- * Never negative, so an event of a controller whose clock is ahead starts its window when it arrives -
- * every window ends at the latest {@link SNAPSHOT_WAIT_MS} after the list arrived in the browser.
+ * ioBroker: "now" on that clock is `ts` of the state `events.last` - the list arriving as a change was
+ * written just then. (A list read when the page opens or reconnects may be old; it is never placed here
+ * but shown as over at once, see EventLogCard.) Never negative, so an event of a controller whose clock is
+ * ahead starts its window when it arrives - every window ends at the latest {@link SNAPSHOT_WAIT_MS} after
+ * the list arrived in the browser.
  *
  * @param events events of the list
  * @param stateTs `ts` of the state `events.last`
  * @param receivedAt when the list arrived, see {@link browserClock}
- * @param aliveTs `ts` of the state `system.adapter.<instance>.alive` as known when the list arrived
  */
-export function timeEvents(events: EventEntry[], stateTs: unknown, receivedAt: number, aliveTs?: unknown): TimedEvent[] {
-    const known = [usableTs(stateTs), usableTs(aliveTs)].filter((ts): ts is number => ts !== undefined);
-    const serverNow = known.length > 0 ? Math.max(...known) : undefined;
+export function timeEvents(events: EventEntry[], stateTs: unknown, receivedAt: number): TimedEvent[] {
+    const serverNow = usableTs(stateTs);
     return events.map(event => ({
         event,
         startedAt: receivedAt - (serverNow === undefined ? 0 : Math.max(0, serverNow - event.ts)),
@@ -175,9 +173,6 @@ export function EventLogCard(): JSX.Element {
     // Only a list that arrives as a change while the page is open can hold an event whose snapshot is
     // still on its way. The list read when the page opens or reconnects starts no countdown (R2F-01).
     const { state: last, live: liveList } = useIobStateArrival('events.last');
-    // renewed by the running adapter every 15 s: tells how old a list is that was written long ago
-    const alive = useIobState(`system.adapter.${ADAPTER_NAMESPACE}.alive`);
-    const aliveKnown = alive !== undefined && alive !== null;
     // Camera snapshots only arrive while the adapter is logged in to UniFi Protect. Without it no
     // placeholder is shown - it would count down and end in "Not available" for every door opening.
     const protectConnected = useIobState('info.protectConnected')?.val === true;
@@ -189,14 +184,13 @@ export function EventLogCard(): JSX.Element {
 
     // a new value of the state (new event, snapshot URL added) is a new arrival
     const receivedAt = useMemo(() => browserClock(), [last]);
-    // Not placed again on each 15-second renewal of the alive state: that would shorten running windows.
     // Waiting window of each event, kept across lists: an event keeps the window it got when it first
     // showed up - a list written again (new event in front, snapshot URL added) neither restarts nor
     // starts it, so an event read as "Not available" stays so.
     const windows = useRef(new Map<string, number>());
     const timed = useMemo<TimedEvent[]>(() => {
         const fresh = liveList
-            ? timeEvents(parseEvents(last?.val), last?.ts, receivedAt, alive?.ts)
+            ? timeEvents(parseEvents(last?.val), last?.ts, receivedAt)
             : parseEvents(last?.val).map(event => ({ event, startedAt: Number.NEGATIVE_INFINITY }));
         const next = new Map<string, number>();
         const placed = fresh.map(({ event, startedAt }) => {
@@ -207,7 +201,7 @@ export function EventLogCard(): JSX.Element {
         });
         windows.current = next;
         return placed;
-    }, [last, receivedAt, aliveKnown, liveList]);
+    }, [last, receivedAt, liveList]);
 
     useEffect(() => {
         // Tick while any access.door.unlock event is still in its waiting window.

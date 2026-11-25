@@ -729,7 +729,7 @@ describe('contract adapter ↔ frontend (sendTo answers, error codes, state ids)
 				);
 			});
 
-			it('ts of events.last is the time of its last write; the panel adds the alive state of the instance (RF-02)', async () => {
+			it('ts of events.last is the time of its last write; the panel counts down only for a list that arrives as a change (RF-02, R3T-01)', async () => {
 				const instance = await start();
 				await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
 				const before = Date.now();
@@ -743,9 +743,10 @@ describe('contract adapter ↔ frontend (sendTo answers, error codes, state ids)
 				const state = instance.states.get(`${NS}.events.last`)!;
 				expect(state.ts).to.be.at.least(before).and.at.most(Date.now());
 				// every new event and every attached snapshot rewrites the list: a list arriving while the page is
-				// open was just written, an old one is recognised by the alive state (renewed by js-controller)
-				expect(card).to.contain('system.adapter.${ADAPTER_NAMESPACE}.alive');
-				expect(card).to.match(/timeEvents\(parseEvents\(last\?\.val\), last\?\.ts, receivedAt, alive\?\.ts\)/);
+				// open was just written, so its ts is "now" on the clock of ioBroker; a list read on opening is old
+				expect(card).to.match(
+					/liveList\s*\?\s*timeEvents\(parseEvents\(last\?\.val\), last\?\.ts, receivedAt\)/,
+				);
 			});
 
 			it('the lock rule types the panel describes are the documented ones (schedule on purpose not)', () => {

@@ -6,6 +6,6 @@
  * @param namespace namespace of the adapter instance, e.g. `unifi-access.0`
  */
 export function qualifyStateId(id: string, namespace: string): string {
-    // ids of other objects (system.adapter.<instance>.alive) are passed on as they are
+    // ids of other objects (system.*) are passed on as they are
     return id.startsWith(`${namespace}.`) || id.startsWith('system.') ? id : `${namespace}.${id}`;
 }
