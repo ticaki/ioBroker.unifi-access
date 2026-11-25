@@ -3,7 +3,13 @@ import { AxiosError } from 'axios';
 
 import { createTestLogger, fixtures, MockUnifiController, rejection, type TestLogger } from '../../test/mock';
 import { UnifiHttp } from '../lib/unifiHttp';
-import { DEFAULT_WEBHOOK_EVENTS, ensureRegistration, reregister, type RegistrationOptions } from './registration';
+import {
+	DEFAULT_WEBHOOK_EVENTS,
+	ensureRegistration,
+	RegistrationStoppedError,
+	reregister,
+	type RegistrationOptions,
+} from './registration';
 
 const TOKEN = 'registration-test-token';
 /** Name scheme with the ioBroker host: identifies one installation */
@@ -478,6 +484,38 @@ describe('webhook registration (against the mock controller)', () => {
 			mock.failNext({ method: 'POST', status: 500 });
 			const err = await rejection(reregister(options, null));
 			expect(err).to.be.instanceOf(AxiosError);
+		});
+
+		describe('stops sending once isStopped() says so (R2K-03)', () => {
+			it('stopped before the start: nothing is sent', async () => {
+				const err = await rejection(reregister({ ...options, isStopped: () => true }, null));
+				expect(err).to.be.instanceOf(RegistrationStoppedError);
+				expect(calls()).to.deep.equal([]);
+			});
+
+			it('stopped after the listing: no DELETE, no POST', async () => {
+				const old = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME });
+				let stopped = false;
+				const original = options.http.listWebhookEndpoints.bind(options.http);
+				const http = Object.create(options.http) as typeof options.http;
+				http.listWebhookEndpoints = async () => {
+					const list = await original();
+					stopped = true;
+					return list;
+				};
+				const err = await rejection(reregister({ ...options, http, isStopped: () => stopped }, old.id));
+				expect(err).to.be.instanceOf(RegistrationStoppedError);
+				expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`]);
+				expect(mock.webhookEndpoints).to.deep.equal([old]);
+			});
+
+			it('stopped after the delete: no POST', async () => {
+				const old = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME });
+				const isStopped = (): boolean => mock.findRequests({ method: 'DELETE' }).length > 0;
+				const err = await rejection(reregister({ ...options, isStopped }, old.id));
+				expect(err).to.be.instanceOf(RegistrationStoppedError);
+				expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`, `DELETE ${ENDPOINTS}/${old.id}`]);
+			});
 		});
 	});
 });

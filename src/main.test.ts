@@ -511,6 +511,75 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				expect(instance.val('info.webhookEndpointId')).to.equal(current.id);
 			});
 
+			describe('"Re-register webhook" and a stop of the instance (R2K-03)', () => {
+				const writes = (): string[] =>
+					mock.requests
+						.filter(r => r.path.startsWith('/webhooks') && r.method !== 'GET')
+						.map(r => `${r.method} ${r.path}`);
+
+				it('stopped while it waits for a running check: nothing is deleted or created, native unchanged', async () => {
+					const instance = await startConnected();
+					let release: () => void = () => undefined;
+					const gate = new Promise<void>(resolve => (release = resolve));
+					let held = false;
+					const original = UnifiHttp.prototype.listWebhookEndpoints;
+					const stub = sinon.stub(UnifiHttp.prototype, 'listWebhookEndpoints').callsFake(async function (
+						this: UnifiHttp,
+					) {
+						const list = await original.call(this);
+						if (!held) {
+							held = true;
+							await gate;
+						}
+						return list;
+					});
+					try {
+						await advance(15 * 60_000);
+						await waitFor(() => held, { description: 'check holds its endpoint list' });
+						const native = JSON.stringify(instance.objects.get(INSTANCE_OBJECT)?.native);
+						const before = writes();
+						const answer = instance.request('reregisterWebhook', undefined, 5000);
+						await delay(50);
+						await instance.fireUnload();
+						release();
+						expect(await answer).to.deep.equal({ ok: false, error: 'unloading' });
+						await delay(100);
+						expect(writes(), 'no DELETE/POST after the stop').to.deep.equal(before);
+						expect(JSON.stringify(instance.objects.get(INSTANCE_OBJECT)?.native)).to.equal(native);
+					} finally {
+						stub.restore();
+					}
+				});
+
+				it('stopped while it lists the endpoints: the old endpoint is neither deleted nor replaced', async () => {
+					const instance = await startConnected();
+					const old = mock.webhookEndpoints[0].id;
+					const original = UnifiHttp.prototype.listWebhookEndpoints;
+					const stub = sinon.stub(UnifiHttp.prototype, 'listWebhookEndpoints').callsFake(async function (
+						this: UnifiHttp,
+					) {
+						const list = await original.call(this);
+						await instance.fireUnload();
+						return list;
+					});
+					try {
+						const native = JSON.stringify(instance.objects.get(INSTANCE_OBJECT)?.native);
+						const before = writes();
+						expect(await instance.request('reregisterWebhook', undefined, 5000)).to.deep.equal({
+							ok: false,
+							error: 'unloading',
+						});
+						await delay(100);
+						expect(writes()).to.deep.equal(before);
+						expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([old]);
+						expect(JSON.stringify(instance.objects.get(INSTANCE_OBJECT)?.native)).to.equal(native);
+						expect(instance.timers.size, 'no registration retry').to.equal(0);
+					} finally {
+						stub.restore();
+					}
+				});
+			});
+
 			it('an endpoint deleted at the controller is registered again at the next check', async () => {
 				const instance = await startConnected();
 				mock.webhookEndpoints.length = 0;

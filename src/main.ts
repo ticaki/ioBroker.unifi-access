@@ -2573,6 +2573,10 @@ class UnifiAccess extends utils.Adapter {
 		while (this.webhookRegistrationTask) {
 			await this.webhookRegistrationTask;
 		}
+		if (this.unloading) {
+			// stopped while waiting: no DELETE/POST at the controller for a receiver that is gone
+			return { ok: false, error: 'unloading' };
+		}
 		this.webhookRegistrationRunning = true;
 		let done: () => void = () => undefined;
 		this.webhookRegistrationTask = new Promise<void>(resolve => (done = resolve));
@@ -2598,21 +2602,31 @@ class UnifiAccess extends utils.Adapter {
 					name: this.webhookEndpointName(),
 					events: DEFAULT_WEBHOOK_EVENTS,
 					logger: this.registrationLogger(),
+					isStopped: () => this.unloading,
 				},
 				this.webhookEndpointId,
 			);
 			this.webhookEndpointId = result.id;
 			this.webhookSecret = result.secret;
 			this.webhookRegistered = true;
-			await this.setState('info.webhookRegistered', { val: true, ack: true });
+			if (!this.unloading) {
+				await this.setState('info.webhookRegistered', { val: true, ack: true });
+			}
+			// Stopped while the controller created the endpoint: its credentials are still stored, so the
+			// configuration matches the controller at the next start.
 			// Storing the credentials changes the instance object, which makes js-controller restart the
 			// adapter — the answer has to be on its way before that.
 			defer(() => this.persistWebhookCredentials(result.id, result.secret));
 			return { ok: true, id: result.id };
 		} catch (err) {
+			this.webhookRegistered = false;
+			if (this.unloading) {
+				// stopped in between: nothing more is sent to the controller; the next start checks the
+				// registration anyway
+				return { ok: false, error: 'unloading' };
+			}
 			// The old endpoint may already be deleted: do not keep claiming it is registered, and make
 			// up for it with the regular registration.
-			this.webhookRegistered = false;
 			await this.setState('info.webhookRegistered', { val: false, ack: true });
 			defer(() => {
 				this.scheduleWebhookRegistrationRetry();

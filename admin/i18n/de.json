@@ -44,6 +44,7 @@
 	"reregisterWebhook_error_not_configured": "Webhook kann nicht registriert werden: Der laufenden Instanz fehlt Controller-Host oder API-Token. Bitte beides eintragen, speichern und erneut versuchen.",
 	"reregisterWebhook_error_webhooks_disabled": "Webhook kann nicht registriert werden: Der Webhook-Empfänger ist in der laufenden Instanz nicht aktiviert. Bitte aktivieren, Einstellungen speichern und erneut versuchen.",
 	"reregisterWebhook_error_receiver_not_running": "Webhook kann nicht registriert werden: Der HTTP-Server des Adapters läuft nicht oder es wurde keine nutzbare Netzwerkadresse gefunden. Bitte Listen-Port, Listen-IP und das Log der Instanz prüfen.",
+	"reregisterWebhook_error_unloading": "Webhook wurde nicht registriert: Die Instanz wurde inzwischen gestoppt (Neustart oder Einstellungen gespeichert). Bitte warten, bis sie wieder läuft, und erneut versuchen.",
 	"reregisterWebhook_error_unknown_command": "Die laufende Adapter-Instanz kennt dieses Kommando nicht. Adapter und Einstellungsseite haben offenbar unterschiedliche Versionen — bitte die Instanz neu starten.",
 	"enableThumbnailServer": "Thumbnail-Server aktivieren",
 	"enableThumbnailServer_help": "Stellt das letzte Event-Thumbnail pro Gerät als JPEG bereit. Wird vom www-Panel verwendet.",

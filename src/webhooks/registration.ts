@@ -37,6 +37,19 @@ export interface RegistrationOptions {
 	storedSecret?: string | null;
 	events?: readonly string[];
 	logger: { debug: (msg: string) => void; info: (msg: string) => void; warn: (msg: string) => void };
+	/**
+	 * True once the adapter stops: {@link reregister} then sends no further DELETE or POST to the
+	 * controller and fails with {@link RegistrationStoppedError}.
+	 */
+	isStopped?: () => boolean;
+}
+
+/** {@link reregister} was abandoned because the adapter stopped. */
+export class RegistrationStoppedError extends Error {
+	public constructor() {
+		super('Webhook re-registration abandoned: the instance is stopping');
+		this.name = 'RegistrationStoppedError';
+	}
 }
 
 function sameEvents(a: readonly string[] | undefined, b: readonly string[]): boolean {
@@ -220,6 +233,11 @@ export async function ensureRegistration(options: RegistrationOptions): Promise<
 export async function reregister(options: RegistrationOptions, storedId: string | null): Promise<RegistrationResult> {
 	const events = options.events ?? DEFAULT_WEBHOOK_EVENTS;
 	const scoped: RegistrationOptions = { ...options, storedId };
+	const stopCheck = (): void => {
+		if (options.isStopped?.()) {
+			throw new RegistrationStoppedError();
+		}
+	};
 	const cleanup = async (): Promise<void> => {
 		let list: UnifiWebhookEndpoint[];
 		try {
@@ -228,17 +246,21 @@ export async function reregister(options: RegistrationOptions, storedId: string 
 			options.logger.warn(`Could not list webhook endpoints before delete: ${(err as Error).message}`);
 			return;
 		}
+		stopCheck();
 		const ids = new Set(list.filter(e => e.endpoint === options.publicUrl || isOwn(e, scoped)).map(e => e.id));
 		await deleteEndpoints(options.http, ids, options.logger, 'webhook endpoint');
 	};
 
+	stopCheck();
 	await cleanup();
+	stopCheck();
 	const payload = { name: options.name, endpoint: options.publicUrl, events: [...events] };
 	const result = await options.http.createWebhookEndpoint(payload);
 	if (result.code === 'CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED') {
 		// Delete failed silently above — clean up and retry once.
 		options.logger.warn(`Webhook endpoint still duplicated after delete — retrying cleanup.`);
 		await cleanup();
+		stopCheck();
 		const retry = await options.http.createWebhookEndpoint(payload);
 		if (!retry.endpoint?.id || !retry.endpoint?.secret) {
 			throw new Error(

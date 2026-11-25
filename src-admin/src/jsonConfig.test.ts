@@ -131,9 +131,9 @@ describe('admin/jsonConfig.json', () => {
 			main.indexOf('private async handleReregisterWebhook('),
 			main.indexOf('private recoverProtectSession('),
 		);
-		const codes = [...handler.matchAll(/error: '([a-z-]+)'/g)].map(match => match[1]);
+		const codes = [...new Set([...handler.matchAll(/error: '([a-z-]+)'/g)].map(match => match[1]))];
 		// guards the extraction itself: these are the codes of the adapter at the time of writing
-		expect(codes).toEqual(['not-configured', 'webhooks-disabled', 'receiver-not-running']);
+		expect(codes).toEqual(['not-configured', 'webhooks-disabled', 'receiver-not-running', 'unloading']);
 
 		const texts = items.find(([key]) => key === '_reregisterWebhook')?.[1].error as Record<string, string>;
 		for (const code of [...codes, 'unknown-command']) {

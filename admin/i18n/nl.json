@@ -44,6 +44,7 @@
 	"reregisterWebhook_error_not_configured": "Webhook kan niet worden geregistreerd: de actieve instantie heeft geen controller-host of API-token. Vul beide in, sla op en probeer het opnieuw.",
 	"reregisterWebhook_error_webhooks_disabled": "Webhook kan niet worden geregistreerd: de webhook-ontvanger is in de actieve instantie niet ingeschakeld. Schakel hem in, sla de instellingen op en probeer het opnieuw.",
 	"reregisterWebhook_error_receiver_not_running": "Webhook kan niet worden geregistreerd: de HTTP-server van de adapter draait niet of er is geen bruikbaar netwerkadres gevonden. Controleer luisterpoort, luister-IP en het log van de instantie.",
+	"reregisterWebhook_error_unloading": "Webhook is niet geregistreerd: de instantie is intussen gestopt (herstart of instellingen opgeslagen). Wacht tot ze weer draait en probeer het opnieuw.",
 	"reregisterWebhook_error_unknown_command": "De actieve adapterinstantie kent dit commando niet. Adapter en instellingenpagina hebben blijkbaar verschillende versies — herstart de instantie.",
 	"enableThumbnailServer": "Thumbnail-server inschakelen",
 	"enableThumbnailServer_help": "Levert de laatste event-thumbnail per apparaat als JPEG. Wordt gebruikt door het www-paneel.",

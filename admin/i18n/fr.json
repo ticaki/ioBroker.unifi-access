@@ -44,6 +44,7 @@
 	"reregisterWebhook_error_not_configured": "Impossible d'enregistrer le webhook : l'instance en cours d'exécution n'a pas d'hôte du contrôleur ou de jeton API. Saisissez les deux, enregistrez et réessayez.",
 	"reregisterWebhook_error_webhooks_disabled": "Impossible d'enregistrer le webhook : le récepteur de webhooks n'est pas activé dans l'instance en cours d'exécution. Activez-le, enregistrez les paramètres et réessayez.",
 	"reregisterWebhook_error_receiver_not_running": "Impossible d'enregistrer le webhook : le serveur HTTP de l'adaptateur ne fonctionne pas ou aucune adresse réseau utilisable n'a été trouvée. Vérifiez le port et l'IP d'écoute ainsi que le journal de l'instance.",
+	"reregisterWebhook_error_unloading": "Le webhook n'a pas été enregistré : l'instance s'est arrêtée entre-temps (redémarrage ou paramètres enregistrés). Attendez qu'elle fonctionne à nouveau et réessayez.",
 	"reregisterWebhook_error_unknown_command": "L'instance de l'adaptateur en cours d'exécution ne connaît pas cette commande. L'adaptateur et la page de configuration semblent avoir des versions différentes — redémarrez l'instance.",
 	"enableThumbnailServer": "Activer le serveur de vignettes",
 	"enableThumbnailServer_help": "Sert la dernière vignette d'événement par appareil au format JPEG. Utilisé par le panneau www.",

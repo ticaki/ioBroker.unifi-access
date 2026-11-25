@@ -44,6 +44,7 @@
 	"reregisterWebhook_error_not_configured": "Nie można zarejestrować webhooka: działająca instancja nie ma hosta kontrolera lub tokenu API. Wprowadź oba, zapisz i spróbuj ponownie.",
 	"reregisterWebhook_error_webhooks_disabled": "Nie można zarejestrować webhooka: odbiornik webhooków nie jest włączony w działającej instancji. Włącz go, zapisz ustawienia i spróbuj ponownie.",
 	"reregisterWebhook_error_receiver_not_running": "Nie można zarejestrować webhooka: serwer HTTP adaptera nie działa lub nie znaleziono użytecznego adresu sieciowego. Sprawdź port i adres IP nasłuchu oraz log instancji.",
+	"reregisterWebhook_error_unloading": "Webhook nie został zarejestrowany: instancja została w międzyczasie zatrzymana (restart lub zapisane ustawienia). Poczekaj, aż znów zacznie działać, i spróbuj ponownie.",
 	"reregisterWebhook_error_unknown_command": "Działająca instancja adaptera nie zna tego polecenia. Adapter i strona ustawień mają najwyraźniej różne wersje — uruchom instancję ponownie.",
 	"enableThumbnailServer": "Włącz serwer miniatur",
 	"enableThumbnailServer_help": "Udostępnia ostatnią miniaturę zdarzenia dla każdego urządzenia jako JPEG. Używane przez panel www.",

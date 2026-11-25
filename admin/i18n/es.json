@@ -44,6 +44,7 @@
 	"reregisterWebhook_error_not_configured": "No se puede registrar el webhook: a la instancia en ejecución le falta el host del controlador o el token de API. Introduzca ambos, guarde e inténtelo de nuevo.",
 	"reregisterWebhook_error_webhooks_disabled": "No se puede registrar el webhook: el receptor de webhooks no está activado en la instancia en ejecución. Actívelo, guarde la configuración e inténtelo de nuevo.",
 	"reregisterWebhook_error_receiver_not_running": "No se puede registrar el webhook: el servidor HTTP del adaptador no se está ejecutando o no se encontró ninguna dirección de red utilizable. Compruebe el puerto y la IP de escucha y el registro de la instancia.",
+	"reregisterWebhook_error_unloading": "El webhook no se registró: la instancia se detuvo mientras tanto (reinicio o configuración guardada). Espere a que vuelva a ejecutarse e inténtelo de nuevo.",
 	"reregisterWebhook_error_unknown_command": "La instancia del adaptador en ejecución no conoce este comando. El adaptador y la página de configuración parecen tener versiones distintas: reinicie la instancia.",
 	"enableThumbnailServer": "Activar servidor de miniaturas",
 	"enableThumbnailServer_help": "Sirve la última miniatura de evento por dispositivo como JPEG. Lo usa el panel www.",

@@ -44,6 +44,7 @@
 	"reregisterWebhook_error_not_configured": "无法注册 Webhook: 正在运行的实例缺少控制器主机或 API 令牌. 请填写两者, 保存后重试.",
 	"reregisterWebhook_error_webhooks_disabled": "无法注册 Webhook: 正在运行的实例未启用 Webhook 接收器. 请启用, 保存设置后重试.",
 	"reregisterWebhook_error_receiver_not_running": "无法注册 Webhook: 适配器的 HTTP 服务器未运行, 或未找到可用的网络地址. 请检查监听端口, 监听 IP 以及实例日志.",
+	"reregisterWebhook_error_unloading": "Webhook 未注册: 实例在此期间已停止 (重启或保存了设置). 请等待实例重新运行后再试.",
 	"reregisterWebhook_error_unknown_command": "正在运行的适配器实例不识别此命令. 适配器与设置页面的版本似乎不一致 - 请重启实例.",
 	"enableThumbnailServer": "启用缩略图服务器",
 	"enableThumbnailServer_help": "以 JPEG 格式提供每个设备的最新事件缩略图。供 www 面板使用。",

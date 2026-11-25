@@ -44,6 +44,7 @@
 	"reregisterWebhook_error_not_configured": "Webhook cannot be registered: the running instance has no controller host or API token. Enter both, save and try again.",
 	"reregisterWebhook_error_webhooks_disabled": "Webhook cannot be registered: the webhook receiver is not enabled in the running instance. Enable it, save the settings and try again.",
 	"reregisterWebhook_error_receiver_not_running": "Webhook cannot be registered: the HTTP server of the adapter is not running or no usable network address was found. Check listen port and listen IP and the log of the instance.",
+	"reregisterWebhook_error_unloading": "Webhook was not registered: the instance stopped meanwhile (restart or settings saved). Wait until it runs again and try again.",
 	"reregisterWebhook_error_unknown_command": "The running adapter instance does not know this command. Adapter and settings page seem to have different versions — restart the instance.",
 	"enableThumbnailServer": "Enable thumbnail server",
 	"enableThumbnailServer_help": "Serves the latest event thumbnail per device as a JPEG. Used by the www panel.",
