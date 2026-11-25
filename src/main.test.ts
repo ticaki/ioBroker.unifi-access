@@ -984,6 +984,8 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 						door: door(DOOR_3855),
 						device: hub(),
 						reasonCode: code,
+						// the request id is shared by the WebSocket and the webhook events of one call
+						requestId: String(ring.data.request_id),
 					}),
 				);
 				await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'call ended' });
@@ -1147,6 +1149,75 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				}),
 			);
 			await waitFor(() => instance.val('doorbell.activeCallId') === 'request-2', { description: 'call 2' });
+		});
+
+		describe('the end of an earlier call does not clear the call that is still ringing (RK-02)', () => {
+			/**
+			 * Call A rings at one reader, call B at another one right after it (B is published).
+			 *
+			 * @param instance The adapter
+			 * @returns The published call id of B
+			 */
+			async function twoCalls(instance: FakeAdapter): Promise<string> {
+				mock.emitRemoteView({ data: { request_id: 'CALL_A', device_id: DEVICE_G2_PRO } });
+				await waitFor(() => events().filter(e => e.type === 'access.remote_view').length === 1, {
+					description: 'ring A',
+				});
+				const b = mock.emitRemoteView({ data: { request_id: 'CALL_B', device_id: DEVICE_HUB } });
+				await waitFor(() => instance.val('doorbell.activeCallId') === b.event_object_id, {
+					description: 'ring B published',
+				});
+				return String(b.event_object_id);
+			}
+
+			it('WebSocket: access.remote_view.change of call A leaves call B active; the end of B clears it', async () => {
+				const instance = await startConnected({ enableWebhooks: false });
+				const callB = await twoCalls(instance);
+				mock.emitRemoteViewChange(105, { data: { remote_call_request_id: 'CALL_A' } });
+				await waitFor(() => events().some(e => e.type === 'access.remote_view.change'), {
+					description: 'end of A logged',
+				});
+				await delay(30);
+				expect(instance.val('doorbell.activeCallId')).to.equal(callB);
+				expect(instance.log.of('debug').some(m => m.includes('for call CALL_A, but call CALL_B is published')))
+					.to.be.true;
+
+				mock.emitRemoteViewChange(400, { data: { remote_call_request_id: 'CALL_B' } });
+				await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'B ended' });
+				expect(active()).to.deep.equal([null, null, null]);
+			});
+
+			it('webhook: access.doorbell.completed of call A leaves call B active', async () => {
+				const instance = await startConnected();
+				const callB = await twoCalls(instance);
+				await mock.deliverWebhook(
+					fixtures.webhookEvents.doorbellCompleted({
+						door: door(DOOR_3855),
+						device: hub(),
+						reasonCode: 108,
+						requestId: 'CALL_A',
+					}),
+				);
+				await waitFor(() => events().some(e => e.type === 'access.doorbell.completed'), {
+					description: 'end of A logged',
+				});
+				await delay(30);
+				expect(instance.val('doorbell.activeCallId')).to.equal(callB);
+			});
+
+			it('an end event without request id cannot be told apart and clears the published call', async () => {
+				const instance = await startConnected({ enableWebhooks: false });
+				await twoCalls(instance);
+				mock.emitRemoteViewChange(105, { data: { remote_call_request_id: undefined } });
+				await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'cleared' });
+			});
+
+			it('the time limit of call B still clears call B', async () => {
+				const instance = await startConnected({ enableWebhooks: false });
+				await twoCalls(instance);
+				await clock.tickAsync(3 * 60_000);
+				await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'expired' });
+			});
 		});
 
 		it('the webhook does not replace the call id already set by the WebSocket event of the same call', async () => {

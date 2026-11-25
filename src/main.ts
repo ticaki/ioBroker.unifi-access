@@ -1258,7 +1258,7 @@ class UnifiAccess extends utils.Adapter {
 				// 105 timeout, 106 admin reject, 107 admin unlocked the door, 108 visitor cancel,
 				// 400 answered elsewhere → the call is over in every documented case
 				if (parsed.reasonCode !== undefined && parsed.reasonCode in DOORBELL_REASONS) {
-					await this.clearActiveDoorbellCall();
+					await this.endDoorbellCall(parsed.requestId, event.type);
 				}
 				break;
 
@@ -1281,7 +1281,7 @@ class UnifiAccess extends utils.Adapter {
 
 			case 'access.doorbell.completed':
 				// "accepted, declined, or canceled" — the call is over, whatever the WebSocket delivered
-				await this.clearActiveDoorbellCall();
+				await this.endDoorbellCall(parsed.requestId, event.type);
 				if (parsed.reasonCode === 107 && event.doorId) {
 					this.scheduleDoorChecks(event.doorId, [DOOR_CHECK_AFTER_EVENT_MS]);
 				}
@@ -1395,11 +1395,33 @@ class UnifiAccess extends utils.Adapter {
 		if (this.doorbellExpiryTimer) {
 			this.clearTimeout(this.doorbellExpiryTimer);
 		}
+		const requestId = this.activeDoorbellCall?.requestId;
 		this.doorbellExpiryTimer = this.setTimeout(() => {
 			this.doorbellExpiryTimer = undefined;
 			this.log.debug('Doorbell call without end event — cleared after the time limit.');
-			this.runDetached('doorbell call expiry', this.clearActiveDoorbellCall());
+			this.runDetached('doorbell call expiry', this.endDoorbellCall(requestId, 'time limit'));
 		}, DOORBELL_CALL_MAX_MS);
+	}
+
+	/**
+	 * A doorbell call ended. The published call is only cleared when the end belongs to it: with two
+	 * readers ringing one after the other, the end of the earlier call must not clear the call that is
+	 * still ringing. An end without request id (or a published call without one) cannot be told apart
+	 * and clears the published call, as before — leaving a call standing would be worse than clearing
+	 * it once too often (it would hang until the time limit).
+	 *
+	 * @param requestId Request id from the end event
+	 * @param what Event type or reason, for the debug log
+	 */
+	private async endDoorbellCall(requestId: string | undefined, what: string): Promise<void> {
+		const current = this.activeDoorbellCall;
+		if (current && requestId !== undefined && current.requestId !== undefined && current.requestId !== requestId) {
+			this.log.debug(
+				`Doorbell: ${what} for call ${requestId}, but call ${current.requestId} is published — it stays active.`,
+			);
+			return;
+		}
+		await this.clearActiveDoorbellCall();
 	}
 
 	private async clearActiveDoorbellCall(): Promise<void> {
