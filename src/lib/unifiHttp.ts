@@ -53,6 +53,23 @@ export class UnifiApiError extends Error {
 	}
 }
 
+/**
+ * A successful HTTP answer to a JSON request that does not carry the documented response envelope
+ * (`code` / `msg` / `data`, API reference 2.8). Typical cause: host and port point to some other HTTPS
+ * service (reverse-proxy default site, web interface, wrong port) that answers every path with 200.
+ */
+export class UnexpectedResponseError extends Error {
+	readonly httpStatus: number;
+
+	constructor(httpStatus: number, request: string, detail = 'without the UniFi Access response envelope') {
+		super(
+			`unexpected response ${detail} (HTTP ${httpStatus}) [${request}] — do host and port point to the UniFi Access API?`,
+		);
+		this.name = 'UnexpectedResponseError';
+		this.httpStatus = httpStatus;
+	}
+}
+
 const API_PREFIX = '/api/v1/developer';
 const AUTH_ERROR_CODES = new Set(['CODE_AUTH_FAILED', 'CODE_ACCESS_TOKEN_INVALID', 'CODE_UNAUTHORIZED']);
 const USERS_PAGE_SIZE = 100;
@@ -138,11 +155,13 @@ export function apiErrorCode(err: unknown): string | undefined {
 	return undefined;
 }
 
-const REDACTED_KEYS = /secret|token|password|authorization|cookie/i;
+const REDACTED_KEYS = /secret|token|password|passwd|auth|cookie|key|credential|signature/i;
 
 /**
  * Deep copy of a value for logging with every credential-like property masked
- * (webhook signing secrets, tokens, passwords, authorization headers).
+ * (webhook signing secrets, tokens, passwords, authorization headers). Every value below a key
+ * `headers` is masked whatever its name: webhook endpoints of other integrations may carry custom
+ * headers like `X-Api-Key` or `X-Hub-Token` — no name pattern can know them all.
  *
  * @param value Any JSON-like value
  * @param depth Recursion guard
@@ -159,6 +178,10 @@ export function redactSecrets(value: unknown, depth = 0): unknown {
 	}
 	const copy: Record<string, unknown> = {};
 	for (const [key, entry] of Object.entries(value)) {
+		if (key.toLowerCase() === 'headers' && entry !== null && typeof entry === 'object' && !Array.isArray(entry)) {
+			copy[key] = Object.fromEntries(Object.keys(entry).map(name => [name, '***']));
+			continue;
+		}
 		copy[key] =
 			REDACTED_KEYS.test(key) && entry !== null && entry !== undefined ? '***' : redactSecrets(entry, depth + 1);
 	}
@@ -185,12 +208,17 @@ export class UnifiHttp {
 		});
 		// The response envelope is evaluated in one place for all calls: a `code` other than SUCCESS is an
 		// error even with HTTP 2xx, and an HTTP error gets the API code, the endpoint and — for 403 — the
-		// missing token permission added to its message. Bodies without envelope pass through untouched.
+		// missing token permission added to its message. A JSON request answered without the envelope is
+		// an error as well (not a UniFi Access API); binary downloads are exempt.
 		this.client.interceptors.response.use(
 			(r: AxiosResponse) => {
 				const { code, msg } = readEnvelope(r.data, r.headers?.['content-type']);
 				if (code !== undefined && code !== 'SUCCESS') {
 					throw new UnifiApiError(code, msg, r.status, describeRequest(r.config));
+				}
+				const binary = r.config?.responseType === 'arraybuffer' || r.config?.responseType === 'stream';
+				if (code === undefined && !binary) {
+					throw new UnexpectedResponseError(r.status, describeRequest(r.config));
 				}
 				return r;
 			},
@@ -245,7 +273,8 @@ export class UnifiHttp {
 		);
 		const data = r.data?.data;
 		if (!Array.isArray(data)) {
-			return [];
+			// an empty list here would make every known device look gone
+			throw new UnexpectedResponseError(r.status, 'GET /api/v1/developer/devices', 'without a device list');
 		}
 		// API returns nested arrays grouped by hub/controller — flatten one level.
 		const first = data[0];
@@ -257,7 +286,12 @@ export class UnifiHttp {
 
 	async listDoors(): Promise<UnifiDoorRaw[]> {
 		const r = await this.client.get<{ data: UnifiDoorRaw[] }>('/api/v1/developer/doors');
-		return r.data?.data ?? [];
+		const data = r.data?.data;
+		if (!Array.isArray(data)) {
+			// an empty list here would make every door unknown — control states would stop working
+			throw new UnexpectedResponseError(r.status, 'GET /api/v1/developer/doors', 'without a door list');
+		}
+		return data;
 	}
 
 	/**

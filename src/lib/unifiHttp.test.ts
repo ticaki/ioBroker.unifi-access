@@ -2,7 +2,15 @@ import { expect } from 'chai';
 import { AxiosError } from 'axios';
 
 import { createSelfSignedCert, fixtures, getFreePort, MockUnifiController, rejection } from '../../test/mock';
-import { apiErrorCode, classifyError, InvalidStaticPathError, UnifiApiError, UnifiHttp } from './unifiHttp';
+import {
+	apiErrorCode,
+	classifyError,
+	InvalidStaticPathError,
+	redactSecrets,
+	UnexpectedResponseError,
+	UnifiApiError,
+	UnifiHttp,
+} from './unifiHttp';
 
 const TOKEN = 'module-test-token';
 const { DOOR_A2 } = fixtures.IDS;
@@ -88,11 +96,12 @@ describe('UnifiHttp (against the mock controller)', () => {
 			expect((await http.listDevices()).map(d => d.id)).to.deep.equal(['late']);
 		});
 
-		it('returns an empty list when "data" is missing or not an array', async () => {
+		// K-03: an empty list would make every known device look gone
+		it('rejects when "data" is missing or not an array', async () => {
 			mock.failNext({ path: '/devices', status: 200, body: { code: 'SUCCESS', msg: 'success' } });
-			expect(await http.listDevices()).to.deep.equal([]);
+			expect(await rejection(http.listDevices())).to.be.instanceOf(UnexpectedResponseError);
 			mock.failNext({ path: '/devices', status: 200, body: { code: 'SUCCESS', msg: 'success', data: 'nope' } });
-			expect(await http.listDevices()).to.deep.equal([]);
+			expect(await rejection(http.listDevices())).to.be.instanceOf(UnexpectedResponseError);
 		});
 	});
 
@@ -202,10 +211,17 @@ describe('UnifiHttp (against the mock controller)', () => {
 			});
 		});
 
-		it('fall back to an empty list when "data" is missing', async () => {
-			mock.failNext({ status: 200, body: { code: 'SUCCESS', msg: 'success' }, times: 2 });
-			expect(await http.listDoors()).to.deep.equal([]);
+		it('listUsers falls back to an empty list when "data" is missing', async () => {
+			mock.failNext({ status: 200, body: { code: 'SUCCESS', msg: 'success' } });
 			expect(await http.listUsers()).to.deep.equal([]);
+		});
+
+		// K-03: an empty door list would make every door unknown (control states stop working)
+		it('listDoors rejects when "data" is missing or not an array', async () => {
+			mock.failNext({ status: 200, body: { code: 'SUCCESS', msg: 'success' } });
+			expect(await rejection(http.listDoors())).to.be.instanceOf(UnexpectedResponseError);
+			mock.failNext({ status: 200, body: { code: 'SUCCESS', msg: 'success', data: {} } });
+			expect(await rejection(http.listDoors())).to.be.instanceOf(UnexpectedResponseError);
 		});
 	});
 
@@ -593,11 +609,25 @@ describe('UnifiHttp (against the mock controller)', () => {
 				expect(result.equals(bytes)).to.equal(true);
 			});
 
-			it('responses without an envelope (no "code") are passed through', async () => {
-				mock.failNext({ status: 200, body: { data: [{ id: 'door-1', name: 'Plain' }] } });
-				expect(await http.listDoors()).to.deep.equal([{ id: 'door-1', name: 'Plain' }]);
-				mock.failNext({ status: 200, body: [] });
-				expect(await http.listDoors()).to.deep.equal([]);
+			// K-03: a reverse proxy, web interface or wrong port that answers every path with 200 is not the API
+			it('a JSON request answered without the envelope (no "code") rejects with UnexpectedResponseError', async () => {
+				for (const body of [{ data: [{ id: 'door-1', name: 'Plain' }] }, [], '<html>hello</html>', '']) {
+					mock.failNext({ status: 200, body });
+					const err = await rejection(http.listDoors());
+					expect(err, JSON.stringify(body)).to.be.instanceOf(UnexpectedResponseError);
+					expect((err as Error).message).to.contain('[GET /api/v1/developer/doors]');
+					expect((err as Error).message).to.contain('host and port');
+					expect(classifyError(err)).to.equal('network');
+				}
+				for (const call of [
+					(c: UnifiHttp) => c.unlockDoor(DOOR_A2),
+					(c: UnifiHttp) => c.setDoorLockRule(DOOR_A2, { type: 'keep_lock' }),
+					(c: UnifiHttp) => c.setEmergencyStatus({ lockdown: false }),
+					(c: UnifiHttp) => c.listWebhookEndpoints(),
+				]) {
+					mock.failNext({ status: 200, body: 'OK' });
+					expect(await rejection(call(http))).to.be.instanceOf(UnexpectedResponseError);
+				}
 			});
 
 			it('classifyError() treats the authentication codes as "unauthorized", other codes as "network"', async () => {
@@ -783,6 +813,59 @@ describe('UnifiHttp (against the mock controller)', () => {
 		});
 	});
 
+	describe('redactSecrets()', () => {
+		// K-15: webhook endpoints of other integrations may carry any custom header
+		it('masks every value below "headers", whatever the header is called', () => {
+			expect(
+				redactSecrets({
+					data: [
+						{
+							id: 'e1',
+							name: 'foreign',
+							endpoint: 'http://x/y',
+							headers: { 'X-Api-Key': 'abc', 'X-Custom': 'def', Accept: 'json' },
+						},
+					],
+				}),
+			).to.deep.equal({
+				data: [
+					{
+						id: 'e1',
+						name: 'foreign',
+						endpoint: 'http://x/y',
+						headers: { 'X-Api-Key': '***', 'X-Custom': '***', Accept: '***' },
+					},
+				],
+			});
+		});
+
+		it('masks credential-like keys anywhere (secret, token, password, key, auth, credential, signature)', () => {
+			expect(
+				redactSecrets({
+					secret: 's',
+					apiKey: 'k',
+					access_token: 't',
+					passwd: 'p',
+					basicAuth: 'b',
+					credentials: { user: 'u' },
+					signature: 'sig',
+					name: 'kept',
+					nested: [{ clientSecret: 'c', id: 1 }],
+				}),
+			).to.deep.equal({
+				secret: '***',
+				apiKey: '***',
+				access_token: '***',
+				passwd: '***',
+				basicAuth: '***',
+				credentials: '***',
+				signature: '***',
+				name: 'kept',
+				nested: [{ clientSecret: '***', id: 1 }],
+			});
+		});
+	});
+
 	describe('debugLog', () => {
 		it('logs method, url and status of webhook endpoint calls only', async () => {
 			const lines: string[] = [];
@@ -822,6 +905,26 @@ describe('UnifiHttp (against the mock controller)', () => {
 			expect(lines.join('\n')).to.not.contain(secret);
 			expect(lines.join('\n')).to.not.contain(TOKEN);
 			expect(lines.join('\n')).to.contain('"secret":"***"');
+		});
+
+		it('never writes custom headers of foreign webhook endpoints into the log (K-15)', async () => {
+			const lines: string[] = [];
+			const client = new UnifiHttp({
+				host: '127.0.0.1',
+				port: mock.port,
+				token: TOKEN,
+				debugLog: line => lines.push(line),
+			});
+			mock.addWebhookEndpoint({
+				endpoint: 'http://192.0.2.99/other',
+				name: 'other integration',
+				headers: { 'X-Api-Key': 'foreign-api-key-123', 'X-Hub': 'hub-value-456' },
+			});
+			await client.listWebhookEndpoints();
+			expect(lines).to.have.length(1);
+			expect(lines[0]).to.not.contain('foreign-api-key-123');
+			expect(lines[0]).to.not.contain('hub-value-456');
+			expect(lines[0]).to.contain('"X-Api-Key":"***"');
 		});
 	});
 });
