@@ -1,4 +1,4 @@
-import type { JSX } from 'react';
+import { type JSX, useState } from 'react';
 import { Button, Card, CardActions, CardContent, Chip, Stack, Typography } from '@mui/material';
 import LockIcon from '@mui/icons-material/Lock';
 import LockOpenIcon from '@mui/icons-material/LockOpen';
@@ -11,8 +11,17 @@ interface DoorCardProps {
 }
 
 export function DoorCard({ doorId, name, locked }: DoorCardProps): JSX.Element {
+    const [failed, setFailed] = useState(false);
+
     const handleUnlock = (): void => {
-        void setIobState(`doors.${doorId}.unlock`, true);
+        setFailed(false);
+        // The command can be refused (no permission, connection lost) - tell the user instead of
+        // leaving an unhandled rejection behind a button that seems to work.
+        setIobState(`doors.${doorId}.unlock`, true).catch((err: unknown) => {
+            // eslint-disable-next-line no-console
+            console.error(`Cannot send the unlock command for door ${doorId}:`, err);
+            setFailed(true);
+        });
     };
 
     const lockedKnown = typeof locked === 'boolean';
@@ -43,6 +52,15 @@ export function DoorCard({ doorId, name, locked }: DoorCardProps): JSX.Element {
                 >
                     Unlock
                 </Button>
+                {failed ? (
+                    <Typography
+                        variant="caption"
+                        color="error"
+                        role="alert"
+                    >
+                        The unlock command could not be sent.
+                    </Typography>
+                ) : null}
             </CardActions>
         </Card>
     );
