@@ -8,6 +8,9 @@ export default [
 	{
 		// specify files to exclude from linting here
 		ignores: [
+			// Claude Code keeps agent worktrees (full repo copies) in .claude/worktrees/ –
+			// flat config does not ignore dot-directories on its own.
+			'.claude/',
 			'.dev-server/',
 			'.vscode/',
 			'*.test.js',
