@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { collectDoors, DoorList } from './DoorList';
 import { describeLockRule } from './DoorCard';
 import { setIobState, setStates } from '../test/socketMock';
@@ -27,6 +27,16 @@ const BOOTSTRAP: Record<string, ioBroker.StateValue> = {
     'doors.emergency.lockdown': false,
     'doors.emergency.evacuation': false,
 };
+
+/** Label and icon of the lock chip on the card of a door */
+function lockChip(doorName: string): { label: string | null; icon: string | null | undefined } {
+    const card = screen.getByText(doorName).closest('.MuiCard-root') as HTMLElement;
+    const chip = card.querySelector('.MuiChip-root') as HTMLElement;
+    return {
+        label: within(chip).getByText(/./).textContent,
+        icon: chip.querySelector('svg')?.getAttribute('data-testid'),
+    };
+}
 
 beforeEach(() => {
     setIobState.mockClear();
@@ -135,9 +145,33 @@ describe('DoorList', () => {
         expect(screen.getByText('Side entrance')).toBeTruthy();
         expect(screen.queryByText('emergency')).toBeNull();
         expect(screen.getAllByRole('button', { name: 'Unlock' })).toHaveLength(2);
-        expect(screen.getByText('locked')).toBeTruthy();
-        expect(screen.getByText('unlocked')).toBeTruthy();
         expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('shows the lock state of each door on its own card', () => {
+        setStates(BOOTSTRAP);
+        render(<DoorList />);
+
+        expect(lockChip('Front door')).toEqual({ label: 'unlocked', icon: 'LockOpenIcon' });
+        expect(lockChip('Side entrance')).toEqual({ label: 'locked', icon: 'LockIcon' });
+    });
+
+    it.each([
+        ['missing', undefined],
+        ['null', null],
+        ['a string', 'yes'],
+        ['a number', 0],
+    ])('shows a lock state that is %s neither as locked nor as unlocked', (_name, value) => {
+        const states: Record<string, ioBroker.StateValue> = { 'doors.door-a.name': 'Front door' };
+        if (value !== undefined) {
+            states['doors.door-a.locked'] = value;
+        }
+        setStates(states);
+        render(<DoorList />);
+
+        expect(lockChip('Front door')).toEqual({ label: 'unknown', icon: 'HelpOutlineOutlinedIcon' });
+        expect(screen.queryByText('unlocked')).toBeNull();
+        expect(screen.queryByText('locked')).toBeNull();
     });
 
     it('shows no door at all if only the emergency states exist', () => {
