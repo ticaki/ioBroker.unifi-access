@@ -825,6 +825,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					tlsEnabled: false,
 					tlsActive: false,
 					tlsError: null,
+					publicBaseUrl: null,
 				});
 			});
 
@@ -1073,6 +1074,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					tlsEnabled: false,
 					tlsActive: false,
 					tlsError: null,
+					publicBaseUrl: null,
 				});
 				const refused = await httpRequest({ url: `${baseUrl}${WEBHOOK_PATH}`, method: 'POST', body: '{}' }).then(
 					() => false,

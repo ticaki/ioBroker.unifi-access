@@ -10,6 +10,7 @@ import { apiErrorCode, classifyError, UnifiApiError, UnifiHttp } from './lib/uni
 import { classifyProtectError, ProtectHttp, type ProtectClipStream } from './lib/protectHttp';
 import { classifyStoredSecret } from './lib/secretMigration';
 import { parseCaCert } from './lib/caCert';
+import { normalizePublicBaseUrl } from './lib/publicBaseUrl';
 import { tlsAdvice, tlsCertificateErrorCode } from './lib/tlsErrors';
 import { UnifiWebSocket } from './lib/unifiWebSocket';
 import type { TimerHost } from './lib/timerHost';
@@ -292,6 +293,12 @@ class UnifiAccess extends utils.Adapter {
 		}
 
 		this.checkCaCert();
+		const publicBase = normalizePublicBaseUrl(cfg.publicBaseUrl);
+		if (publicBase.problem) {
+			this.log.warn(
+				`The public base URL "${String(cfg.publicBaseUrl)}" is not usable (${publicBase.problem}) — the URLs are built from the listen address instead.`,
+			);
+		}
 		this.http = new UnifiHttp({ host, port, token, verifyTLS, caCert, debugLog: (m: string) => this.log.debug(m) });
 
 		this.subscribeStates('doors.*.unlock');
@@ -542,6 +549,11 @@ class UnifiAccess extends utils.Adapter {
 		if (!server?.listening) {
 			return null;
 		}
+		// behind a reverse proxy / port forwarding the address clients and the controller use is configured
+		const configured = this.publicBaseUrl();
+		if (configured) {
+			return configured;
+		}
 		const cfg = this.config;
 		const port = normalizePort(cfg.listenPort, 8095);
 		const scheme = server.scheme;
@@ -557,6 +569,11 @@ class UnifiAccess extends utils.Adapter {
 			}
 		}
 		return null;
+	}
+
+	/** The normalised `publicBaseUrl` setting, or null when it is empty (or unusable — warned at start). */
+	private publicBaseUrl(): string | null {
+		return normalizePublicBaseUrl(this.config.publicBaseUrl).url;
 	}
 
 	private buildWebhookPublicUrl(): string | null {
@@ -637,7 +654,7 @@ class UnifiAccess extends utils.Adapter {
 
 		if (cfg.enableGenericWebhook === true) {
 			const handler = new GenericWebhookHandler({
-				path: cfg.genericWebhookPath || '/webhook',
+				path: cfg.genericWebhookPath,
 				auth: cfg.genericWebhookAuth || 'none',
 				username: cfg.genericWebhookUsername || undefined,
 				password: cfg.genericWebhookPassword || undefined,
@@ -657,6 +674,11 @@ class UnifiAccess extends utils.Adapter {
 					await this.handleGenericAlarm(payload, raw);
 				},
 			});
+			if (handler.path !== cfg.genericWebhookPath) {
+				this.log.debug(
+					`Generic webhook listens on ${handler.path} (setting: "${cfg.genericWebhookPath ?? ''}").`,
+				);
+			}
 			if (!handler.credentialsConfigured) {
 				this.log.warn(
 					`Generic webhook: authentication "${cfg.genericWebhookAuth}" is selected but no ${
@@ -2286,6 +2308,9 @@ class UnifiAccess extends utils.Adapter {
 					tlsEnabled: this.config.enableTls === true,
 					tlsActive: running && server.scheme === 'https',
 					tlsError: this.tlsError,
+					// the configured public base URL (normalised; null = not set or unusable). baseUrl equals it
+					// while the server runs.
+					publicBaseUrl: this.publicBaseUrl(),
 				};
 			}
 

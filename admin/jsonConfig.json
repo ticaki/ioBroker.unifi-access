@@ -180,6 +180,16 @@
 					"md": 10,
 					"lg": 8,
 					"xl": 6
+				},
+				"_unlockActorNote": {
+					"type": "staticText",
+					"text": "unlockActor_note",
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 12,
+					"lg": 12,
+					"xl": 12
 				}
 			}
 		},
@@ -229,6 +239,21 @@
 					"md": 4,
 					"lg": 3,
 					"xl": 3
+				},
+				"publicBaseUrl": {
+					"type": "text",
+					"label": "publicBaseUrl",
+					"help": "publicBaseUrl_help",
+					"default": "",
+					"validator": "!data.publicBaseUrl || !data.publicBaseUrl.trim() || /^https?:\\/\\/[^\\s/?#]+(\\/[A-Za-z0-9._~-]+)*\\/*$/i.test(data.publicBaseUrl.trim())",
+					"validatorErrorText": "publicBaseUrl_invalid",
+					"validatorNoSaveOnError": true,
+					"newLine": true,
+					"xs": 12,
+					"sm": 12,
+					"md": 8,
+					"lg": 6,
+					"xl": 6
 				},
 				"_tlsServerHeader": {
 					"type": "header",
@@ -367,6 +392,9 @@
 					"help": "genericWebhookPath_help",
 					"default": "/webhook",
 					"disabled": "!data.enableGenericWebhook",
+					"validator": "!data.enableGenericWebhook || /^\\/?(?:[A-Za-z0-9._~-]+\\/)*[A-Za-z0-9._~-]*$/.test(data.genericWebhookPath || '/webhook')",
+					"validatorErrorText": "genericWebhookPath_invalid",
+					"validatorNoSaveOnError": true,
 					"newLine": true,
 					"xs": 12,
 					"sm": 6,

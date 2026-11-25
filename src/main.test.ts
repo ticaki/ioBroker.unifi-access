@@ -2955,6 +2955,26 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				});
 			});
 
+			// U-10: the media URLs written to events.last follow the public base URL as well
+			it('builds the snapshot and clip URLs from the public base URL when one is set', async () => {
+				await startWithProtect({ publicBaseUrl: 'https://iobroker.example.com' });
+				mock.systemLogHits = [cameraHit()];
+				// the controller would post to the proxy, which forwards to the local receiver
+				await sendWebhook({
+					url: `http://127.0.0.1:${listenPort}/unifi-access-webhook`,
+					secret: mock.webhookEndpoints[0].secret,
+					body: fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }),
+				});
+				await waitFor(() => events().length === 1, { description: 'event logged' });
+				const ts = events()[0].ts;
+				await clock.tickAsync(3000);
+				await waitFor(() => events()[0].protectSnapshotUrl !== undefined, { description: 'snapshot attached' });
+				expect(events()[0]).to.include({
+					protectSnapshotUrl: `https://iobroker.example.com/unifi-access/0/protect-snapshot/${CAMERA}/${ts}.jpg`,
+					protectVideoUrl: 'https://iobroker.example.com/unifi-access/0/protect-video/evt_77.mp4',
+				});
+			});
+
 			it('falls back to the topic "all" only when door_openings carries no camera event', async () => {
 				await startWithProtect();
 				await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
@@ -3752,6 +3772,7 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				tlsEnabled: true,
 				tlsActive: true,
 				tlsError: null,
+				publicBaseUrl: null,
 			});
 			expect(instance.log.of('error')).to.deep.equal([]);
 			expect(instance.log.of('warn')).to.deep.equal([]);
@@ -3840,6 +3861,89 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				tlsEnabled: false,
 				tlsActive: false,
 				tlsError: null,
+				publicBaseUrl: null,
+			});
+		});
+	});
+
+	// U-10: behind a reverse proxy or port forwarding the listen address is not what clients and the controller use
+	describe('public base URL (publicBaseUrl)', () => {
+		const PUBLIC = 'https://iobroker.example.com/unifi';
+
+		it('is used for the registered webhook URL, lastThumbnailUrl and getServerInfo', async () => {
+			const instance = await startConnected({ publicBaseUrl: `  ${PUBLIC}/ `, enableThumbnailServer: true });
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+			expect(mock.webhookEndpoints.map(e => e.endpoint)).to.deep.equal([`${PUBLIC}/unifi-access-webhook`]);
+			expect(await instance.request('getServerInfo')).to.deep.equal({
+				running: true,
+				scheme: 'http',
+				port: listenPort,
+				baseUrl: PUBLIC,
+				tlsEnabled: false,
+				tlsActive: false,
+				tlsError: null,
+				publicBaseUrl: PUBLIC,
+			});
+
+			// the receiver itself still listens on the local address (the proxy forwards to it)
+			const event = fixtures.webhookEvents.doorUnlock({
+				door: door(DOOR_3855),
+				device: hub(),
+				readerId: DEVICE_G2_PRO,
+			});
+			const secret = mock.webhookEndpoints[0].secret;
+			const response = await sendWebhook({
+				url: `http://127.0.0.1:${listenPort}/unifi-access-webhook`,
+				secret,
+				body: event,
+			});
+			expect(response.status).to.equal(200);
+			await waitFor(() => instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`), {
+				description: 'thumbnail url',
+			});
+			expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`) as string).to.match(
+				new RegExp(
+					`^${PUBLIC.replace(/[.]/g, '\\.')}/unifi-access/0/thumbnail/${DEVICE_G2_PRO}\\.jpg\\?ts=\\d+$`,
+				),
+			);
+		});
+
+		it('an unusable value is reported and the URLs are built from the listen address', async () => {
+			const instance = await startConnected({ publicBaseUrl: 'iobroker.example.com/x?y' });
+			expect(instance.log.of('warn')).to.deep.equal([
+				'The public base URL "iobroker.example.com/x?y" is not usable (expected http(s)://host[:port][/path] without query, fragment or blanks) — the URLs are built from the listen address instead.',
+			]);
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+			expect(mock.webhookEndpoints.map(e => e.endpoint)).to.deep.equal([
+				`http://127.0.0.1:${listenPort}/unifi-access-webhook`,
+			]);
+			expect((await instance.request('getServerInfo')).publicBaseUrl).to.equal(null);
+		});
+
+		it('an endpoint registered with the listen address is moved to the public URL (same id and secret, no restart)', async () => {
+			const existing = mock.addWebhookEndpoint({
+				endpoint: `http://127.0.0.1:${listenPort}/unifi-access-webhook`,
+				name: ENDPOINT_NAME,
+			});
+			const instance = await startConnected({
+				publicBaseUrl: PUBLIC,
+				webhookEndpointId: existing.id,
+				webhookSecret: existing.secret,
+			});
+			await waitFor(() => mock.webhookEndpoints[0].endpoint === `${PUBLIC}/unifi-access-webhook`, {
+				description: 'moved',
+			});
+			expect(mock.webhookEndpoints).to.have.length(1);
+			expect(mock.webhookEndpoints[0].id).to.equal(existing.id);
+			expect(instance.objects.has(INSTANCE_OBJECT), 'no write to the instance object').to.equal(false);
+		});
+
+		it('there is no URL while the server does not run, also with a public base URL', async () => {
+			const instance = await startConnected({ publicBaseUrl: PUBLIC, enableWebhooks: false });
+			expect(await instance.request('getServerInfo')).to.include({
+				running: false,
+				baseUrl: null,
+				publicBaseUrl: PUBLIC,
 			});
 		});
 	});

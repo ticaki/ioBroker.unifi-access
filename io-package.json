@@ -126,6 +126,7 @@
 		"unlockActorId": "",
 		"listenPort": 8095,
 		"listenIp": "0.0.0.0",
+		"publicBaseUrl": "",
 		"enableTls": false,
 		"certPublic": "",
 		"certPrivate": "",

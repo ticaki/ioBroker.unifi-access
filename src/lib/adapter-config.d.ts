@@ -16,6 +16,8 @@ declare global {
 			// Shared HTTP(S) server (UniFi webhook receiver, thumbnail proxy, generic webhook)
 			listenPort: number;
 			listenIp: string;
+			/** Address clients and the controller use for the built-in server (empty = derived automatically). */
+			publicBaseUrl: string;
 			enableTls: boolean;
 			certPublic: string;
 			certPrivate: string;
