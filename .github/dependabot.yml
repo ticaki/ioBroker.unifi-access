@@ -39,7 +39,7 @@ updates:
         versions:
           - '7.x'
 
-  # Admin custom components and www panel (own package.json each, no TypeScript restriction here)
+  # Admin custom components and www panel (own package.json each)
   - package-ecosystem: 'npm'
     directories:
       - '/src-admin'
@@ -59,6 +59,12 @@ updates:
       - dependency-name: '@types/node'
         update-types:
           - 'version-update:semver-major'
+      # Same TypeScript 7 blocker as in the root package: src-admin lints with typescript-eslint
+      # (peer typescript ">=4.8.4 <6.1.0"); src-www is kept on the same compiler version as src-admin.
+      # Remove together with the root entry.
+      - dependency-name: 'typescript'
+        versions:
+          - '7.x'
 
   - package-ecosystem: 'github-actions'
     directory: '/'
