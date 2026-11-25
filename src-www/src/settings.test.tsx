@@ -105,4 +105,54 @@ describe('useSettingsProvider', () => {
         await waitFor(() => expect(error).toHaveBeenCalled());
         expect(result.current.settings.showDoorbell).toBe(false);
     });
+    describe('a change before the stored settings were read (RF-03)', () => {
+        const STORED = { ...DEFAULTS, thumbWidth: 160, maxWidth: 900, showSnapshot: false };
+
+        it('is not written over the stored settings, but merged into them once they arrive', () => {
+            setStates({}, { loading: ['admin.uiSettings'] });
+            const { result } = renderHook(() => useSettingsProvider());
+
+            act(() => result.current.update({ showDoorbell: false }));
+            // shown at once, not written yet
+            expect(result.current.settings.showDoorbell).toBe(false);
+            expect(setIobState).not.toHaveBeenCalled();
+
+            act(() => setStates({ 'admin.uiSettings': JSON.stringify(STORED) }));
+
+            const expected = { ...STORED, showDoorbell: false };
+            expect(result.current.settings).toEqual(expected);
+            expect(setIobState).toHaveBeenCalledTimes(1);
+            expect(setIobState).toHaveBeenCalledWith('admin.uiSettings', JSON.stringify(expected));
+        });
+
+        it('several changes are combined; a slider that is only dragged writes nothing', () => {
+            setStates({}, { loading: ['admin.uiSettings'] });
+            const { result } = renderHook(() => useSettingsProvider());
+            act(() => {
+                result.current.update({ maxWidth: 1300 }, false);
+                result.current.update({ showEventLog: false });
+            });
+            act(() => setStates({ 'admin.uiSettings': JSON.stringify(STORED) }));
+            expect(setIobState).toHaveBeenCalledWith(
+                'admin.uiSettings',
+                JSON.stringify({ ...STORED, maxWidth: 1300, showEventLog: false }),
+            );
+
+            setIobState.mockClear();
+            setStates({}, { loading: ['admin.uiSettings'] });
+            const second = renderHook(() => useSettingsProvider());
+            act(() => second.result.current.update({ maxWidth: 1250 }, false));
+            act(() => setStates({ 'admin.uiSettings': JSON.stringify(STORED) }));
+            expect(second.result.current.settings.maxWidth).toBe(1250);
+            expect(setIobState).not.toHaveBeenCalled();
+        });
+
+        it('no stored settings at all (state missing): the change is written on top of the defaults', () => {
+            setStates({}, { loading: ['admin.uiSettings'] });
+            const { result } = renderHook(() => useSettingsProvider());
+            act(() => result.current.update({ thumbWidth: 0 }));
+            act(() => setStates({}));
+            expect(setIobState).toHaveBeenCalledWith('admin.uiSettings', JSON.stringify({ ...DEFAULTS, thumbWidth: 0 }));
+        });
+    });
 });

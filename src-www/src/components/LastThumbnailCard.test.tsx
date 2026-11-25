@@ -108,6 +108,8 @@ describe('LastThumbnailCard', () => {
         render(<LastThumbnailCard />);
 
         expect(screen.getByRole('combobox').textContent).toBe('Front reader (UA-Ultra)');
+        // a screen reader announces what the selection is for (RF-04)
+        expect(screen.getByRole('combobox', { name: 'Device' })).toBeTruthy();
         expect(screen.getByText(/No event image received yet/)).toBeTruthy();
         expect(screen.queryByRole('img')).toBeNull();
     });

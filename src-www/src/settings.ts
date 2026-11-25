@@ -82,30 +82,60 @@ export function useSettingsProvider(): SettingsCtx {
     const raw = useIobState(SETTINGS_ID);
     const [local, setLocal] = useState<AppSettings>(DEFAULTS);
     const latest = useRef<AppSettings>(DEFAULTS);
+    /** false until the stored settings were read (undefined: not read yet; null: the state does not exist) */
+    const loaded = useRef(false);
+    /** Changes made before the stored settings were read: merged into them, not written over them */
+    const pending = useRef<{ patch: Partial<AppSettings>; persist: boolean } | null>(null);
 
     const apply = useCallback((next: AppSettings) => {
         latest.current = next;
         setLocal(next);
     }, []);
 
+    const store = useCallback((next: AppSettings) => {
+        setIobState(SETTINGS_ID, JSON.stringify(next)).catch((err: unknown) => {
+            // eslint-disable-next-line no-console
+            console.error('Cannot store the UI settings:', err);
+        });
+    }, []);
+
     useEffect(() => {
-        if (typeof raw?.val === 'string' && raw.val) {
-            apply(parseSettings(raw.val));
+        if (raw === undefined) {
+            return;
         }
-    }, [raw, apply]);
+        loaded.current = true;
+        const stored = typeof raw?.val === 'string' && raw.val ? parseSettings(raw.val) : undefined;
+        const waiting = pending.current;
+        pending.current = null;
+        if (waiting) {
+            const next = { ...(stored ?? DEFAULTS), ...waiting.patch };
+            apply(next);
+            if (waiting.persist) {
+                store(next);
+            }
+        } else if (stored) {
+            apply(stored);
+        }
+    }, [raw, apply, store]);
 
     const update = useCallback(
         (patch: Partial<AppSettings>, persist = true) => {
             const next = { ...latest.current, ...patch };
             apply(next);
+            if (!loaded.current) {
+                // Not read yet (slow or missing connection): writing now would replace every stored
+                // setting with the defaults. Keep the change and write it merged once the value is there.
+                pending.current = {
+                    patch: { ...pending.current?.patch, ...patch },
+                    persist: persist || pending.current?.persist === true,
+                };
+                return;
+            }
             if (persist) {
-                setIobState(SETTINGS_ID, JSON.stringify(next)).catch((err: unknown) => {
-                    // eslint-disable-next-line no-console
-                    console.error('Cannot store the UI settings:', err);
-                });
+                store(next);
             }
         },
-        [apply],
+        [apply, store],
     );
 
     return useMemo(() => ({ settings: local, update }), [local, update]);

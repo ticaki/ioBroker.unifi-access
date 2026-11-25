@@ -9,10 +9,13 @@ export const ADAPTER_INSTANCE = 0;
 export const ADAPTER_NAMESPACE = 'unifi-access.0';
 
 let states: Record<string, ioBroker.State> = {};
+/** ids whose value has not been read yet (useIobState answers undefined, like before the first getState) */
+let loading = new Set<string>();
 const listeners = new Set<() => void>();
 
 export function fullId(id: string): string {
-    return id.startsWith(`${ADAPTER_NAMESPACE}.`) ? id : `${ADAPTER_NAMESPACE}.${id}`;
+    // ids of other objects (system.adapter.<instance>.alive) are passed on as they are
+    return id.startsWith(`${ADAPTER_NAMESPACE}.`) || id.startsWith('system.') ? id : `${ADAPTER_NAMESPACE}.${id}`;
 }
 
 function makeState(val: ioBroker.StateValue, ts: number): ioBroker.State {
@@ -24,10 +27,40 @@ function makeState(val: ioBroker.StateValue, ts: number): ioBroker.State {
  *
  * @param values state id (with or without namespace) => value
  * @param options.ts time stamp of the states as ioBroker writes it (its own clock); default: `Date.now()`
+ * @param options.perId further states with their own time stamp, e.g. `system.adapter.unifi-access.0.alive`
+ * @param options.loading ids that are still being read: their value is `undefined` until the next setStates
  */
-export function setStates(values: Record<string, ioBroker.StateValue>, options: { ts?: number } = {}): void {
+export function setStates(
+    values: Record<string, ioBroker.StateValue>,
+    options: {
+        ts?: number;
+        perId?: Record<string, { val: ioBroker.StateValue; ts: number }>;
+        loading?: string[];
+    } = {},
+): void {
     const ts = options.ts ?? Date.now();
+    loading = new Set((options.loading ?? []).map(fullId));
     states = Object.fromEntries(Object.entries(values).map(([id, val]) => [fullId(id), makeState(val, ts)]));
+    for (const [id, state] of Object.entries(options.perId ?? {})) {
+        states[fullId(id)] = makeState(state.val, state.ts);
+    }
+    notify();
+}
+
+/**
+ * Change one state and leave all others as they are (same objects, as a real state change does).
+ *
+ * @param id state id (with or without namespace)
+ * @param val new value
+ * @param ts time stamp as ioBroker writes it; default: `Date.now()`
+ */
+export function updateState(id: string, val: ioBroker.StateValue, ts = Date.now()): void {
+    loading.delete(fullId(id));
+    states = { ...states, [fullId(id)]: makeState(val, ts) };
+    notify();
+}
+
+function notify(): void {
     for (const listener of listeners) {
         listener();
     }
@@ -44,7 +77,10 @@ function useAllStates(): Record<string, ioBroker.State> {
 
 export function useIobState(id: string | null): ioBroker.State | null | undefined {
     const all = useAllStates();
-    return id ? (all[fullId(id)] ?? null) : undefined;
+    if (!id || loading.has(fullId(id))) {
+        return undefined;
+    }
+    return all[fullId(id)] ?? null;
 }
 
 export function useIobStates(pattern: string | null): Record<string, ioBroker.State> {

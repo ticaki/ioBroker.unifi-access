@@ -1,6 +1,6 @@
-import { Box, Card, CardContent, List, ListItem, ListItemText, Stack, Typography } from '@mui/material';
+import { Box, ButtonBase, Card, CardContent, List, ListItem, ListItemText, Stack, Typography } from '@mui/material';
 import { type JSX, useEffect, useMemo, useState } from 'react';
-import { useIobState } from '../socket';
+import { ADAPTER_NAMESPACE, useIobState } from '../socket';
 import { useSettings } from '../settings';
 import { EventMediaModal } from './EventMediaModal';
 
@@ -17,6 +17,8 @@ export interface EventEntry {
     ts: number;
     type: string;
     subtype?: string;
+    /** `access.door.unlock`: false when the attempt was refused ("BLOCKED", "Access Denied"), decided by the adapter */
+    granted?: boolean;
     deviceName?: string;
     doorName?: string;
     userName?: string;
@@ -66,6 +68,7 @@ export function parseEvents(raw: unknown): EventEntry[] {
             ts: e.ts,
             type: e.type,
             subtype: text(e.subtype),
+            granted: typeof e.granted === 'boolean' ? e.granted : undefined,
             deviceName: text(e.deviceName),
             doorName: text(e.doorName),
             userName: text(e.userName),
@@ -91,21 +94,30 @@ interface TimedEvent {
     startedAt: number;
 }
 
+function usableTs(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 /**
  * Places the events on the clock of the browser without trusting its date and time: a wall tablet whose
  * clock is minutes off must not count down for minutes or skip the countdown.
  *
- * How old an event was when the list arrived is taken from the adapter side: `ts` of the state
- * `events.last` (written by ioBroker) minus `ts` of the event. Never negative, so an event of a
- * controller whose clock is ahead starts its window when it arrives - every window ends at the latest
- * {@link SNAPSHOT_WAIT_MS} after the list arrived in the browser.
+ * How old an event was when the list arrived is measured from the event's own `ts` on the clock of
+ * ioBroker. "Now" on that clock is the newest of two time stamps written by ioBroker: `ts` of the state
+ * `events.last` (when the list was last written - only "now" for a list that was just written) and `ts`
+ * of `system.adapter.<instance>.alive` (renewed by the running adapter every 15 s). The second one keeps
+ * a list that was written long ago - the page is opened or reconnects later - from counting down again.
+ * Never negative, so an event of a controller whose clock is ahead starts its window when it arrives -
+ * every window ends at the latest {@link SNAPSHOT_WAIT_MS} after the list arrived in the browser.
  *
  * @param events events of the list
  * @param stateTs `ts` of the state `events.last`
  * @param receivedAt when the list arrived, see {@link browserClock}
+ * @param aliveTs `ts` of the state `system.adapter.<instance>.alive` as known when the list arrived
  */
-export function timeEvents(events: EventEntry[], stateTs: unknown, receivedAt: number): TimedEvent[] {
-    const serverNow = typeof stateTs === 'number' && Number.isFinite(stateTs) && stateTs > 0 ? stateTs : undefined;
+export function timeEvents(events: EventEntry[], stateTs: unknown, receivedAt: number, aliveTs?: unknown): TimedEvent[] {
+    const known = [usableTs(stateTs), usableTs(aliveTs)].filter((ts): ts is number => ts !== undefined);
+    const serverNow = known.length > 0 ? Math.max(...known) : undefined;
     return events.map(event => ({
         event,
         startedAt: receivedAt - (serverNow === undefined ? 0 : Math.max(0, serverNow - event.ts)),
@@ -121,6 +133,9 @@ function labelOf(labels: Record<string, string>, key: string): string {
     // not Object.hasOwn(): the build targets Chrome 89 (old wall tablets), which does not have it
     return Object.prototype.hasOwnProperty.call(labels, key) ? labels[key] : key;
 }
+
+/** Label of a refused `access.door.unlock` (granted false) */
+export const ACCESS_DENIED_LABEL = 'Access denied';
 
 const EVENT_LABELS: Record<string, string> = {
     'access.remote_view': 'Doorbell ringing',
@@ -152,6 +167,9 @@ const SUBTYPE_LABELS: Record<string, string> = {
 
 export function EventLogCard(): JSX.Element {
     const last = useIobState('events.last');
+    // renewed by the running adapter every 15 s: tells how old a list is that was written long ago
+    const alive = useIobState(`system.adapter.${ADAPTER_NAMESPACE}.alive`);
+    const aliveKnown = alive !== undefined && alive !== null;
     // Camera snapshots only arrive while the adapter is logged in to UniFi Protect. Without it no
     // placeholder is shown - it would count down and end in "Not available" for every door opening.
     const protectConnected = useIobState('info.protectConnected')?.val === true;
@@ -162,7 +180,13 @@ export function EventLogCard(): JSX.Element {
     const [brokenImages, setBrokenImages] = useState<ReadonlySet<string>>(() => new Set());
 
     // a new value of the state (new event, snapshot URL added) is a new arrival
-    const timed = useMemo<TimedEvent[]>(() => timeEvents(parseEvents(last?.val), last?.ts, browserClock()), [last]);
+    const receivedAt = useMemo(() => browserClock(), [last]);
+    // Placed again only when the alive time stamp becomes known (both are read at the same time on load),
+    // not on each of its 15-second renewals: those would shorten windows that are already running.
+    const timed = useMemo<TimedEvent[]>(
+        () => timeEvents(parseEvents(last?.val), last?.ts, receivedAt, alive?.ts),
+        [last, receivedAt, aliveKnown],
+    );
 
     useEffect(() => {
         // Tick while any access.door.unlock event is still in its waiting window.
@@ -211,8 +235,14 @@ export function EventLogCard(): JSX.Element {
                             disablePadding
                         >
                             {timed.map(({ event: e, startedAt }, i) => {
-                                const label = labelOf(EVENT_LABELS, e.type);
-                                const subtypeLabel = e.subtype ? labelOf(SUBTYPE_LABELS, e.subtype) : undefined;
+                                const denied = e.type === 'access.door.unlock' && e.granted === false;
+                                const label = denied ? ACCESS_DENIED_LABEL : labelOf(EVENT_LABELS, e.type);
+                                // the result of an unlock is told by the label; its raw text ("Access Granted",
+                                // "BLOCKED") is only shown for entries written before the adapter reported it
+                                const subtypeLabel =
+                                    e.subtype && !(e.type === 'access.door.unlock' && e.granted !== undefined)
+                                        ? labelOf(SUBTYPE_LABELS, e.subtype)
+                                        : undefined;
                                 const context = [e.doorName, e.userName].filter(Boolean).join(' · ');
                                 const elapsed = Math.max(0, now - startedAt);
                                 const snapshotUrl =
@@ -246,7 +276,10 @@ export function EventLogCard(): JSX.Element {
                                                     spacing={1}
                                                     sx={{ alignItems: 'center', flexWrap: 'wrap' }}
                                                 >
-                                                    <Typography variant="body2">
+                                                    <Typography
+                                                        variant="body2"
+                                                        color={denied ? 'error' : undefined}
+                                                    >
                                                         {label}
                                                         {subtypeLabel ? (
                                                             <Typography
@@ -272,23 +305,28 @@ export function EventLogCard(): JSX.Element {
                                             secondary={new Date(e.ts).toLocaleString()}
                                         />
                                         {snapshotUrl && settings.thumbWidth > 0 ? (
-                                            <Box
-                                                component="img"
-                                                src={snapshotUrl}
-                                                alt="camera"
+                                            // a real button: reachable with the keyboard, opens with Enter / Space
+                                            <ButtonBase
                                                 onClick={() => setModalEvent(e)}
-                                                onError={() =>
-                                                    setBrokenImages(prev => new Set(prev).add(snapshotUrl))
-                                                }
-                                                sx={{
-                                                    width: settings.thumbWidth,
-                                                    height: 'auto',
-                                                    borderRadius: 0.5,
-                                                    cursor: 'pointer',
-                                                    flexShrink: 0,
-                                                    mt: 0.5,
-                                                }}
-                                            />
+                                                aria-label={`Show camera image${e.doorName ? ` of ${e.doorName}` : ''}, ${new Date(e.ts).toLocaleString()}`}
+                                                focusRipple
+                                                sx={{ borderRadius: 0.5, flexShrink: 0, mt: 0.5 }}
+                                            >
+                                                <Box
+                                                    component="img"
+                                                    src={snapshotUrl}
+                                                    alt=""
+                                                    onError={() =>
+                                                        setBrokenImages(prev => new Set(prev).add(snapshotUrl))
+                                                    }
+                                                    sx={{
+                                                        width: settings.thumbWidth,
+                                                        height: 'auto',
+                                                        borderRadius: 0.5,
+                                                        display: 'block',
+                                                    }}
+                                                />
+                                            </ButtonBase>
                                         ) : showCountdown ? (
                                             <Box
                                                 sx={{

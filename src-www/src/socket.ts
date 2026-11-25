@@ -147,7 +147,8 @@ export function useConnectionStatus(): boolean {
 }
 
 export function fullId(id: string): string {
-    return id.startsWith(`${ADAPTER_NAMESPACE}.`) ? id : `${ADAPTER_NAMESPACE}.${id}`;
+    // ids of other objects (system.adapter.<instance>.alive) are passed on as they are
+    return id.startsWith(`${ADAPTER_NAMESPACE}.`) || id.startsWith('system.') ? id : `${ADAPTER_NAMESPACE}.${id}`;
 }
 
 export function useIobState(id: string | null): ioBroker.State | null | undefined {

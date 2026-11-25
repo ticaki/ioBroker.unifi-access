@@ -126,6 +126,7 @@ export function LastThumbnailCard(): JSX.Element {
                         size="small"
                         value={selectedId ?? ''}
                         onChange={e => setChosenId(e.target.value || null)}
+                        inputProps={{ 'aria-label': 'Device' }}
                     >
                         {devices.map(d => (
                             <MenuItem

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { EventLogCard, parseEvents } from './EventLogCard';
-import { setStates } from '../test/socketMock';
+import { setStates, updateState } from '../test/socketMock';
 import { SettingsContext, useSettingsProvider } from '../settings';
 import type { JSX, ReactNode } from 'react';
 
@@ -14,6 +14,18 @@ const VIDEO = 'http://192.0.2.5:8095/unifi-access/0/protect-video/evt1.mp4';
 /** Provides the settings of the panel from `admin.uiSettings`, as App does */
 function SettingsHost({ children }: { children: ReactNode }): JSX.Element {
     return <SettingsContext.Provider value={useSettingsProvider()}>{children}</SettingsContext.Provider>;
+}
+
+/** The thumbnail button of the event log (null when there is none) */
+function thumbButton(): HTMLElement | null {
+    return screen.queryByRole('button', { name: /^Show camera image/ });
+}
+
+/** The image inside the thumbnail button */
+function thumbImage(): HTMLImageElement {
+    const img = thumbButton()?.querySelector('img');
+    expect(img).toBeTruthy();
+    return img as HTMLImageElement;
 }
 
 /** The 250 ms tickers the card started and whether each of them was stopped again */
@@ -282,11 +294,10 @@ describe('EventLogCard', () => {
                 'events.last': JSON.stringify([{ ...event, protectSnapshotUrl: SNAPSHOT, protectVideoUrl: VIDEO }]),
             });
         });
-        const thumb = screen.getByAltText('camera');
-        expect(thumb.getAttribute('src')).toBe(SNAPSHOT);
+        expect(thumbImage().getAttribute('src')).toBe(SNAPSHOT);
         expect(screen.queryByText('2')).toBeNull();
 
-        fireEvent.click(thumb);
+        fireEvent.click(thumbButton() as HTMLElement);
         const video = document.querySelector('video');
         expect(video?.getAttribute('src')).toBe(VIDEO);
 
@@ -313,7 +324,7 @@ describe('EventLogCard', () => {
         );
 
         expect(screen.getAllByText('Door unlocked')).toHaveLength(2);
-        expect(screen.queryByAltText('camera')).toBeNull();
+        expect(thumbButton()).toBeNull();
         expect(screen.queryByText(/^[123]$/)).toBeNull();
         expect(screen.queryByText('Not available')).toBeNull();
         // the first render still has the default width; once the stored settings are there, nothing ticks
@@ -331,7 +342,7 @@ describe('EventLogCard', () => {
             </SettingsHost>,
         );
 
-        expect(getComputedStyle(screen.getByAltText('camera')).width).toBe('160px');
+        expect(getComputedStyle(thumbImage()).width).toBe('160px');
     });
 
     it('shows "Not available" if the snapshot cannot be loaded', () => {
@@ -340,9 +351,120 @@ describe('EventLogCard', () => {
         });
         render(<EventLogCard />);
 
-        fireEvent.error(screen.getByAltText('camera'));
+        fireEvent.error(thumbImage());
 
-        expect(screen.queryByAltText('camera')).toBeNull();
+        expect(thumbButton()).toBeNull();
         expect(screen.getByText('Not available')).toBeTruthy();
+    });
+    describe('refused access (RF-01)', () => {
+        it.each([
+            ['BLOCKED', 'BLOCKED'],
+            ['Access Denied', 'Access Denied'],
+        ])('a refused attempt (result %s) is shown as "Access denied", never as "Door unlocked"', (_name, subtype) => {
+            setStates({
+                'events.last': JSON.stringify([
+                    { ts: NOW - 1000, type: 'access.door.unlock', subtype, granted: false, doorName: 'Front door' },
+                ]),
+            });
+            render(<EventLogCard />);
+            expect(screen.queryByText('Door unlocked')).toBeNull();
+            expect(screen.getByText('Access denied')).toBeTruthy();
+            expect(screen.queryByText(subtype)).toBeNull();
+        });
+
+        it('a granted access is "Door unlocked" without the raw result text', () => {
+            setStates({
+                'events.last': JSON.stringify([
+                    { ts: NOW - 1000, type: 'access.door.unlock', subtype: 'Access Granted', granted: true },
+                ]),
+            });
+            render(<EventLogCard />);
+            expect(screen.getByText('Door unlocked')).toBeTruthy();
+            expect(screen.queryByText('Access Granted')).toBeNull();
+            expect(screen.queryByText('Access denied')).toBeNull();
+        });
+
+        it('an entry written before the adapter reported the result still shows its raw result', () => {
+            setStates({
+                'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock', subtype: 'BLOCKED' }]),
+            });
+            render(<EventLogCard />);
+            expect(screen.getByText('BLOCKED')).toBeTruthy();
+        });
+    });
+
+    describe('a list written long ago does not count down again (RF-02)', () => {
+        it('the page is opened 10 minutes after the door opening: "Not available" right away', () => {
+            const T = NOW - 600_000;
+            // events.last was written at T; the running adapter renewed its alive state a few seconds ago
+            setStates(
+                {
+                    'info.protectConnected': true,
+                    'events.last': JSON.stringify([{ ts: T, type: 'access.door.unlock' }]),
+                },
+                { ts: T, perId: { 'system.adapter.unifi-access.0.alive': { val: true, ts: NOW - 5000 } } },
+            );
+            render(<EventLogCard />);
+            expect(screen.getByText('Not available')).toBeTruthy();
+            expect(screen.queryByText(/^[123]$/)).toBeNull();
+            expect(tickers().started).toBe(0);
+        });
+
+        it('a list that arrives while the page is open still counts down', () => {
+            setStates(
+                { 'info.protectConnected': true, 'events.last': '[]' },
+                { perId: { 'system.adapter.unifi-access.0.alive': { val: true, ts: NOW - 10_000 } } },
+            );
+            render(<EventLogCard />);
+            act(() => {
+                setStates(
+                    {
+                        'info.protectConnected': true,
+                        'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock' }]),
+                    },
+                    { perId: { 'system.adapter.unifi-access.0.alive': { val: true, ts: NOW - 10_000 } } },
+                );
+            });
+            expect(screen.getByText('2')).toBeTruthy();
+        });
+
+        it('the 15-second renewal of the alive state does not shorten a running countdown', () => {
+            const events = JSON.stringify([{ ts: NOW - 500, type: 'access.door.unlock' }]);
+            const alive = (ts: number): Record<string, { val: boolean; ts: number }> => ({
+                'system.adapter.unifi-access.0.alive': { val: true, ts },
+            });
+            setStates({ 'info.protectConnected': true, 'events.last': events }, { perId: alive(NOW - 14_000) });
+            render(<EventLogCard />);
+            expect(screen.getByText('3')).toBeTruthy();
+            act(() => {
+                vi.advanceTimersByTime(1000);
+                // the renewal changes only the alive state, 15 s after the previous one
+                updateState('system.adapter.unifi-access.0.alive', true, NOW + 1000);
+            });
+            expect(screen.getByText('2')).toBeTruthy();
+            act(() => {
+                vi.advanceTimersByTime(1000);
+            });
+            expect(screen.getByText('1')).toBeTruthy();
+        });
+    });
+
+    describe('accessibility (RF-04)', () => {
+        it('the camera image is a button with a name that opens the dialog with the keyboard', () => {
+            setStates({
+                'events.last': JSON.stringify([
+                    { ts: NOW - 60_000, type: 'access.door.unlock', doorName: 'Front door', protectSnapshotUrl: SNAPSHOT },
+                ]),
+            });
+            render(<EventLogCard />);
+            const button = screen.getByRole('button', { name: /^Show camera image of Front door, / });
+            expect(button.tagName).toBe('BUTTON');
+            button.focus();
+            expect(document.activeElement).toBe(button);
+            // a native button turns Enter / Space into a click
+            fireEvent.keyDown(button, { key: 'Enter' });
+            fireEvent.click(button);
+            expect(screen.getByRole('dialog')).toBeTruthy();
+        });
     });
 });
