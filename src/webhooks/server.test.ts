@@ -10,6 +10,7 @@ import {
 	signatureHeader,
 	type SignatureMode,
 	type TestLogger,
+	waitFor,
 } from '../../test/mock';
 import type { UnifiAccessEventEnvelope } from '../lib/types';
 import { SharedHttpServer } from '../webserver/sharedHttpServer';
@@ -111,7 +112,7 @@ describe('WebhookHandler (UniFi Access webhook receiver)', () => {
 			expect(received).to.have.length(2);
 		});
 
-		it('still answers 200 when the event callback throws or rejects (warning only)', async () => {
+		it('still answers 200 when the event callback throws or rejects (warning only, no unhandled rejection)', async () => {
 			onEvent = () => {
 				throw new Error('sync handler failure');
 			};
@@ -121,20 +122,52 @@ describe('WebhookHandler (UniFi Access webhook receiver)', () => {
 				throw new Error('async handler failure');
 			};
 			expect((await sendWebhook({ url, secret: SECRET, body: sampleEvent() })).status).to.equal(200);
+			// eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the handler must cope with it
+			onEvent = () => Promise.reject('not even an Error');
+			expect((await sendWebhook({ url, secret: SECRET, body: sampleEvent() })).status).to.equal(200);
+			await waitFor(() => logger.of('warn').length === 3, { description: 'warnings' });
 			expect(logger.of('warn')).to.deep.equal([
 				'Webhook handler error: sync handler failure',
 				'Webhook handler error: async handler failure',
+				'Webhook handler error: not even an Error',
 			]);
 		});
 
-		it('answers only after the event callback has finished', async () => {
+		// The controller gives up after 5 seconds ("It is recommended to handle asynchronous processing
+		// logic", api_reference 11.7): the receipt is acknowledged at once, processing follows.
+		it('acknowledges with 200 before the event callback has finished', async () => {
+			let finish: () => void = () => undefined;
+			let started = false;
 			let finished = false;
 			onEvent = async () => {
-				await new Promise(resolve => setTimeout(resolve, 30));
+				started = true;
+				await new Promise<void>(resolve => {
+					finish = resolve;
+				});
 				finished = true;
 			};
-			await sendWebhook({ url, secret: SECRET, body: sampleEvent() });
-			expect(finished).to.equal(true);
+			const response = await sendWebhook({ url, secret: SECRET, body: sampleEvent() });
+			expect(response.status).to.equal(200);
+			expect(response.body).to.equal('OK');
+			expect(started, 'processing has started').to.equal(true);
+			expect(finished, 'the answer did not wait for the processing').to.equal(false);
+			finish();
+			await waitFor(() => finished, { description: 'processing finished' });
+		});
+
+		it('a slow event callback does not delay the answers to later webhooks', async () => {
+			const release: (() => void)[] = [];
+			onEvent = () =>
+				new Promise<void>(resolve => {
+					release.push(resolve);
+				});
+			for (let i = 0; i < 3; i++) {
+				expect(
+					(await sendWebhook({ url, secret: SECRET, body: sampleEvent(), timeoutMs: 1000 })).status,
+				).to.equal(200);
+			}
+			expect(release).to.have.length(3);
+			release.forEach(done => done());
 		});
 
 		it('reads the secret for every request (rotation takes effect immediately)', async () => {
@@ -152,8 +185,6 @@ describe('WebhookHandler (UniFi Access webhook receiver)', () => {
 			['invalid', 'signature created with a different secret'],
 			['tampered', 'body modified after signing'],
 			['malformed', 'header without t= / v1= pairs'],
-			['expired', 'correctly signed but one hour old'],
-			['future', 'correctly signed but one hour ahead'],
 		];
 		for (const [mode, description] of modes) {
 			it(`${mode}: ${description}`, async () => {
@@ -164,6 +195,35 @@ describe('WebhookHandler (UniFi Access webhook receiver)', () => {
 				expect(logger.of('warn')).to.deep.equal(['Webhook signature verification failed.']);
 			});
 		}
+
+		for (const [mode, description] of [
+			['expired', 'correctly signed but one hour old'],
+			['future', 'correctly signed but one hour ahead'],
+		] as [SignatureMode, string][]) {
+			it(`${mode}: ${description} — rejected with a message that names the clock difference`, async () => {
+				const response = await sendWebhook({ url, secret: SECRET, body: sampleEvent(), signature: mode });
+				expect(response.status).to.equal(401);
+				expect(response.body).to.equal('');
+				expect(received).to.deep.equal([]);
+				const warnings = logger.of('warn');
+				expect(warnings).to.have.length(1);
+				expect(warnings[0]).to.match(
+					/^Webhook rejected: its timestamp differs by 360\d s from the clock of this host \(allowed: 300 s\)\. Check date and time/,
+				);
+			});
+		}
+
+		it('a wrong signature with an old timestamp is reported as signature failure (the clock hint is for correctly signed requests only)', async () => {
+			const old = Math.floor(Date.now() / 1000) - 3600;
+			const response = await sendWebhook({
+				url,
+				secret: `${SECRET}-wrong`,
+				body: sampleEvent(),
+				timestamp: old,
+			});
+			expect(response.status).to.equal(401);
+			expect(logger.of('warn')).to.deep.equal(['Webhook signature verification failed.']);
+		});
 
 		it('timestamps just outside the 5 minute tolerance', async () => {
 			const now = Math.floor(Date.now() / 1000);

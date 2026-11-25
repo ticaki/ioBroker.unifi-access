@@ -58,8 +58,17 @@ export class WebhookHandler {
 
 		const sigHeader = req.headers.signature;
 		const sig = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
-		if (!sig || !verifySignature(body, sig, secret)) {
-			this.options.logger.warn('Webhook signature verification failed.');
+		const verdict = sig ? verifySignature(body, sig, secret) : 'invalid';
+		if (verdict !== 'ok') {
+			if (typeof verdict === 'object') {
+				// The signature may well be right — the request is refused because of the clocks. Say so:
+				// otherwise every webhook fails with a misleading "signature" message.
+				this.options.logger.warn(
+					`Webhook rejected: its timestamp differs by ${verdict.skewSeconds} s from the clock of this host (allowed: ${MAX_TIMESTAMP_SKEW_SECONDS} s). Check date and time of the UniFi console and of the ioBroker host.`,
+				);
+			} else {
+				this.options.logger.warn('Webhook signature verification failed.');
+			}
 			res.statusCode = 401;
 			res.end();
 			return true;
@@ -75,14 +84,22 @@ export class WebhookHandler {
 			return true;
 		}
 
-		try {
-			await this.options.onEvent(parsed);
-		} catch (err) {
-			this.options.logger.warn(`Webhook handler error: ${(err as Error).message}`);
-		}
-
+		// Acknowledge first, process afterwards: the controller waits at most 5 seconds for the answer
+		// ("It is recommended to handle asynchronous processing logic", API reference 11.7).
 		res.statusCode = 200;
 		res.end('OK');
+
+		const fail = (err: unknown): void => {
+			this.options.logger.warn(`Webhook handler error: ${err instanceof Error ? err.message : String(err)}`);
+		};
+		try {
+			const pending = this.options.onEvent(parsed);
+			if (pending && typeof pending.then === 'function') {
+				pending.then(undefined, fail);
+			}
+		} catch (err) {
+			fail(err);
+		}
 		return true;
 	};
 }
@@ -105,7 +122,15 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 	});
 }
 
-function verifySignature(payload: Buffer, header: string, secret: string): boolean {
+/**
+ * Verify the `Signature: t=<unix>,v1=<hex>` header (HMAC-SHA256 over `<t>.<rawBody>`).
+ *
+ * @param payload Raw request body
+ * @param header Value of the Signature header
+ * @param secret Signing secret of the endpoint
+ * @returns `'ok'`, `'invalid'`, or the clock difference when the timestamp is outside the tolerance
+ */
+function verifySignature(payload: Buffer, header: string, secret: string): 'ok' | 'invalid' | { skewSeconds: number } {
 	let timestampStr: string | null = null;
 	let signatureHex: string | null = null;
 	for (const pair of header.split(',')) {
@@ -122,25 +147,23 @@ function verifySignature(payload: Buffer, header: string, secret: string): boole
 		}
 	}
 	if (!timestampStr || !signatureHex) {
-		return false;
+		return 'invalid';
 	}
 	const timestamp = Number.parseInt(timestampStr, 10);
 	if (!Number.isFinite(timestamp)) {
-		return false;
+		return 'invalid';
 	}
 	const skew = Math.abs(Math.floor(Date.now() / 1000) - timestamp);
-	if (skew > MAX_TIMESTAMP_SKEW_SECONDS) {
-		return false;
-	}
 	const expected = createHmac('sha256', secret).update(`${timestamp}.`).update(payload).digest();
 	let provided: Buffer;
 	try {
 		provided = Buffer.from(signatureHex, 'hex');
 	} catch {
-		return false;
+		return 'invalid';
 	}
-	if (provided.length !== expected.length) {
-		return false;
+	if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+		return 'invalid';
 	}
-	return timingSafeEqual(provided, expected);
+	// Only a correctly signed request is told about the clock difference.
+	return skew > MAX_TIMESTAMP_SKEW_SECONDS ? { skewSeconds: skew } : 'ok';
 }

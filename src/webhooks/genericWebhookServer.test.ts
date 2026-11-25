@@ -132,12 +132,19 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 			});
 		}
 
-		// BUG-C-06: in basic mode the 401 response carries `WWW-Authenticate: Bearer realm="webhook"`.
-		// Clients that wait for a challenge (RFC 7617) are asked for the wrong scheme and never send
-		// their basic credentials.
-		it.skip('BUG-C-06: challenges with the Basic scheme', async () => {
+		// Clients that wait for a challenge (RFC 7617) must be asked for the scheme that is configured,
+		// otherwise they never send their basic credentials.
+		it('challenges with the Basic scheme', async () => {
 			const response = await post();
 			expect(response.headers['www-authenticate']).to.match(/^Basic /);
+			expect(response.headers['www-authenticate']).to.equal('Basic realm="webhook", charset="UTF-8"');
+		});
+
+		it('accepts non-ASCII credentials (UTF-8)', async () => {
+			await server?.stop();
+			await mount({ auth: 'basic', username: 'jürgen', password: 'pässwört' });
+			expect((await post({ Authorization: basic('jürgen', 'pässwört') })).status).to.equal(200);
+			expect((await post({ Authorization: basic('jurgen', 'pässwört') })).status).to.equal(401);
 		});
 	});
 
@@ -170,6 +177,59 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 	});
 
 	describe('missing credentials in the configuration', () => {
+		// "basic" selected but nothing entered: `Authorization: Basic Og==` (an empty user and password)
+		// used to match the empty configuration and let everybody in.
+		for (const [name, options] of [
+			['no user and no password', {}],
+			['user without password', { username: 'alarm' }],
+			['password without user', { password: 'secret' }],
+			['empty strings', { username: '', password: '' }],
+		] as [string, Partial<GenericWebhookHandlerOptions>][]) {
+			it(`basic mode with ${name} rejects every request — also empty credentials`, async () => {
+				await mount({ auth: 'basic', ...options });
+				for (const headers of [
+					{ Authorization: 'Basic Og==' },
+					{ Authorization: basic('', '') },
+					{ Authorization: basic(options.username ?? '', options.password ?? '') },
+					{ Authorization: 'Basic ' },
+					{},
+				] as Record<string, string>[]) {
+					const response = await post(headers);
+					expect(response.status, JSON.stringify(headers)).to.equal(401);
+					expect(response.headers['www-authenticate']).to.match(/^Basic /);
+				}
+				expect(captured).to.deep.equal([]);
+			});
+		}
+
+		it('reports whether usable credentials are configured', () => {
+			const handler = (options: Partial<GenericWebhookHandlerOptions>): GenericWebhookHandler =>
+				new GenericWebhookHandler({
+					path: '/webhook',
+					auth: 'none',
+					logger,
+					onRequest: () => undefined,
+					...options,
+				});
+			expect(handler({ auth: 'none' }).credentialsConfigured).to.equal(true);
+			expect(handler({ auth: 'basic' }).credentialsConfigured).to.equal(false);
+			expect(handler({ auth: 'basic', username: 'u' }).credentialsConfigured).to.equal(false);
+			expect(handler({ auth: 'basic', username: 'u', password: 'p' }).credentialsConfigured).to.equal(true);
+			expect(handler({ auth: 'bearer' }).credentialsConfigured).to.equal(false);
+			expect(handler({ auth: 'bearer', token: '' }).credentialsConfigured).to.equal(false);
+			expect(handler({ auth: 'bearer', token: 't' }).credentialsConfigured).to.equal(true);
+			expect(handler({ auth: 'token' as GenericWebhookHandlerOptions['auth'] }).credentialsConfigured).to.equal(
+				false,
+			);
+		});
+
+		it('does not write the request body to the log (it is logged once, by the consumer)', async () => {
+			await mount({ auth: 'none' });
+			await post({}, 'super-secret-alarm-content');
+			expect(logger.messages.filter(m => m.message.includes('super-secret-alarm-content'))).to.deep.equal([]);
+			expect(logger.of('info')).to.deep.equal(logger.of('info').filter(m => !m.includes('Generic webhook')));
+		});
+
 		it('bearer mode without a configured token rejects every request', async () => {
 			await mount({ auth: 'bearer' });
 			expect((await post({ Authorization: 'Bearer ' })).status).to.equal(401);
