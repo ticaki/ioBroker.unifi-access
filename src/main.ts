@@ -12,7 +12,13 @@ import { classifyStoredSecret } from './lib/secretMigration';
 import { tlsCertificateErrorCode } from './lib/tlsErrors';
 import { UnifiWebSocket } from './lib/unifiWebSocket';
 import type { TimerHost } from './lib/timerHost';
-import { asString, parseAccessEvent, type ParsedAccessEvent } from './lib/eventNormalizer';
+import {
+	asString,
+	DOORBELL_REASONS,
+	isAccessGranted,
+	parseAccessEvent,
+	type ParsedAccessEvent,
+} from './lib/eventNormalizer';
 import { Library } from './lib/library';
 import { detectModel, featuresFor, type DeviceCapability, type UnifiDeviceModel } from './lib/deviceModels';
 import { isSafeProtectId, sanitizeStaticPath } from './lib/pathSafety';
@@ -43,6 +49,13 @@ import { GenericWebhookHandler } from './webhooks/genericWebhookServer';
 import { SharedHttpServer } from './webserver/sharedHttpServer';
 
 const WEBHOOK_PATH = '/unifi-access-webhook';
+
+/** Several door events in a row lead to one GET /doors after this pause. */
+const DOOR_REFRESH_DEBOUNCE_MS = 2000;
+/** After an own lock-rule command: read the door status back. */
+const DOOR_CHECK_AFTER_COMMAND_MS = 2000;
+/** After a pulse unlock / an unlock event: the relay has dropped again by then. */
+const DOOR_CHECK_AFTER_EVENT_MS = 7000;
 
 const USER_RELEVANT_EVENTS = new Set([
 	'access.remote_view',
@@ -131,6 +144,16 @@ class UnifiAccess extends utils.Adapter {
 
 	/** Last value the adapter acknowledged per control state — what an invalid write is reset to. */
 	private readonly lastAckedControlValues = new Map<string, number>();
+
+	/** Debounced refresh of all doors (GET /doors). */
+	private doorRefreshTimer: ioBroker.Timeout | undefined;
+	private doorRefreshWithLockRules = false;
+	/** Pending status checks per door (GET /doors/:id). */
+	private readonly doorCheckTimers = new Map<string, ioBroker.Timeout[]>();
+	/** False once the controller turned out not to offer GET /doors/:id/lock_rule. */
+	private lockRuleSupported = true;
+	/** The doorbell call currently published in doorbell.active*. */
+	private activeDoorbellCall: { requestId?: string; fromWebhook: boolean } | null = null;
 
 	/** Legacy system secret: plain-text and encrypted Protect passwords cannot be told apart. */
 	private protectPasswordUncertain = false;
@@ -491,6 +514,10 @@ class UnifiAccess extends utils.Adapter {
 			}
 			await this.applyBootstrap({ devices, doors });
 			await this.refreshEmergencyStatus();
+			this.lockRuleSupported = true;
+			for (const door of doors) {
+				await this.refreshLockRule(door.id);
+			}
 			if (this.bootstrapFailures > 0 || !this.bootstrapSucceededOnce) {
 				this.log.info(
 					`Connected to UniFi Access controller. ${devices.length} devices, ${doors.length} doors.`,
@@ -796,71 +823,73 @@ class UnifiAccess extends utils.Adapter {
 	private async dispatchEvent(parsed: ParsedAccessEvent): Promise<void> {
 		const { event } = parsed;
 		switch (event.type) {
-			case 'access.remote_view':
-				await this.setState('doorbell.activeCallId', {
-					val: asString((event.raw as Record<string, unknown>).event_object_id) ?? null,
-					ack: true,
-				});
-				await this.setState('doorbell.activeFromDevice', {
-					val: event.doorName ?? event.deviceName ?? event.deviceId ?? null,
-					ack: true,
-				});
-				await this.setState('doorbell.activeStartedAt', { val: event.ts, ack: true });
-				if (event.thumbnailPath) {
-					const tid = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
-					if (tid) {
-						await this.setThumbnail(tid, event.thumbnailPath, event.ts);
-					}
-				}
-				break;
-
-			case 'access.remote_view.change': {
-				const reason = parsed.reasonCode ?? -1;
-				// 105 timeout, 106 admin reject, 108 visitor cancel, 400 answered elsewhere → call ended
-				if (reason === 105 || reason === 106 || reason === 108 || reason === 400) {
-					await this.setState('doorbell.activeCallId', { val: null, ack: true });
-					await this.setState('doorbell.activeFromDevice', { val: null, ack: true });
-					await this.setState('doorbell.activeStartedAt', { val: null, ack: true });
-				}
+			case 'access.remote_view': {
+				const callId = asString((event.raw as Record<string, unknown>).event_object_id) ?? parsed.requestId;
+				await this.setActiveDoorbellCall(
+					callId ?? null,
+					parsed.requestId,
+					event.doorName ?? event.deviceName ?? event.deviceId ?? null,
+					event.ts,
+					true,
+				);
+				await this.storeEventThumbnail(event);
 				break;
 			}
 
-			case 'access.data.device.remote_unlock':
-				if (event.doorId) {
-					const channelId = `doors.${this.safeId(event.doorId)}.locked`;
-					await this.setState(channelId, { val: false, ack: true });
+			case 'access.remote_view.change':
+				// 105 timeout, 106 admin reject, 107 admin unlocked the door, 108 visitor cancel,
+				// 400 answered elsewhere → the call is over in every documented case
+				if (parsed.reasonCode !== undefined && parsed.reasonCode in DOORBELL_REASONS) {
+					await this.clearActiveDoorbellCall();
 				}
-				if (event.thumbnailPath) {
-					const tid = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
-					if (tid) {
-						await this.setThumbnail(tid, event.thumbnailPath, event.ts);
-					}
-				}
-				break;
-
-			case 'access.door.unlock':
-				if (event.doorId) {
-					const channelId = `doors.${this.safeId(event.doorId)}.locked`;
-					await this.setState(channelId, { val: false, ack: true });
-				}
-				if (event.thumbnailPath) {
-					const tid = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
-					if (tid) {
-						await this.setThumbnail(tid, event.thumbnailPath, event.ts);
-					}
-				}
-				this.log.debug(`[event] ${event.type} for doorId=${event.doorId}, setting locked=false`);
-				this.logSystemLogs(event.ts);
 				break;
 
 			case 'access.doorbell.incoming':
+				// Webhook counterpart of access.remote_view: marks the call as active when the WebSocket
+				// did not report it, but never replaces what the WebSocket event of the same call set.
+				await this.setActiveDoorbellCall(
+					parsed.requestId ?? asString((event.raw as Record<string, unknown>).event_object_id) ?? null,
+					parsed.requestId,
+					event.doorName ?? event.deviceName ?? event.deviceId ?? null,
+					event.ts,
+					false,
+				);
+				await this.storeEventThumbnail(event);
+				break;
+
 			case 'access.doorbell.incoming.REN':
-				if (event.thumbnailPath) {
-					const tid = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
-					if (tid) {
-						await this.setThumbnail(tid, event.thumbnailPath, event.ts);
+				await this.storeEventThumbnail(event);
+				break;
+
+			case 'access.doorbell.completed':
+				// "accepted, declined, or canceled" — the call is over, whatever the WebSocket delivered
+				await this.clearActiveDoorbellCall();
+				if (parsed.reasonCode === 107 && event.doorId) {
+					this.scheduleDoorChecks(event.doorId, [DOOR_CHECK_AFTER_EVENT_MS]);
+				}
+				break;
+
+			case 'access.data.device.remote_unlock':
+				if (event.doorId) {
+					await this.markDoorUnlocked(event.doorId);
+				}
+				await this.storeEventThumbnail(event);
+				break;
+
+			case 'access.door.unlock':
+				// "Triggered on all door unlock events" — including denied attempts (result BLOCKED /
+				// "Access Denied"). Only a granted access means the door was released.
+				if (event.doorId) {
+					if (isAccessGranted(parsed.result)) {
+						await this.markDoorUnlocked(event.doorId);
+					} else {
+						this.log.debug(
+							`[event] ${event.type} for doorId=${event.doorId} with result "${parsed.result}" — door stays locked`,
+						);
 					}
 				}
+				await this.storeEventThumbnail(event);
+				this.logSystemLogs(event.ts);
 				break;
 
 			case 'access.device.dps_status':
@@ -868,21 +897,245 @@ class UnifiAccess extends utils.Adapter {
 					// Documented location of the sensor state is data.object.status. An event without a usable
 					// status must not overwrite the known position (it used to be set to "unknown" here).
 					const value = extractDpsStatus(parsed.data);
-					if (value !== undefined) {
-						await this.setState(`doors.${this.safeId(event.doorId)}.position`, { val: value, ack: true });
-					} else {
+					if (value !== undefined && this.doorNameCache.has(event.doorId)) {
+						await this.library.setDoorPosition(event.doorId, value);
+					} else if (value === undefined) {
 						this.log.debug(`[event] ${event.type} for doorId=${event.doorId} without a status — ignored`);
 					}
 				}
+				this.requestDoorRefresh();
 				break;
 
 			case 'access.device.emergency_status':
-				void this.refreshEmergencyStatus();
+				this.runDetached('emergency status', this.refreshEmergencyStatus());
 				break;
 
 			case 'access.temporary_unlock.start':
 				this.logSystemLogs(event.ts);
+				this.requestDoorRefresh(true);
 				break;
+
+			case 'access.temporary_unlock.end':
+			case 'access.unlock_schedule.activate':
+			case 'access.unlock_schedule.deactivate':
+				// The payloads of these events are not documented — ask the controller what the doors are now.
+				this.requestDoorRefresh(true);
+				break;
+		}
+	}
+
+	private async storeEventThumbnail(event: NormalizedEvent): Promise<void> {
+		if (!event.thumbnailPath) {
+			return;
+		}
+		const deviceId = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
+		if (deviceId) {
+			await this.setThumbnail(deviceId, event.thumbnailPath, event.ts);
+		}
+	}
+
+	/**
+	 * Mark a doorbell call as active.
+	 *
+	 * @param callId Value for doorbell.activeCallId
+	 * @param requestId Request id of the call (shared by WebSocket and webhook events of one call)
+	 * @param from Door or device the call comes from
+	 * @param startedAt Event time (ms epoch)
+	 * @param authoritative WebSocket event: always applies. Webhook: only when no call is active.
+	 */
+	private async setActiveDoorbellCall(
+		callId: string | null,
+		requestId: string | undefined,
+		from: string | null,
+		startedAt: number,
+		authoritative: boolean,
+	): Promise<void> {
+		const current = this.activeDoorbellCall;
+		if (current) {
+			if (!authoritative) {
+				// a call is already published — the webhook must not replace it
+				return;
+			}
+			if (current.fromWebhook && requestId !== undefined && current.requestId === requestId) {
+				// the WebSocket event of the call the webhook already announced: keep the published id
+				return;
+			}
+		}
+		this.activeDoorbellCall = { requestId, fromWebhook: !authoritative };
+		await this.setState('doorbell.activeCallId', { val: callId, ack: true });
+		await this.setState('doorbell.activeFromDevice', { val: from, ack: true });
+		await this.setState('doorbell.activeStartedAt', { val: startedAt, ack: true });
+	}
+
+	private async clearActiveDoorbellCall(): Promise<void> {
+		this.activeDoorbellCall = null;
+		await this.setState('doorbell.activeCallId', { val: null, ack: true });
+		await this.setState('doorbell.activeFromDevice', { val: null, ack: true });
+		await this.setState('doorbell.activeStartedAt', { val: null, ack: true });
+	}
+
+	/**
+	 * A door was released (event from the controller): publish it and check a little later what the
+	 * controller reports, instead of leaving `locked=false` standing until the next restart.
+	 *
+	 * @param doorId Door id as used by the controller
+	 */
+	private async markDoorUnlocked(doorId: string): Promise<void> {
+		if (!this.doorNameCache.has(doorId)) {
+			// a door that appeared after the start: load it (creates its objects) instead of writing blind
+			this.requestDoorRefresh();
+			return;
+		}
+		await this.library.setDoorLocked(doorId, false);
+		this.scheduleDoorChecks(doorId, [DOOR_CHECK_AFTER_EVENT_MS]);
+	}
+
+	/**
+	 * Ask the controller for the status of all doors shortly (debounced: a burst of events leads to
+	 * one request). Doors the adapter does not know yet get their objects created.
+	 *
+	 * @param withLockRules Also re-read the temporary lock rules
+	 */
+	private requestDoorRefresh(withLockRules = false): void {
+		if (this.unloading || !this.http) {
+			return;
+		}
+		this.doorRefreshWithLockRules ||= withLockRules;
+		if (this.doorRefreshTimer) {
+			return;
+		}
+		this.doorRefreshTimer = this.setTimeout(() => {
+			this.doorRefreshTimer = undefined;
+			const lockRules = this.doorRefreshWithLockRules;
+			this.doorRefreshWithLockRules = false;
+			this.runDetached('door refresh', this.refreshDoors(lockRules));
+		}, DOOR_REFRESH_DEBOUNCE_MS);
+	}
+
+	/**
+	 * Schedule status checks for one door, replacing checks still pending for it. Used after commands
+	 * and unlock events in place of timers that assumed the door state.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param delaysMs Delays from now, one check each
+	 */
+	private scheduleDoorChecks(doorId: string, delaysMs: number[]): void {
+		this.cancelDoorChecks(doorId);
+		if (this.unloading || !this.http) {
+			return;
+		}
+		const timers: ioBroker.Timeout[] = [];
+		for (const delayMs of delaysMs) {
+			const timer = this.setTimeout(() => {
+				const pending = this.doorCheckTimers.get(doorId);
+				if (pending) {
+					const remaining = pending.filter(t => t !== timer);
+					if (remaining.length > 0) {
+						this.doorCheckTimers.set(doorId, remaining);
+					} else {
+						this.doorCheckTimers.delete(doorId);
+					}
+				}
+				this.runDetached('door status check', this.refreshDoor(doorId));
+			}, delayMs);
+			if (timer) {
+				timers.push(timer);
+			}
+		}
+		if (timers.length > 0) {
+			this.doorCheckTimers.set(doorId, timers);
+		}
+	}
+
+	private cancelDoorChecks(doorId: string): void {
+		for (const timer of this.doorCheckTimers.get(doorId) ?? []) {
+			this.clearTimeout(timer);
+		}
+		this.doorCheckTimers.delete(doorId);
+	}
+
+	/**
+	 * Read one door from the controller (GET /doors/:id) and mirror its lock/position status and lock rule.
+	 *
+	 * @param doorId Door id as used by the controller
+	 */
+	private async refreshDoor(doorId: string): Promise<void> {
+		if (!this.http || this.unloading) {
+			return;
+		}
+		try {
+			const door = await this.http.getDoor(doorId);
+			if (door && !this.unloading) {
+				await this.applyDoorStatus(door);
+				await this.refreshLockRule(door.id);
+			}
+		} catch (err) {
+			this.log.debug(`Door status refresh for ${doorId} failed: ${errorText(err)}`);
+		}
+	}
+
+	/**
+	 * Read all doors from the controller (GET /doors) and mirror their lock/position status.
+	 *
+	 * @param withLockRules Also re-read the temporary lock rules
+	 */
+	private async refreshDoors(withLockRules: boolean): Promise<void> {
+		if (!this.http || this.unloading) {
+			return;
+		}
+		try {
+			const doors = await this.http.listDoors();
+			for (const door of doors) {
+				if (this.unloading) {
+					return;
+				}
+				if (!door || typeof door.id !== 'string') {
+					continue;
+				}
+				await this.applyDoorStatus(door);
+				if (withLockRules) {
+					await this.refreshLockRule(door.id);
+				}
+			}
+		} catch (err) {
+			this.log.debug(`Door status refresh failed: ${errorText(err)}`);
+		}
+	}
+
+	private async applyDoorStatus(door: UnifiDoorRaw): Promise<void> {
+		if (!this.doorNameCache.has(door.id)) {
+			// new door: create its channel and states before anything is written
+			await this.library.ensureDoor(door);
+			this.doorNameCache.set(door.id, door.name ?? door.full_name ?? door.id);
+			this.log.info(`New door "${door.name ?? door.id}" added.`);
+			return;
+		}
+		await this.library.updateDoorStatus(door);
+	}
+
+	/**
+	 * Mirror the temporary lock rule of a door into doors.<id>.lockRuleType / lockRuleEndsAt.
+	 * The endpoint needs UniFi Access 1.24.6 or later; on a controller that does not offer it the
+	 * adapter stops asking until the next (re)connect.
+	 *
+	 * @param doorId Door id as used by the controller
+	 */
+	private async refreshLockRule(doorId: string): Promise<void> {
+		if (!this.http || this.unloading || !this.lockRuleSupported) {
+			return;
+		}
+		try {
+			await this.library.setDoorLockRule(doorId, await this.http.getDoorLockRule(doorId));
+		} catch (err) {
+			const status = (err as { response?: { status?: number } }).response?.status;
+			if (status !== undefined && status >= 400 && status < 500 && ![401, 403, 429].includes(status)) {
+				this.lockRuleSupported = false;
+				this.log.debug(
+					`Lock rule status not available (requires UniFi Access >= 1.24.6): ${errorText(err)} — not asking again until the next reconnect.`,
+				);
+			} else {
+				this.log.debug(`Lock rule refresh for ${doorId} failed: ${errorText(err)}`);
+			}
 		}
 	}
 
@@ -898,17 +1151,13 @@ class UnifiAccess extends utils.Adapter {
 		if (typeof dataDevice.firmware === 'string' && dataDevice.firmware) {
 			await this.setState(`devices.${safe}.firmware`, { val: dataDevice.firmware, ack: true });
 		}
-		if (typeof dataDevice.online === 'boolean') {
-			await this.setState(`devices.${safe}.online`, { val: dataDevice.online, ack: true });
-		}
+		// `online` is deliberately not taken from event payloads: every documented webhook sample carries
+		// `"online": false`, even for the reader that just rang. The online state comes from GET /devices.
 		await this.setState(`devices.${safe}.lastSeenAt`, { val: isoTs, ack: true });
 		const cached = this.devices.get(dataDevice.id);
 		if (cached) {
 			if (typeof dataDevice.firmware === 'string' && dataDevice.firmware) {
 				cached.firmware = dataDevice.firmware;
-			}
-			if (typeof dataDevice.online === 'boolean') {
-				cached.online = dataDevice.online;
 			}
 			cached.lastSeenAt = isoTs;
 		}
@@ -1152,6 +1401,39 @@ class UnifiAccess extends utils.Adapter {
 		}
 	}
 
+	private unlockActor(): { id: string; name: string } | undefined {
+		const actorId = this.config.unlockActorId || '';
+		return actorId ? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId } : undefined;
+	}
+
+	/**
+	 * Unlock a door: pulse (minutes = 0) or timed via a custom lock rule. Afterwards the door status
+	 * is read back from the controller instead of assuming when the door locks again.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param minutes Whole minutes, 0 = pulse
+	 */
+	private async unlockDoorFor(doorId: string, minutes: number): Promise<void> {
+		if (!this.http) {
+			throw new Error('no controller connection');
+		}
+		if (minutes > 0) {
+			await this.http.setDoorLockRule(doorId, { type: 'custom', interval: minutes });
+			this.log.info(`Door ${doorId} unlocked for ${minutes} min via lock_rule.`);
+			await this.library.setDoorLocked(doorId, false);
+			// verify shortly, and look again when the time is up
+			this.scheduleDoorChecks(doorId, [
+				DOOR_CHECK_AFTER_COMMAND_MS,
+				minutes * 60_000 + DOOR_CHECK_AFTER_COMMAND_MS,
+			]);
+		} else {
+			await this.http.unlockDoor(doorId, this.unlockActor());
+			this.log.info(`Door ${doorId} unlocked (pulse).`);
+			await this.library.setDoorLocked(doorId, false);
+			this.scheduleDoorChecks(doorId, [DOOR_CHECK_AFTER_EVENT_MS]);
+		}
+	}
+
 	private async handleDoorUnlock(safeDoorId: string): Promise<void> {
 		if (!this.http) {
 			return;
@@ -1160,26 +1442,12 @@ class UnifiAccess extends utils.Adapter {
 			this.log.debug(`[unlock] ignoring unlock for unknown door id: ${safeDoorId}`);
 			return;
 		}
-		const cfg = this.config;
-		const minutes = normalizeDefaultUnlockMinutes(cfg.defaultUnlockDuration);
-		const actorId = cfg.unlockActorId || '';
-		const actor = actorId ? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId } : undefined;
+		const minutes = normalizeDefaultUnlockMinutes(this.config.defaultUnlockDuration);
 		try {
-			if (minutes > 0) {
-				await this.http.setDoorLockRule(safeDoorId, { type: 'custom', interval: minutes });
-				this.log.info(`Door ${safeDoorId} unlocked for ${minutes} min via lock_rule.`);
-			} else {
-				await this.http.unlockDoor(safeDoorId, actor);
-				this.log.info(`Door ${safeDoorId} unlocked (pulse).`);
-			}
+			await this.unlockDoorFor(safeDoorId, minutes);
 			await this.setState(`doors.${safeDoorId}.unlock`, { val: true, ack: true });
-			await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
-			const resetMs = minutes > 0 ? minutes * 60 * 1000 : 5000;
-			this.setTimeout(() => {
-				void this.setState(`doors.${safeDoorId}.locked`, { val: true, ack: true });
-			}, resetMs);
 		} catch (err) {
-			this.log.warn(`Unlock door ${safeDoorId} failed: ${(err as Error).message}`);
+			this.log.warn(`Unlock door ${safeDoorId} failed: ${errorText(err)}`);
 		}
 	}
 
@@ -1191,25 +1459,12 @@ class UnifiAccess extends utils.Adapter {
 			this.log.debug(`[unlock_duration] ignoring unknown door id: ${safeDoorId}`);
 			return;
 		}
-		const actorId = this.config.unlockActorId || '';
-		const actor = actorId ? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId } : undefined;
 		try {
-			if (minutes > 0) {
-				await this.http.setDoorLockRule(safeDoorId, { type: 'custom', interval: minutes });
-				this.log.info(`Door ${safeDoorId} unlocked for ${minutes} min via lock_rule.`);
-			} else {
-				await this.http.unlockDoor(safeDoorId, actor);
-				this.log.info(`Door ${safeDoorId} unlocked (pulse) via unlock_duration.`);
-			}
+			await this.unlockDoorFor(safeDoorId, minutes);
 			await this.setState(`doors.${safeDoorId}.unlock_duration`, { val: minutes, ack: true });
 			this.lastAckedControlValues.set(`doors.${safeDoorId}.unlock_duration`, minutes);
-			await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
-			const resetMs = minutes > 0 ? minutes * 60 * 1000 : 5000;
-			this.setTimeout(() => {
-				void this.setState(`doors.${safeDoorId}.locked`, { val: true, ack: true });
-			}, resetMs);
 		} catch (err) {
-			this.log.warn(`Unlock door ${safeDoorId} (duration) failed: ${(err as Error).message}`);
+			this.log.warn(`Unlock door ${safeDoorId} (duration) failed: ${errorText(err)}`);
 		}
 	}
 
@@ -1231,12 +1486,16 @@ class UnifiAccess extends utils.Adapter {
 			await this.setState(`doors.${safeDoorId}.lock_rule`, { val: ruleIndex, ack: true });
 			this.lastAckedControlValues.set(`doors.${safeDoorId}.lock_rule`, ruleIndex);
 			if (type === 'keep_unlock') {
-				await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
-			} else if (type === 'keep_lock' || type === 'lock_now' || type === 'reset') {
-				await this.setState(`doors.${safeDoorId}.locked`, { val: true, ack: true });
+				await this.library.setDoorLocked(safeDoorId, false);
+			} else if (type === 'keep_lock' || type === 'lock_now') {
+				await this.library.setDoorLocked(safeDoorId, true);
 			}
+			// `reset` only clears a temporary rule and `lock_early` ends an unlock schedule early: what the
+			// door does then depends on its schedule, so nothing is assumed. In every case the status is
+			// read back, which also replaces checks still pending from an earlier timed unlock.
+			this.scheduleDoorChecks(safeDoorId, [DOOR_CHECK_AFTER_COMMAND_MS]);
 		} catch (err) {
-			this.log.warn(`Set lock_rule for door ${safeDoorId} failed: ${(err as Error).message}`);
+			this.log.warn(`Set lock_rule for door ${safeDoorId} failed: ${errorText(err)}`);
 		}
 	}
 
@@ -1486,6 +1745,18 @@ class UnifiAccess extends utils.Adapter {
 				this.clearTimeout(this.protectRetryTimer);
 				this.protectRetryTimer = undefined;
 			}
+			if (this.doorRefreshTimer) {
+				this.clearTimeout(this.doorRefreshTimer);
+				this.doorRefreshTimer = undefined;
+			}
+			for (const doorId of [...this.doorCheckTimers.keys()]) {
+				this.cancelDoorChecks(doorId);
+			}
+			for (const timer of this.unlockPendingTimers.values()) {
+				this.clearTimeout(timer);
+			}
+			this.unlockPendingTimers.clear();
+			this.unlockPendingEvents.clear();
 			if (this.httpServer) {
 				await this.httpServer.stop();
 				this.httpServer = null;

@@ -66,7 +66,9 @@ function defineAdapterTests({ suite, describe, it }) {
 
 		const state = localId => tools.stateValue(harness, localId);
 		const door = key => mock.findDoor(DOORS[key]);
-		const doorRequests = key => mock.findRequests({ path: new RegExp(`^/doors/${DOORS[key]}/`) });
+		/** commands sent for a door (status checks — GET — follow on their own schedule and are not counted) */
+		const doorRequests = key =>
+			mock.findRequests({ path: new RegExp(`^/doors/${DOORS[key]}/`) }).filter(r => r.method !== 'GET');
 		const endpoint = () => mock.webhookEndpoints[0];
 
 		before(async function () {
@@ -127,6 +129,8 @@ function defineAdapterTests({ suite, describe, it }) {
 						'/api/v1/developer/doors',
 						'/api/v1/developer/users',
 						'/api/v1/developer/doors/settings/emergency',
+						// 7.11: the temporary lock rule of every door
+						...Object.values(DOORS).map(doorId => `/api/v1/developer/doors/${doorId}/lock_rule`),
 					].sort(),
 				);
 				for (const request of mock.requests) {
@@ -194,6 +198,8 @@ function defineAdapterTests({ suite, describe, it }) {
 					unlock: { type: 'boolean', role: 'button', read: false, write: true },
 					unlock_duration: { type: 'number', role: 'level', unit: 'min', read: true, write: true },
 					lock_rule: { type: 'number', role: 'value', read: true, write: true },
+					lockRuleType: { type: 'string', role: 'text', read: true, write: false },
+					lockRuleEndsAt: { type: 'number', role: 'value.time', read: true, write: false },
 				};
 				for (const [leaf, common] of Object.entries(expected)) {
 					const obj = await tools.getObject(harness, tools.id(`${base}.${leaf}`));
@@ -387,10 +393,10 @@ function defineAdapterTests({ suite, describe, it }) {
 				});
 			}
 
-			// BUG-C-10: reason_code 107 ("An admin successfully unlocked a door", api_reference 11.1) also ends
-			// the doorbell call — the webhook counterpart access.doorbell.completed is documented as "accepted,
-			// declined, or canceled". The adapter keeps doorbell.activeCallId set forever after an admin answered.
-			it.skip('BUG-C-10: access.remote_view.change with reason_code 107 (admin unlocked) ends the active call', async () => {
+			// reason_code 107 ("An admin successfully unlocked a door", api_reference 11.1) also ends the
+			// doorbell call — the webhook counterpart access.doorbell.completed is documented as "accepted,
+			// declined, or canceled".
+			it('access.remote_view.change with reason_code 107 (admin unlocked) ends the active call', async () => {
 				const ring = mock.emitRemoteView();
 				await tools.waitForState(harness, 'doorbell.activeCallId', s => s.val === ring.event_object_id);
 				mock.emitRemoteViewChange(107);
@@ -901,7 +907,9 @@ function defineAdapterTests({ suite, describe, it }) {
 		let baseUrl;
 
 		const state = localId => tools.stateValue(harness, localId);
-		const doorRequests = key => mock.findRequests({ path: new RegExp(`^/doors/${DOORS[key]}/`) });
+		/** commands sent for a door (status checks — GET — follow on their own schedule and are not counted) */
+		const doorRequests = key =>
+			mock.findRequests({ path: new RegExp(`^/doors/${DOORS[key]}/`) }).filter(r => r.method !== 'GET');
 
 		before(async function () {
 			this.timeout(60_000);

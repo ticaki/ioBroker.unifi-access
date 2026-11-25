@@ -1,6 +1,6 @@
 import type { UnifiAccess } from '../UnifiAccess';
 import { detectModel, featuresFor, type UnifiDeviceModel } from './deviceModels';
-import type { UnifiDeviceRaw, UnifiDoorRaw } from './types';
+import type { UnifiDeviceRaw, UnifiDoorLockRule, UnifiDoorRaw } from './types';
 import { LOCK_RULE_STATES, MAX_UNLOCK_MINUTES } from './controlValues';
 
 /**
@@ -36,6 +36,8 @@ export class Library {
 	}
 
 	private baseObjectsReady = false;
+	/** Last value written per state through writeState() — lets status checks skip unchanged values. */
+	private readonly lastWritten = new Map<string, ioBroker.StateValue>();
 
 	/**
 	 * Create every object that does not depend on what the controller reports (channels, info,
@@ -146,6 +148,16 @@ export class Library {
 			'boolean',
 			'Door is bound to a hub (required for remote unlock)',
 		);
+		await this.ensureState(`${channelId}.lockRuleType`, {
+			name: 'Active temporary lock rule (schedule, keep_lock, keep_unlock, custom, lock_early; empty = none)',
+			type: 'string',
+			role: 'text',
+		});
+		await this.ensureState(`${channelId}.lockRuleEndsAt`, {
+			name: 'End of the active temporary lock rule (ms epoch)',
+			type: 'number',
+			role: 'value.time',
+		});
 		await this.ensureControlState(`${channelId}.unlock`, 'Trigger door unlock', 'boolean');
 		await this.adapter.extendObject(`${channelId}.unlock_duration`, {
 			type: 'state',
@@ -184,12 +196,73 @@ export class Library {
 
 		await this.adapter.setState(`${channelId}.name`, { val: door.name ?? door.id, ack: true });
 		await this.adapter.setState(`${channelId}.fullName`, { val: door.full_name ?? '', ack: true });
-		await this.adapter.setState(`${channelId}.locked`, { val: doorLocked(door), ack: true });
-		await this.adapter.setState(`${channelId}.position`, {
-			val: doorPosition(door),
-			ack: true,
-		});
+		await this.writeState(`${channelId}.locked`, doorLocked(door));
+		await this.writeState(`${channelId}.position`, doorPosition(door));
 		await this.adapter.setState(`${channelId}.isBindHub`, { val: door.is_bind_hub === true, ack: true });
+	}
+
+	/**
+	 * Write `doors.<id>.locked` (true/false/null = unknown) as reported by an event or assumed after a command.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param locked New value
+	 */
+	async setDoorLocked(doorId: string, locked: boolean | null): Promise<void> {
+		await this.writeState(`doors.${this.safeId(doorId)}.locked`, locked);
+	}
+
+	/**
+	 * Write `doors.<id>.position` as reported by a door position sensor event.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param position `open`, `close` or `unknown`
+	 */
+	async setDoorPosition(doorId: string, position: string): Promise<void> {
+		await this.writeState(`doors.${this.safeId(doorId)}.position`, position);
+	}
+
+	/**
+	 * Mirror the lock and position status of a door record read from the controller. Values that did
+	 * not change are not written again, so a periodic check does not produce state updates.
+	 *
+	 * @param door Door as returned by GET /doors or GET /doors/:id
+	 */
+	async updateDoorStatus(door: UnifiDoorRaw): Promise<void> {
+		const channelId = `doors.${this.safeId(door.id)}`;
+		await this.writeState(`${channelId}.locked`, doorLocked(door), true);
+		await this.writeState(`${channelId}.position`, doorPosition(door), true);
+	}
+
+	/**
+	 * Mirror the temporary lock rule of a door (GET /doors/:id/lock_rule). What the controller answers
+	 * for a door without an active rule is not documented, so everything unusable maps to "no rule".
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param rule Rule as returned by the controller, `null` when there is none
+	 */
+	async setDoorLockRule(doorId: string, rule: UnifiDoorLockRule | null): Promise<void> {
+		const channelId = `doors.${this.safeId(doorId)}`;
+		const type = typeof rule?.type === 'string' ? rule.type : '';
+		const ended = rule?.ended_time;
+		const endsAt =
+			typeof ended === 'number' && Number.isFinite(ended) && ended > 0 ? Math.round(ended * 1000) : null;
+		await this.writeState(`${channelId}.lockRuleType`, type, true);
+		await this.writeState(`${channelId}.lockRuleEndsAt`, endsAt, true);
+	}
+
+	/**
+	 * Write a state with ack and remember the value.
+	 *
+	 * @param id State id without namespace
+	 * @param val Value to write
+	 * @param onlyIfChanged Skip the write when this value was the last one written through this method
+	 */
+	private async writeState(id: string, val: ioBroker.StateValue, onlyIfChanged = false): Promise<void> {
+		if (onlyIfChanged && this.lastWritten.has(id) && this.lastWritten.get(id) === val) {
+			return;
+		}
+		this.lastWritten.set(id, val);
+		await this.adapter.setState(id, { val, ack: true });
 	}
 
 	async ensureNotificationsContainer(): Promise<void> {
@@ -271,6 +344,26 @@ export class Library {
 				read: true,
 				write: false,
 			},
+			native: {},
+		});
+	}
+
+	/**
+	 * Create a read-only state with an explicit role if it does not exist yet.
+	 *
+	 * @param id State id without namespace
+	 * @param common Name, type and role of the state
+	 * @param common.name Display name
+	 * @param common.type Value type
+	 * @param common.role ioBroker role
+	 */
+	private async ensureState(
+		id: string,
+		common: { name: string; type: ioBroker.CommonType; role: string },
+	): Promise<void> {
+		await this.adapter.setObjectNotExistsAsync(id, {
+			type: 'state',
+			common: { ...common, read: true, write: false },
 			native: {},
 		});
 	}

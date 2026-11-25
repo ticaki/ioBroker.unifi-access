@@ -270,34 +270,432 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		});
 	});
 
-	describe('door unlock: re-lock timer', () => {
-		it('pulse unlock: locked=false immediately, back to true after 5 s', async () => {
+	describe('door state follows the controller instead of blind timers (R-01, D-20)', () => {
+		const lockedOf = (id: string): unknown => adapter!.val(`doors.${id}.locked`);
+		const doorReads = (id: string): number => mock.findRequests({ method: 'GET', path: `/doors/${id}` }).length;
+		const setRelay = (id: string, status: 'lock' | 'unlock'): void => {
+			mock.findDoor(id)!.door_lock_relay_status = status;
+		};
+
+		it('pulse unlock: locked=false immediately, then the door status is read back after 7 s', async () => {
 			const instance = await startConnected();
 			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
-			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === false, { description: 'locked=false' });
+			await waitFor(() => lockedOf(DOOR_3855) === false, { description: 'locked=false' });
 			expect(mock.unlocks.map(u => u.doorId)).to.deep.equal([DOOR_3855]);
 			expect(instance.states.get(`${NS}.doors.${DOOR_3855}.unlock`)).to.include({ val: true, ack: true });
 
-			await clock.tickAsync(4999);
-			expect(instance.val(`doors.${DOOR_3855}.locked`)).to.equal(false);
+			await clock.tickAsync(6999);
+			await delay(30);
+			expect(lockedOf(DOOR_3855)).to.equal(false);
+			expect(doorReads(DOOR_3855), 'no status request before 7 s').to.equal(0);
 			await clock.tickAsync(1);
-			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === true, { description: 'locked=true' });
+			await waitFor(() => lockedOf(DOOR_3855) === true, { description: 'locked=true read from the controller' });
+			expect(doorReads(DOOR_3855)).to.equal(1);
 		});
 
-		it('timed unlock (defaultUnlockDuration = 2): back to locked after 2 minutes', async () => {
+		it('pulse unlock: a door the controller still reports as unlocked stays unlocked', async () => {
+			const instance = await startConnected();
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+			await waitFor(() => lockedOf(DOOR_3855) === false, { description: 'locked=false' });
+			setRelay(DOOR_3855, 'unlock'); // e.g. an unlock schedule became active in the meantime
+			await clock.tickAsync(7000);
+			await waitFor(() => doorReads(DOOR_3855) === 1, { description: 'status request' });
+			await delay(30);
+			expect(lockedOf(DOOR_3855), 'not blindly set to locked').to.equal(false);
+		});
+
+		it('timed unlock (defaultUnlockDuration = 2): status is verified after 2 s and read again when the time is up', async () => {
 			const instance = await startConnected({ defaultUnlockDuration: 2 });
 			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
-			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === false, { description: 'locked=false' });
-			expect(mock.findRequests({ path: `/doors/${DOOR_3855}/lock_rule` }).map(r => r.body)).to.deep.equal([
-				{ type: 'custom', interval: 2 },
-			]);
+			await waitFor(() => lockedOf(DOOR_3855) === false, { description: 'locked=false' });
+			expect(
+				mock.findRequests({ path: `/doors/${DOOR_3855}/lock_rule`, method: 'PUT' }).map(r => r.body),
+			).to.deep.equal([{ type: 'custom', interval: 2 }]);
 
-			await clock.tickAsync(2 * 60_000 - 1);
-			expect(instance.val(`doors.${DOOR_3855}.locked`)).to.equal(false);
-			await clock.tickAsync(1);
-			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === true, { description: 'locked=true' });
+			await clock.tickAsync(2000);
+			await waitFor(() => doorReads(DOOR_3855) === 1, { description: 'verification request' });
+			await delay(30);
+			expect(lockedOf(DOOR_3855)).to.equal(false);
+
+			// the controller locks the door again when the two minutes are over
+			await clock.tickAsync(2 * 60_000 - 2001);
+			await delay(30);
+			expect(doorReads(DOOR_3855), 'no polling in between').to.equal(1);
+			setRelay(DOOR_3855, 'lock');
+			await clock.tickAsync(2001);
+			await waitFor(() => lockedOf(DOOR_3855) === true, { description: 'locked=true after expiry' });
+			expect(doorReads(DOOR_3855)).to.equal(2);
 		});
 
+		it('a later lock rule cancels the pending check of an earlier timed unlock (no blind re-lock)', async () => {
+			const instance = await startConnected();
+			const writesBefore = instance.stateWrites.length;
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 10);
+			await waitFor(() => lockedOf(DOOR_3855) === false, { description: 'locked=false' });
+			await clock.tickAsync(60_000);
+			instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, 1); // keep_unlock
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.lock_rule`)?.ack === true, {
+				description: 'lock_rule ack',
+			});
+			// far beyond the 10 minutes of the first command: the door is still kept unlocked
+			await clock.tickAsync(15 * 60_000);
+			await delay(50);
+			expect(lockedOf(DOOR_3855)).to.equal(false);
+			expect(
+				instance.stateWrites
+					.slice(writesBefore)
+					.filter(w => w.id.endsWith(`doors.${DOOR_3855}.locked`) && w.val === true),
+			).to.deep.equal([]);
+		});
+
+		it('lock_rule reset does not claim the door is locked — the status is read from the controller (D-09)', async () => {
+			const instance = await startConnected();
+			// DOOR_A2 is unlocked by an unlock schedule; "reset" only clears a temporary rule
+			expect(lockedOf(DOOR_A2)).to.equal(false);
+			instance.fireStateChange(`doors.${DOOR_A2}.lock_rule`, 0);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_A2}.lock_rule`)?.ack === true, {
+				description: 'lock_rule ack',
+			});
+			setRelay(DOOR_A2, 'unlock'); // the schedule still holds the door open
+			await clock.tickAsync(2000);
+			await waitFor(() => doorReads(DOOR_A2) === 1, { description: 'status request' });
+			await delay(30);
+			expect(lockedOf(DOOR_A2)).to.equal(false);
+			expect(
+				instance.stateWrites.filter(w => w.id.endsWith(`doors.${DOOR_A2}.locked`) && w.val === true),
+			).to.deep.equal([]);
+		});
+
+		it('lock_rule = 4 sends lock_early and reads the status back (D-22)', async () => {
+			const instance = await startConnected();
+			instance.fireStateChange(`doors.${DOOR_A2}.lock_rule`, 4);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_A2}.lock_rule`)?.ack === true, {
+				description: 'lock_rule ack',
+			});
+			expect(
+				mock.findRequests({ method: 'PUT', path: `/doors/${DOOR_A2}/lock_rule` }).map(r => r.body),
+			).to.deep.equal([{ type: 'lock_early' }]);
+			expect(instance.val(`doors.${DOOR_A2}.lock_rule`)).to.equal(4);
+			await clock.tickAsync(2000);
+			await waitFor(() => lockedOf(DOOR_A2) === true, { description: 'locked read back' });
+		});
+
+		it('an unlock reported by the controller (WebSocket) is followed by a status check instead of staying unlocked forever', async () => {
+			await startConnected({ enableWebhooks: false });
+			mock.emitRemoteUnlock(DOOR_3855);
+			await waitFor(() => lockedOf(DOOR_3855) === false, { description: 'locked=false' });
+			await clock.tickAsync(7000);
+			await waitFor(() => lockedOf(DOOR_3855) === true, { description: 'locked=true read from the controller' });
+			expect(doorReads(DOOR_3855)).to.equal(1);
+		});
+
+		it('an access.door.unlock webhook is followed by a status check as well', async () => {
+			await startConnected();
+			await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+			await waitFor(() => lockedOf(DOOR_3855) === false, { description: 'locked=false' });
+			await clock.tickAsync(7000);
+			await waitFor(() => lockedOf(DOOR_3855) === true, { description: 'locked=true read from the controller' });
+		});
+
+		it('access.door.unlock with a denied result does not mark the door as unlocked (D-03)', async () => {
+			const instance = await startConnected();
+			for (const result of ['Access Denied', 'BLOCKED']) {
+				await mock.deliverWebhook(
+					fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub(), object: { result } }),
+				);
+			}
+			await waitFor(() => events().length === 2, { description: 'events logged' });
+			expect(lockedOf(DOOR_3855)).to.equal(true);
+			expect(
+				instance.stateWrites.filter(w => w.id.endsWith(`doors.${DOOR_3855}.locked`) && w.val === false),
+			).to.deep.equal([]);
+			expect(events().map(e => e.subtype)).to.deep.equal(['BLOCKED', 'Access Denied']);
+		});
+
+		for (const name of [
+			'access.temporary_unlock.start',
+			'access.temporary_unlock.end',
+			'access.unlock_schedule.activate',
+			'access.unlock_schedule.deactivate',
+		]) {
+			it(`${name} refreshes all doors from the controller (debounced, one request for a burst of events) (D-24)`, async () => {
+				await startConnected();
+				const before = mock.findRequests({ method: 'GET', path: '/doors' }).length;
+				setRelay(DOOR_3855, 'unlock');
+				setRelay(DOOR_A2, 'lock');
+				for (let i = 0; i < 3; i++) {
+					await mock.deliverWebhook(
+						fixtures.webhookEvents.generic(name, { door: door(DOOR_3855), device: hub() }),
+					);
+				}
+				await waitFor(() => events().length === 3, { description: 'events logged' });
+				await clock.tickAsync(1999);
+				await delay(30);
+				expect(mock.findRequests({ method: 'GET', path: '/doors' })).to.have.length(before);
+				await clock.tickAsync(1);
+				await waitFor(() => lockedOf(DOOR_3855) === false && lockedOf(DOOR_A2) === true, {
+					description: 'door states from the controller',
+				});
+				expect(mock.findRequests({ method: 'GET', path: '/doors' })).to.have.length(before + 1);
+			});
+		}
+
+		it('a failing status check is logged at debug level and does not disturb the adapter', async () => {
+			const instance = await startConnected();
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+			await waitFor(() => lockedOf(DOOR_3855) === false, { description: 'locked=false' });
+			mock.failNext({ method: 'GET', path: `/doors/${DOOR_3855}`, status: 500 });
+			await clock.tickAsync(7000);
+			await waitFor(() => instance.log.of('debug').some(m => m.includes('Door status refresh')), {
+				description: 'debug log',
+			});
+			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+
+		it('unload cancels pending status checks', async () => {
+			const instance = await startConnected();
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 30);
+			await waitFor(() => lockedOf(DOOR_3855) === false, { description: 'locked=false' });
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.generic('access.temporary_unlock.start', { door: door(DOOR_A2), device: hub() }),
+			);
+			await waitFor(() => events().length === 1, { description: 'event' });
+			await instance.fireUnload();
+			expect(clock.countTimers()).to.equal(0);
+		});
+	});
+
+	describe('device state from events (D-05)', () => {
+		it('does not take "online" from the device block of a webhook (the documented samples always carry online=false)', async () => {
+			const instance = await startConnected();
+			expect(instance.val(`devices.${DEVICE_HUB}.online`)).to.equal(true);
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorUnlock({
+					door: door(DOOR_3855),
+					device: hub(),
+					deviceOverrides: { online: false, firmware: 'v9.9.9' },
+				}),
+			);
+			await waitFor(() => instance.val(`devices.${DEVICE_HUB}.firmware`) === 'v9.9.9', {
+				description: 'firmware',
+			});
+			expect(instance.val(`devices.${DEVICE_HUB}.online`)).to.equal(true);
+			expect(instance.val(`devices.${DEVICE_HUB}.lastSeenAt`))
+				.to.be.a('string')
+				.with.length.greaterThan(0);
+			const { devices } = await instance.request('listDevices');
+			expect(devices.find((d: { id: string }) => d.id === DEVICE_HUB)).to.include({
+				online: true,
+				firmware: 'v9.9.9',
+			});
+		});
+	});
+
+	describe('doorbell call state (D-04, R-13)', () => {
+		const active = (): unknown[] => [
+			adapter!.val('doorbell.activeCallId'),
+			adapter!.val('doorbell.activeFromDevice'),
+			adapter!.val('doorbell.activeStartedAt'),
+		];
+
+		for (const code of [105, 106, 107, 108, 400]) {
+			it(`access.remote_view.change with reason_code ${code} ends the active call`, async () => {
+				const instance = await startConnected({ enableWebhooks: false });
+				const ring = mock.emitRemoteView();
+				await waitFor(() => instance.val('doorbell.activeCallId') === ring.event_object_id, {
+					description: 'ring',
+				});
+				mock.emitRemoteViewChange(code);
+				await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'call ended' });
+				expect(active()).to.deep.equal([null, null, null]);
+			});
+		}
+
+		it('an unknown reason_code leaves the call active', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			const ring = mock.emitRemoteView();
+			await waitFor(() => instance.val('doorbell.activeCallId') === ring.event_object_id, {
+				description: 'ring',
+			});
+			mock.emitRemoteViewChange(999);
+			await waitFor(() => events().some(e => e.type === 'access.remote_view.change'), { description: 'event' });
+			expect(instance.val('doorbell.activeCallId')).to.equal(ring.event_object_id);
+		});
+
+		for (const code of [105, 106, 107, 108, 400]) {
+			it(`access.doorbell.completed (webhook, reason ${code}) ends the active call — also without WebSocket event`, async () => {
+				const instance = await startConnected();
+				const ring = mock.emitRemoteView();
+				await waitFor(() => instance.val('doorbell.activeCallId') === ring.event_object_id, {
+					description: 'ring',
+				});
+				await mock.deliverWebhook(
+					fixtures.webhookEvents.doorbellCompleted({
+						door: door(DOOR_3855),
+						device: hub(),
+						reasonCode: code,
+					}),
+				);
+				await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'call ended' });
+				expect(active()).to.deep.equal([null, null, null]);
+				const logged = events().find(e => e.type === 'access.doorbell.completed')!;
+				expect(logged.subtype).to.equal(
+					{
+						105: 'timeout',
+						106: 'admin_rejected',
+						107: 'admin_unlocked',
+						108: 'visitor_cancelled',
+						400: 'answered_elsewhere',
+					}[code],
+				);
+			});
+		}
+
+		it('access.doorbell.incoming (webhook) marks a call as active when the WebSocket did not report it', async () => {
+			const instance = await startConnected();
+			const incoming = fixtures.webhookEvents.doorbellIncoming({
+				door: door(DOOR_3855),
+				device: mock.findDevice(DEVICE_G2_PRO)!,
+				requestId: 'request-4711',
+			});
+			await mock.deliverWebhook(incoming);
+			await waitFor(() => instance.val('doorbell.activeCallId') === 'request-4711', {
+				description: 'active call',
+			});
+			expect(instance.val('doorbell.activeFromDevice')).to.equal('Door 3855');
+			expect(instance.val('doorbell.activeStartedAt')).to.be.a('number');
+
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorbellCompleted({
+					door: door(DOOR_3855),
+					device: hub(),
+					reasonCode: 108,
+					requestId: 'request-4711',
+				}),
+			);
+			await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'call ended' });
+		});
+
+		it('the WebSocket event of a call the webhook already announced keeps the published call id', async () => {
+			const instance = await startConnected();
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorbellIncoming({
+					door: door(DOOR_3855),
+					device: mock.findDevice(DEVICE_G2_PRO)!,
+					requestId: 'request-1',
+				}),
+			);
+			await waitFor(() => instance.val('doorbell.activeCallId') === 'request-1', { description: 'active call' });
+			mock.emitRemoteView({ data: { request_id: 'request-1' } });
+			await waitFor(() => events().some(e => e.type === 'access.remote_view'), {
+				description: 'ws event logged',
+			});
+			await delay(30);
+			expect(instance.val('doorbell.activeCallId')).to.equal('request-1');
+
+			// a new ring (other request id) on the WebSocket replaces it
+			const next = mock.emitRemoteView({ data: { request_id: 'request-2' } });
+			await waitFor(() => instance.val('doorbell.activeCallId') === next.event_object_id, {
+				description: 'new call',
+			});
+		});
+
+		it('a repeated WebSocket ring always updates the published call', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			const first = mock.emitRemoteView();
+			await waitFor(() => instance.val('doorbell.activeCallId') === first.event_object_id, {
+				description: 'ring 1',
+			});
+			const second = mock.emitRemoteView();
+			await waitFor(() => instance.val('doorbell.activeCallId') === second.event_object_id, {
+				description: 'ring 2',
+			});
+		});
+
+		it('the webhook does not replace the call id already set by the WebSocket event of the same call', async () => {
+			const instance = await startConnected();
+			const ring = mock.emitRemoteView({ data: { request_id: 'request-0815' } });
+			await waitFor(() => instance.val('doorbell.activeCallId') === ring.event_object_id, {
+				description: 'ring',
+			});
+			const startedAt = instance.val('doorbell.activeStartedAt');
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorbellIncoming({
+					door: door(DOOR_3855),
+					device: mock.findDevice(DEVICE_G2_PRO)!,
+					requestId: 'request-0815',
+				}),
+			);
+			await waitFor(() => events().some(e => e.type === 'access.doorbell.incoming'), {
+				description: 'webhook logged',
+			});
+			expect(instance.val('doorbell.activeCallId')).to.equal(ring.event_object_id);
+			expect(instance.val('doorbell.activeStartedAt')).to.equal(startedAt);
+		});
+	});
+
+	describe('lock rule status (D-21, read-only)', () => {
+		it('creates doors.<id>.lockRuleType / lockRuleEndsAt and fills them at start', async () => {
+			mock.lockRules.set(DOOR_A2, { type: 'keep_unlock', ended_time: 3_602_128_562 });
+			const instance = await startConnected();
+			await waitFor(() => instance.val(`doors.${DOOR_A2}.lockRuleType`) === 'keep_unlock', {
+				description: 'rule type',
+			});
+			expect(instance.val(`doors.${DOOR_A2}.lockRuleEndsAt`)).to.equal(3_602_128_562_000);
+			expect(instance.obj(`doors.${DOOR_A2}.lockRuleType`)?.common).to.include({
+				type: 'string',
+				role: 'text',
+				read: true,
+				write: false,
+			});
+			expect(instance.obj(`doors.${DOOR_A2}.lockRuleEndsAt`)?.common).to.include({
+				type: 'number',
+				role: 'value.time',
+				read: true,
+				write: false,
+			});
+			// a door without a temporary rule
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.lockRuleType`) !== undefined, {
+				description: 'second door',
+			});
+			expect(instance.val(`doors.${DOOR_3855}.lockRuleEndsAt`)).to.equal(null);
+		});
+
+		it('updates the rule status after an own lock_rule / unlock_duration command', async () => {
+			const instance = await startConnected();
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.lockRuleType`) !== undefined, {
+				description: 'initial',
+			});
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 5);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === false, { description: 'unlocked' });
+			await clock.tickAsync(2000);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.lockRuleType`) === 'custom', {
+				description: 'custom rule',
+			});
+			const endsAt = instance.val(`doors.${DOOR_3855}.lockRuleEndsAt`) as number;
+			expect(endsAt).to.equal(mock.lockRules.get(DOOR_3855)!.ended_time * 1000);
+		});
+
+		it('stops asking when the controller does not support the endpoint (older firmware) and keeps working', async () => {
+			mock.failNext({ method: 'GET', path: /\/lock_rule$/, status: 404, times: Number.POSITIVE_INFINITY });
+			const instance = await startConnected();
+			await waitFor(() => instance.log.of('debug').some(m => m.includes('Lock rule status not available')), {
+				description: 'debug note',
+			});
+			const asked = mock.findRequests({ method: 'GET', path: /\/lock_rule$/ }).length;
+			expect(asked, 'one probe only').to.equal(1);
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === false, { description: 'unlocked' });
+			await clock.tickAsync(7000);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === true, {
+				description: 'status read back',
+			});
+			expect(mock.findRequests({ method: 'GET', path: /\/lock_rule$/ })).to.have.length(asked);
+			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+	});
+
+	describe('door commands', () => {
 		it('a failed unlock is neither acknowledged nor reflected in "locked" (warning only)', async () => {
 			const instance = await startConnected();
 			mock.failNext({ method: 'PUT', path: `/doors/${DOOR_3855}/unlock`, status: 500 });

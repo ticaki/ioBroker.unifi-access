@@ -46,6 +46,13 @@ export interface UnifiLockRulePayload {
 	interval?: number;
 }
 
+/** Response of GET /doors/:id/lock_rule (API reference 7.11). `ended_time` is in Unix seconds. */
+export interface UnifiDoorLockRule {
+	type?: string;
+	ended_time?: number;
+	[key: string]: unknown;
+}
+
 export interface UnifiWebhookEndpoint {
 	id: string;
 	name?: string;

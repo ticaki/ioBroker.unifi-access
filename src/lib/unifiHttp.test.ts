@@ -204,6 +204,47 @@ describe('UnifiHttp (against the mock controller)', () => {
 		});
 	});
 
+	describe('getDoor() / getDoorLockRule()', () => {
+		it('getDoor requests GET /doors/:id and returns the door with its lock and position status', async () => {
+			const door = await http.getDoor(fixtures.IDS.DOOR_3855);
+			expect(mock.requests[0].method).to.equal('GET');
+			expect(mock.requests[0].url).to.equal(`/api/v1/developer/doors/${fixtures.IDS.DOOR_3855}`);
+			expect(door).to.deep.include({
+				id: fixtures.IDS.DOOR_3855,
+				door_lock_relay_status: 'lock',
+				door_position_status: 'close',
+			});
+		});
+
+		it('getDoor URL-encodes the id and rejects for an unknown door', async () => {
+			const err = await rejection(http.getDoor('no/such door'));
+			expect((err as AxiosError).response?.status).to.equal(400);
+			expect(mock.requests[0].url).to.equal('/api/v1/developer/doors/no%2Fsuch%20door');
+		});
+
+		it('getDoor returns null when the response carries no door object', async () => {
+			mock.failNext({ status: 200, body: { code: 'SUCCESS', msg: 'success' } });
+			expect(await http.getDoor(fixtures.IDS.DOOR_3855)).to.equal(null);
+			mock.failNext({ status: 200, body: { code: 'SUCCESS', data: 'text' } });
+			expect(await http.getDoor(fixtures.IDS.DOOR_3855)).to.equal(null);
+		});
+
+		it('getDoorLockRule requests GET /doors/:id/lock_rule and returns type and ended_time', async () => {
+			mock.lockRules.set(fixtures.IDS.DOOR_3855, { type: 'keep_lock', ended_time: 3_602_128_309 });
+			expect(await http.getDoorLockRule(fixtures.IDS.DOOR_3855)).to.deep.equal({
+				type: 'keep_lock',
+				ended_time: 3_602_128_309,
+			});
+			expect(mock.requests[0].method).to.equal('GET');
+			expect(mock.requests[0].url).to.equal(`/api/v1/developer/doors/${fixtures.IDS.DOOR_3855}/lock_rule`);
+		});
+
+		it('getDoorLockRule returns null when the response carries no rule object', async () => {
+			mock.failNext({ status: 200, body: { code: 'SUCCESS', msg: 'success', data: null } });
+			expect(await http.getDoorLockRule(fixtures.IDS.DOOR_3855)).to.equal(null);
+		});
+	});
+
 	describe('getStaticResource()', () => {
 		const path = '/preview/reader_0418d6a2bb7a_d2b87427-7efa-43c1-aa52-b00d40d99ecf_1722913291.jpg';
 

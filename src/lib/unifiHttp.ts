@@ -3,6 +3,7 @@ import https from 'node:https';
 import { sanitizeStaticPath } from './pathSafety';
 import type {
 	UnifiDeviceRaw,
+	UnifiDoorLockRule,
 	UnifiDoorRaw,
 	UnifiEmergencyStatus,
 	UnifiEmergencyStatusPayload,
@@ -121,6 +122,34 @@ export class UnifiHttp {
 	async listDoors(): Promise<UnifiDoorRaw[]> {
 		const r = await this.client.get<{ data: UnifiDoorRaw[] }>('/api/v1/developer/doors');
 		return r.data?.data ?? [];
+	}
+
+	/**
+	 * Fetch a single door (API reference 7.7) — the current lock relay and position status.
+	 *
+	 * @param doorId UniFi door identifier
+	 * @returns The door, or `null` when the response carries no door object
+	 */
+	async getDoor(doorId: string): Promise<UnifiDoorRaw | null> {
+		const r = await this.client.get<{ data?: UnifiDoorRaw }>(
+			`/api/v1/developer/doors/${encodeURIComponent(doorId)}`,
+		);
+		const door = r.data?.data;
+		return door && typeof door === 'object' && typeof door.id === 'string' ? door : null;
+	}
+
+	/**
+	 * Fetch the temporary locking rule of a door (API reference 7.11, UniFi Access 1.24.6 or later).
+	 *
+	 * @param doorId UniFi door identifier
+	 * @returns The rule, or `null` when the response carries no rule object
+	 */
+	async getDoorLockRule(doorId: string): Promise<UnifiDoorLockRule | null> {
+		const r = await this.client.get<{ data?: UnifiDoorLockRule }>(
+			`/api/v1/developer/doors/${encodeURIComponent(doorId)}/lock_rule`,
+		);
+		const rule = r.data?.data;
+		return rule && typeof rule === 'object' && !Array.isArray(rule) ? rule : null;
 	}
 
 	async listUsers(): Promise<UnifiUserRaw[]> {

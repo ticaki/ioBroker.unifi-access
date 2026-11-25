@@ -44,7 +44,7 @@ Alle Routen unter `https://<host>:<port>/api/v1/developer`, Antwort-Hülle `{"co
 | GET | `/devices` | 8.1 | `data` ist `Device[][]` (Gruppen); `?refresh=true` wird akzeptiert |
 | GET | `/doors`, `/doors/:id` | 7.8 / 7.7 | |
 | PUT | `/doors/:id/unlock` | 7.9 | Body `actor_id` + `actor_name` nur gemeinsam, optional `extra` |
-| PUT / GET | `/doors/:id/lock_rule` | 7.10 / 7.11 | `type` ∈ `keep_lock, keep_unlock, custom, reset, lock_early, lock_now`; `custom` verlangt ganzzahliges `interval` (Minuten) |
+| PUT / GET | `/doors/:id/lock_rule` | 7.10 / 7.11 | `type` ∈ `keep_lock, keep_unlock, custom, reset, lock_early, lock_now`; `custom` verlangt ganzzahliges `interval` (Minuten). PUT setzt `door_lock_relay_status` der Tür (`custom`/`keep_unlock` → `unlock`, sonst `lock`); eine `custom`-Regel läuft im Mock **nicht** von selbst ab (im Test `mock.findDoor(id).door_lock_relay_status = 'lock'` setzen). GET liefert `mock.lockRules.get(id)`, ohne Regel `{type:"schedule", ended_time:0}` (Annahme – die Doku beschreibt den Fall nicht) |
 | GET / PUT | `/doors/settings/emergency` | 7.13 / 7.12 | |
 | GET | `/users` | 3.5 | mit `page_num` / `page_size` und `pagination`-Block |
 | POST | `/system/logs` | 9.2 | liefert `mock.systemLogHits`; Topics laut Doku **plus** `all` (siehe Annahmen) |

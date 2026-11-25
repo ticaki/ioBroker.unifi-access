@@ -224,6 +224,86 @@ describe('Library (object and state management, in-memory adapter)', () => {
 		});
 	});
 
+	describe('door status updates', () => {
+		beforeEach(async () => {
+			await library.applyBootstrap({ devices: devices(), doors: doors() });
+			adapter.stateWrites.length = 0;
+		});
+		const writes = (): string[] => adapter.stateWrites.map(w => `${w.id.slice(NS.length + 1)}=${String(w.val)}`);
+
+		it('creates the read-only lock rule states for every door', () => {
+			expect(adapter.obj(`doors.${DOOR_3855}.lockRuleType`).common).to.include({
+				type: 'string',
+				role: 'text',
+				read: true,
+				write: false,
+			});
+			expect(adapter.obj(`doors.${DOOR_3855}.lockRuleEndsAt`).common).to.include({
+				type: 'number',
+				role: 'value.time',
+				read: true,
+				write: false,
+			});
+		});
+
+		it('updateDoorStatus() writes only what changed', async () => {
+			const door = doors().find(d => d.id === DOOR_3855)!;
+			await library.updateDoorStatus(door);
+			expect(writes(), 'unchanged status').to.deep.equal([]);
+
+			door.door_lock_relay_status = 'unlock';
+			await library.updateDoorStatus(door);
+			expect(writes()).to.deep.equal([`doors.${DOOR_3855}.locked=false`]);
+
+			door.door_position_status = 'open';
+			await library.updateDoorStatus(door);
+			await library.updateDoorStatus(door);
+			expect(writes()).to.deep.equal([`doors.${DOOR_3855}.locked=false`, `doors.${DOOR_3855}.position=open`]);
+		});
+
+		it('updateDoorStatus() notices a change made through setDoorLocked() / setDoorPosition()', async () => {
+			const door = doors().find(d => d.id === DOOR_3855)!;
+			await library.setDoorLocked(DOOR_3855, false);
+			await library.setDoorPosition(DOOR_3855, 'open');
+			await library.updateDoorStatus(door);
+			expect(writes()).to.deep.equal([
+				`doors.${DOOR_3855}.locked=false`,
+				`doors.${DOOR_3855}.position=open`,
+				`doors.${DOOR_3855}.locked=true`,
+				`doors.${DOOR_3855}.position=close`,
+			]);
+		});
+
+		it('setDoorLocked() / setDoorPosition() always write (events are reported even when the value repeats)', async () => {
+			await library.setDoorLocked(DOOR_3855, false);
+			await library.setDoorLocked(DOOR_3855, false);
+			expect(writes()).to.deep.equal([`doors.${DOOR_3855}.locked=false`, `doors.${DOOR_3855}.locked=false`]);
+			expect(adapter.states.get(`${NS}.doors.${DOOR_3855}.locked`)).to.include({ val: false, ack: true });
+		});
+
+		it('setDoorLockRule() maps type and ended_time (seconds) to lockRuleType / lockRuleEndsAt (ms)', async () => {
+			await library.setDoorLockRule(DOOR_3855, { type: 'custom', ended_time: 1_708_672_257 });
+			expect(adapter.val(`doors.${DOOR_3855}.lockRuleType`)).to.equal('custom');
+			expect(adapter.val(`doors.${DOOR_3855}.lockRuleEndsAt`)).to.equal(1_708_672_257_000);
+		});
+
+		it('setDoorLockRule() maps everything unusable to "no rule"', async () => {
+			for (const rule of [
+				null,
+				{},
+				{ type: 5, ended_time: 'soon' },
+				{ type: 'schedule', ended_time: 0 },
+			] as never[]) {
+				await library.setDoorLockRule(DOOR_A2, { type: 'keep_lock', ended_time: 99 });
+				await library.setDoorLockRule(DOOR_A2, rule);
+				expect(adapter.val(`doors.${DOOR_A2}.lockRuleEndsAt`), JSON.stringify(rule)).to.equal(null);
+			}
+			expect(adapter.val(`doors.${DOOR_A2}.lockRuleType`)).to.equal('schedule');
+			await library.setDoorLockRule(DOOR_A2, null);
+			expect(adapter.val(`doors.${DOOR_A2}.lockRuleType`)).to.equal('');
+		});
+	});
+
 	describe('ensureDevice() edge cases', () => {
 		it('honours explicit online=false and firmware from the controller', async () => {
 			const { model } = await library.ensureDevice({
