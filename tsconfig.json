@@ -19,6 +19,13 @@
 		// This is necessary for the automatic typing of the adapter config
 		"resolveJsonModule": true,
 
+		// @tsconfig/node22 >= 22.0.6 sets "types": ["node"], which switches off the automatic
+		// inclusion of all @types/* packages (this is also the default from TypeScript 6 on).
+		// List the global typings we rely on explicitly: node, the ioBroker namespace
+		// (@types/iobroker is an alias for @iobroker/types) and, for *.test.ts, the mocha globals
+		// plus the chai plugins that test/mocha.setup.js registers for every test.
+		"types": ["node", "iobroker", "mocha", "chai-as-promised", "sinon-chai"],
+
 		// If you want to disable the stricter type checks (not recommended), uncomment the following line
 		// "strict": false,
 		// And enable some of those features for more fine-grained control
