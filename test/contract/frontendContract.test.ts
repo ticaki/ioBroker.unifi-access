@@ -14,17 +14,23 @@
 import { expect } from 'chai';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import sinon from 'sinon';
+import * as ts from 'typescript';
 
 import {
 	createAdapterWithFakeCore,
 	fixtures,
 	getFreePort,
+	httpRequest,
 	MockUnifiController,
 	waitFor,
 	type FakeAdapter,
 } from '../mock';
 import { featuresFor, type UnifiDeviceModel } from '../../src/lib/deviceModels';
+import { normalizePort } from '../../src/lib/controlValues';
+import { normalizePublicBaseUrl } from '../../src/lib/publicBaseUrl';
+import { normalizeWebhookPath } from '../../src/webhooks/genericWebhookServer';
 
 const ROOT = join(__dirname, '..', '..');
 const MAIN = join(ROOT, 'src', 'main');
@@ -61,6 +67,29 @@ function objectLiteralKeys(text: string, name: string): string[] {
 	const match = new RegExp(`const ${name}[^=]*=\\s*\\{([\\s\\S]*?)\\n\\};`).exec(text);
 	expect(match, `const ${name}`).to.not.equal(null);
 	return [...match![1].matchAll(/^\s*'?([\w-]+)'?\s*:/gm)].map(m => m[1]);
+}
+
+/** The URL rules of the admin page (src-admin/src/serverUrl.ts) */
+interface FrontendServerUrl {
+	normalizePublicBaseUrl(raw: unknown): string | null;
+	normalizeWebhookPath(raw: unknown): string;
+	normalizePort(raw: unknown): number;
+}
+
+/**
+ * Run a frontend module that imports nothing: strip the types, evaluate it in a fresh context.
+ *
+ * @param segments Path below the project root
+ */
+function loadFrontendModule<T>(...segments: string[]): T {
+	const text = source(...segments);
+	expect(text, `${segments.join('/')} must not import anything`).to.not.match(/^\s*import\s/m);
+	const { outputText } = ts.transpileModule(text, {
+		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+	});
+	const module = { exports: {} as Record<string, unknown> };
+	runInNewContext(outputText, { module, exports: module.exports, URL });
+	return module.exports as T;
 }
 
 const adminAuthSetup = source('src-admin', 'src', 'AuthSetup.tsx');
@@ -246,6 +275,101 @@ describe('contract adapter ↔ frontend (sendTo answers, error codes, state ids)
 			expect(info.tlsEnabled).to.be.a('boolean');
 			expect(info.tlsActive).to.be.a('boolean');
 			expect(info.tlsError).to.equal(null);
+			expect(info.publicBaseUrl).to.equal(null);
+		});
+
+		it('the frontend parses the fields the U-10 / fail-closed rules need (sanity check of the text parser)', () => {
+			expect([...interfaceFields(adminWebhookUrl, 'ServerInfo').keys()]).to.include.members([
+				'running',
+				'tlsEnabled',
+				'tlsError',
+				'publicBaseUrl',
+			]);
+		});
+
+		it('with unusable certificates: not running, TLS enabled, the reason as text — as GenericWebhookUrl expects', async () => {
+			const instance = await start({ enableTls: true, certPublic: 'missing', certPrivate: 'missing' });
+			const info = await instance.request('getServerInfo');
+			expect(info).to.include({
+				running: false,
+				scheme: null,
+				baseUrl: null,
+				tlsEnabled: true,
+				tlsActive: false,
+			});
+			expect(info.tlsError).to.be.a('string').and.not.equal('');
+			expect(info).to.have.property('publicBaseUrl', null);
+		});
+
+		it('publicBaseUrl is the saved value as the admin page normalises the form value', async () => {
+			const frontend = loadFrontendModule<FrontendServerUrl>('src-admin', 'src', 'serverUrl.ts');
+			const raw = '  HTTPS://Proxy.example.com:443/iob//  ';
+			const instance = await start({ publicBaseUrl: raw });
+			const info = await instance.request('getServerInfo');
+			expect(info.publicBaseUrl).to.equal('https://proxy.example.com/iob');
+			expect(info.publicBaseUrl).to.equal(frontend.normalizePublicBaseUrl(raw));
+			expect(info.baseUrl).to.equal(info.publicBaseUrl);
+		});
+
+		it('the URL rules of the admin page are the rules of the adapter', () => {
+			const frontend = loadFrontendModule<FrontendServerUrl>('src-admin', 'src', 'serverUrl.ts');
+			const baseUrls: unknown[] = [
+				'',
+				'   ',
+				'/',
+				'https://proxy.example.com',
+				' https://proxy.example.com/iob/// ',
+				'HTTP://Proxy.Example.COM:80/a/b',
+				'https://proxy.example.com:443',
+				'http://203.0.113.4:18095',
+				'http://[2001:db8::1]:8095/x',
+				'https://proxy.example.com:99999',
+				'https://user:pw@proxy.example.com',
+				'https://proxy.example.com/?a=1',
+				'https://proxy.example.com/#x',
+				'https://proxy.example.com/a b',
+				'https://proxy.example.com/a%20b',
+				'ftp://proxy.example.com',
+				'proxy.example.com',
+				'https://',
+				'https://%zz',
+				null,
+				undefined,
+				42,
+			];
+			for (const raw of baseUrls) {
+				expect(frontend.normalizePublicBaseUrl(raw), String(raw)).to.equal(normalizePublicBaseUrl(raw).url);
+			}
+			const paths: unknown[] = [
+				'/webhook',
+				'hook',
+				' /a ',
+				'',
+				'  ',
+				'//a//b',
+				'/a?x',
+				'/a#y',
+				'?x',
+				'/ä',
+				null,
+				5,
+			];
+			for (const raw of paths) {
+				expect(frontend.normalizeWebhookPath(raw), String(raw)).to.equal(normalizeWebhookPath(raw));
+			}
+			const ports: unknown[] = [9000, '9000', ' 9000 ', 0, -1, 65_535, 65_536, 8095.5, '', '90a', '1e3', null];
+			for (const raw of ports) {
+				expect(frontend.normalizePort(raw), String(raw)).to.equal(normalizePort(raw, 8095));
+			}
+		});
+
+		it('the generic webhook answers at the path the admin page shows', async () => {
+			const frontend = loadFrontendModule<FrontendServerUrl>('src-admin', 'src', 'serverUrl.ts');
+			const path = '  //alarm//in  ';
+			await start({ enableWebhooks: false, enableGenericWebhook: true, genericWebhookPath: path });
+			const url = `http://127.0.0.1:${frontend.normalizePort(listenPort)}${frontend.normalizeWebhookPath(path)}`;
+			const answer = await httpRequest({ url, method: 'POST', body: '{}' });
+			expect(answer.status, url).to.equal(200);
 		});
 
 		it('getNetworkInterfaces answers a list of address strings', async () => {
