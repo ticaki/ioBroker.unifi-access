@@ -4,7 +4,8 @@
 	],
 	"spec": [
 		"src/**/*.test.ts",
-		"test/mock/**/*.test.js"
+		"test/mock/**/*.test.js",
+		"test/contract/**/*.test.ts"
 	],
 	"watch-files": [
 		"src/**/*.ts",
