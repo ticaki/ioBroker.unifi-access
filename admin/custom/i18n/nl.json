@@ -5,9 +5,12 @@
     "auth_test_missingFields": "Vul eerst host en API-token in.",
     "auth_test_placeholder": "Het veld voor het API-token bevat nog de gemaskeerde plaatshouder. Maak het veld volledig leeg en voer het volledige token opnieuw in.",
     "auth_test_success": "Verbinding gelukt",
-    "auth_test_success_named": "Verbinding gelukt — controller: %s",
+    "auth_test_success_devices": "Verbinding gelukt — %s apparaten gevonden",
+    "auth_test_success_one_device": "Verbinding gelukt — 1 apparaat gevonden",
+    "auth_test_success_no_devices": "Verbinding gelukt — geen apparaten gevonden",
     "auth_test_error_unauthorized": "Token geweigerd (niet geautoriseerd).",
     "auth_test_error_network": "Controller niet bereikbaar (netwerkfout).",
+    "auth_test_error_tls": "Het certificaat van de controller kon niet worden gecontroleerd (%s). Vul het CA-certificaat in of schakel \"TLS-certificaat verifiëren\" uit.",
     "auth_test_error_unknown": "Verbindingstest mislukt.",
 
     "devices_title": "Gevonden UniFi Access-apparaten",

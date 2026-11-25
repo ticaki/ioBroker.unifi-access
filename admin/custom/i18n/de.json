@@ -5,9 +5,12 @@
     "auth_test_missingFields": "Bitte zuerst Host und API-Token eintragen.",
     "auth_test_placeholder": "Das API-Token-Feld enthält noch den maskierten Platzhalter. Bitte das Feld vollständig leeren und das Token komplett neu eingeben.",
     "auth_test_success": "Verbindung erfolgreich",
-    "auth_test_success_named": "Verbindung erfolgreich — Controller: %s",
+    "auth_test_success_devices": "Verbindung erfolgreich — %s Geräte gefunden",
+    "auth_test_success_one_device": "Verbindung erfolgreich — 1 Gerät gefunden",
+    "auth_test_success_no_devices": "Verbindung erfolgreich — keine Geräte gefunden",
     "auth_test_error_unauthorized": "Token wurde abgelehnt (unauthorized).",
     "auth_test_error_network": "Controller nicht erreichbar (Netzwerkfehler).",
+    "auth_test_error_tls": "Das Zertifikat des Controllers konnte nicht geprüft werden (%s). CA-Zertifikat hinterlegen oder „TLS-Zertifikat prüfen“ ausschalten.",
     "auth_test_error_unknown": "Verbindungstest fehlgeschlagen.",
 
     "devices_title": "Erkannte UniFi-Access-Geräte",

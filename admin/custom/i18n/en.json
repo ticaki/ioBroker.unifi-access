@@ -5,9 +5,12 @@
     "auth_test_missingFields": "Please enter host and API token first.",
     "auth_test_placeholder": "The API token field still contains the masked placeholder. Clear the field completely and enter the full token again.",
     "auth_test_success": "Connection successful",
-    "auth_test_success_named": "Connection successful — controller: %s",
+    "auth_test_success_devices": "Connection successful — %s devices found",
+    "auth_test_success_one_device": "Connection successful — 1 device found",
+    "auth_test_success_no_devices": "Connection successful — no devices found",
     "auth_test_error_unauthorized": "Token rejected (unauthorized).",
     "auth_test_error_network": "Cannot reach the controller (network error).",
+    "auth_test_error_tls": "The certificate of the controller could not be verified (%s). Enter the CA certificate or switch off \"Verify TLS certificate\".",
     "auth_test_error_unknown": "Connection test failed.",
 
     "devices_title": "Discovered UniFi Access devices",
