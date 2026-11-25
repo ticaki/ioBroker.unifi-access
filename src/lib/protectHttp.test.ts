@@ -160,6 +160,89 @@ describe('ProtectHttp (against a local UniFi OS / Protect stand-in)', () => {
 		await stub.stop();
 	});
 
+	// K-07: media URLs are fetched by dashboards without limit — each must not become a login attempt
+	describe('logins triggered by media requests (single flight, rate limited)', () => {
+		const logins = (): number => stub.requests.filter(r => r.url === '/api/auth/login').length;
+
+		it('concurrent login() calls share one attempt', async () => {
+			await Promise.all([protect.login(), protect.login(), protect.login()]);
+			expect(logins()).to.equal(1);
+			expect(protect.isLoggedIn()).to.equal(true);
+		});
+
+		it('parallel media requests without a session lead to exactly one login', async () => {
+			const results = await Promise.all([
+				protect.getSnapshot('cam1'),
+				protect.getSnapshot('cam2'),
+				protect.getEventMeta('evt1'),
+			]);
+			expect(results[0].equals(stub.snapshot)).to.equal(true);
+			expect(logins()).to.equal(1);
+		});
+
+		it('after a failed login, media requests fail fast without contacting the console until the interval is over', async () => {
+			let now = 1_000_000;
+			protect = new ProtectHttp({
+				host: stub.host,
+				username: 'viewer',
+				password: 'secret',
+				reloginIntervalMs: 30_000,
+				now: () => now,
+			});
+			stub.loginStatus = 429;
+			await rejection(protect.login());
+			const requests = stub.requests.length;
+
+			for (let i = 0; i < 5; i++) {
+				const err = await rejection(protect.getSnapshot('cam1'));
+				expect(err.message).to.match(/^Protect session not available — next login attempt possible in \d+ s$/);
+				expect(classifyProtectError(err)).to.equal('network');
+			}
+			expect(await protect.getEventMeta('evt1')).to.equal(null);
+			await rejection(protect.getClipStream('video/evt1.mp4'));
+			expect(stub.requests.length, 'nothing was sent to the console').to.equal(requests);
+
+			stub.loginStatus = 0;
+			now += 30_000;
+			const [a, b] = await Promise.all([protect.getSnapshot('cam1'), protect.getSnapshot('cam2')]);
+			expect(a.equals(stub.snapshot) && b.equals(stub.snapshot)).to.equal(true);
+			expect(logins()).to.equal(2);
+		});
+
+		it('an expired session with a failing re-login does not lead to a login per request', async () => {
+			let now = 1_000_000;
+			protect = new ProtectHttp({
+				host: stub.host,
+				username: 'viewer',
+				password: 'secret',
+				reloginIntervalMs: 30_000,
+				now: () => now,
+			});
+			await protect.login();
+			stub.expired.add('session-1');
+			stub.loginStatus = 429;
+			await rejection(protect.getSnapshot('cam1'));
+			expect(logins()).to.equal(2);
+			for (let i = 0; i < 5; i++) {
+				now += 1000;
+				await rejection(protect.getSnapshot('cam1'));
+			}
+			expect(logins(), 'no further login within 30 s').to.equal(2);
+		});
+
+		it('the explicit login() of the adapter is not held back by the interval', async () => {
+			let now = 0;
+			protect = new ProtectHttp({ host: stub.host, username: 'viewer', password: 'secret', now: () => now });
+			stub.loginStatus = 429;
+			await rejection(protect.login());
+			now += 1000;
+			stub.loginStatus = 0;
+			await protect.login();
+			expect(protect.isLoggedIn()).to.equal(true);
+			expect(logins()).to.equal(2);
+		});
+	});
+
 	describe('login()', () => {
 		it('fetches the CSRF token, posts the credentials and remembers the session', async () => {
 			expect(protect.isLoggedIn()).to.equal(false);

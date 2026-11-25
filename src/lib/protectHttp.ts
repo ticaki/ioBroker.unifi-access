@@ -16,7 +16,18 @@ export interface ProtectHttpOptions {
 	verifyTLS?: boolean;
 	/** PEM certificate (chain) to trust in addition to the system CAs. */
 	caCert?: string;
+	/**
+	 * Minimum distance between two logins that media requests trigger by themselves (default 30 s).
+	 * Media URLs are fetched by dashboards without any rate limit; every one of them must not become
+	 * a login attempt with the real credentials while the console refuses logins (rate limit).
+	 */
+	reloginIntervalMs?: number;
+	/** Clock (tests). */
+	now?: () => number;
 }
+
+/** Default for {@link ProtectHttpOptions.reloginIntervalMs}. */
+export const DEFAULT_RELOGIN_INTERVAL_MS = 30_000;
 
 /** Upper bound for a camera snapshot held in memory (a JPEG still is far smaller). */
 export const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
@@ -53,10 +64,18 @@ export class ProtectHttp {
 	private sessionCookie = '';
 	private csrfToken = '';
 	private _loggedIn = false;
+	/** The login that is running — every caller waits for the same one (single flight). */
+	private loginInFlight: Promise<void> | null = null;
+	/** When the last login attempt failed (ms, own clock); 0 = the last attempt succeeded or none was made. */
+	private lastLoginFailureAt = 0;
+	private readonly reloginIntervalMs: number;
+	private readonly now: () => number;
 
 	constructor(options: ProtectHttpOptions) {
 		this.username = options.username;
 		this.password = options.password;
+		this.reloginIntervalMs = options.reloginIntervalMs ?? DEFAULT_RELOGIN_INTERVAL_MS;
+		this.now = options.now ?? Date.now;
 		const port = options.port && options.port !== 443 ? `:${options.port}` : '';
 		this.client = axios.create({
 			baseURL: `https://${options.host}${port}`,
@@ -73,7 +92,56 @@ export class ProtectHttp {
 		return this._loggedIn;
 	}
 
-	async login(): Promise<void> {
+	/**
+	 * Log in. Concurrent calls share one attempt. This is the explicit login of the adapter (start and
+	 * its own retry with back-off); logins that media requests need go through {@link relogin}.
+	 */
+	login(): Promise<void> {
+		if (!this.loginInFlight) {
+			this.loginInFlight = this.performLogin().then(
+				() => {
+					this.lastLoginFailureAt = 0;
+					this.loginInFlight = null;
+				},
+				(err: unknown) => {
+					this.lastLoginFailureAt = this.now();
+					this.loginInFlight = null;
+					throw err;
+				},
+			);
+		}
+		return this.loginInFlight;
+	}
+
+	/**
+	 * Login on behalf of a media request (session missing or expired). Joins a running login; refuses
+	 * without contacting the console when the last attempt failed less than `reloginIntervalMs` ago
+	 * (rate limit, console not reachable — another attempt right away would only prolong it).
+	 */
+	private relogin(): Promise<void> {
+		if (this.loginInFlight) {
+			return this.loginInFlight;
+		}
+		const waitMs = this.lastLoginFailureAt + this.reloginIntervalMs - this.now();
+		if (this.lastLoginFailureAt > 0 && waitMs > 0) {
+			return Promise.reject(
+				new ProtectLoginError(
+					'no-session',
+					`Protect session not available — next login attempt possible in ${Math.ceil(waitMs / 1000)} s`,
+				),
+			);
+		}
+		return this.login();
+	}
+
+	/** Before a media request: without a session, log in first (or fail fast while logins are on hold). */
+	private async ensureSession(): Promise<void> {
+		if (!this._loggedIn) {
+			await this.relogin();
+		}
+	}
+
+	private async performLogin(): Promise<void> {
 		// Step 1: fetch initial CSRF token from root
 		let initialCsrf = '';
 		try {
@@ -124,6 +192,7 @@ export class ProtectHttp {
 			// ids come from system-log entries / request URLs; never let them shape the request path
 			throw new Error('Protect camera id rejected');
 		}
+		await this.ensureSession();
 		return this.withRetry(async retry => {
 			const r = await this.client.get<ArrayBuffer>(
 				`/proxy/protect/api/cameras/${encodeURIComponent(cameraId)}/snapshot`,
@@ -150,6 +219,7 @@ export class ProtectHttp {
 			return null;
 		}
 		try {
+			await this.ensureSession();
 			const r = await this.client.get<Record<string, unknown>>(
 				`/proxy/protect/api/events/${encodeURIComponent(eventId)}`,
 				{ headers: this.authHeaders(), validateStatus: s => s < 500 },
@@ -157,7 +227,7 @@ export class ProtectHttp {
 			this.extractSession(r.headers);
 			if (r.status === 401 || r.status === 403) {
 				this._loggedIn = false;
-				await this.login();
+				await this.relogin();
 				const r2 = await this.client.get<Record<string, unknown>>(
 					`/proxy/protect/api/events/${encodeURIComponent(eventId)}`,
 					{ headers: this.authHeaders(), validateStatus: s => s < 500 },
@@ -203,7 +273,9 @@ export class ProtectHttp {
 	 * @param clipPath Clip location reported by Protect
 	 */
 	async getClipStream(clipPath: string): Promise<ProtectClipStream> {
-		const r = await this.client.get<Readable>(this.clipRequestPath(clipPath), {
+		const path = this.clipRequestPath(clipPath);
+		await this.ensureSession();
+		const r = await this.client.get<Readable>(path, {
 			headers: this.authHeaders(),
 			responseType: 'stream',
 			validateStatus: s => s < 500,
@@ -257,9 +329,9 @@ export class ProtectHttp {
 		if (result !== null) {
 			return result;
 		}
-		// null signals auth failure → re-login + retry
+		// null signals auth failure → re-login (shared, rate-limited) + retry
 		this._loggedIn = false;
-		await this.login();
+		await this.relogin();
 		const retried = await fn(true);
 		if (retried === null) {
 			throw new Error('Protect auth failed after re-login');
