@@ -37,6 +37,17 @@ describe('DeviceManagement', () => {
 		expect(screen.queryByRole('alert')).toBeNull();
 	});
 
+	it('uses colours for the chips that are readable in the dark theme, too', async () => {
+		const { props } = makeHarness({ answers: { listDevices: { devices: [ULTRA] } } });
+		const view = render(<DeviceManagement {...props} />);
+
+		const chip = (await screen.findByText('event thumbnail')).closest('.MuiChip-root');
+		expect(chip?.className).toContain('MuiChip-colorPrimary');
+		expect(screen.getByText('doorbell').closest('.MuiChip-root')?.className).toContain('MuiChip-colorPrimary');
+		// the secondary colour of the admin's dark theme has too little contrast on its background
+		expect(view.container.querySelector('.MuiChip-colorSecondary')).toBeNull();
+	});
+
 	it('explains an empty list', async () => {
 		const { props } = makeHarness({ answers: { listDevices: { devices: [] } } });
 		render(<DeviceManagement {...props} />);

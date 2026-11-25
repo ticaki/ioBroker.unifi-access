@@ -127,14 +127,12 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 	}
 
 	private renderCapabilityChip(capability: string): React.JSX.Element {
-		const map: Record<
-			string,
-			{ label: string; icon?: React.JSX.Element; color: 'primary' | 'secondary' | 'default' }
-		> = {
+		const map: Record<string, { label: string; icon?: React.JSX.Element; color: 'primary' | 'default' }> = {
 			'event-thumbnail': {
 				label: I18n.t('devices_cap_event_thumbnail'),
 				icon: <ImageIcon fontSize="small" />,
-				color: 'secondary',
+				// not "secondary": in the dark theme of the admin that is a dark blue on a dark background
+				color: 'primary',
 			},
 			doorbell: {
 				label: I18n.t('devices_cap_doorbell'),
