@@ -11,7 +11,11 @@
 import { expect } from 'chai';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
+import type * as OsModule from 'node:os';
 import { join } from 'node:path';
+// the module object itself (not an import copy): its networkInterfaces is stubbed for the URL tests
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const osModule = require('node:os') as typeof OsModule;
 import sinon from 'sinon';
 
 import {
@@ -4168,6 +4172,74 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 	});
 
 	// U-10: behind a reverse proxy or port forwarding the listen address is not what clients and the controller use
+	describe('URL from the network interfaces when listening on all addresses (RT-02)', () => {
+		let stub: sinon.SinonStub | undefined;
+		afterEach(() => {
+			stub?.restore();
+			stub = undefined;
+		});
+
+		const fakeInterfaces = (
+			interfaces: Record<string, { address: string; family: string; internal: boolean }[]>,
+		): void => {
+			stub = sinon
+				.stub(osModule, 'networkInterfaces')
+				.returns(
+					Object.fromEntries(
+						Object.entries(interfaces).map(([name, list]) => [
+							name,
+							list.map(entry => ({ netmask: '', mac: '00:00:00:00:00:00', cidr: null, ...entry })),
+						]),
+					) as unknown as ReturnType<typeof osModule.networkInterfaces>,
+				);
+		};
+
+		it('registers the first external IPv4 address — not loopback, not IPv6', async () => {
+			fakeInterfaces({
+				lo: [
+					{ address: '127.0.0.1', family: 'IPv4', internal: true },
+					{ address: '::1', family: 'IPv6', internal: true },
+				],
+				eth0: [
+					{ address: '2001:db8::5', family: 'IPv6', internal: false },
+					{ address: '192.0.2.10', family: 'IPv4', internal: false },
+				],
+				eth1: [{ address: '198.51.100.7', family: 'IPv4', internal: false }],
+			});
+			const instance = await startConnected({ listenIp: '0.0.0.0', enableThumbnailServer: true });
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+			expect(mock.webhookEndpoints.map(e => e.endpoint)).to.deep.equal([
+				`http://192.0.2.10:${listenPort}/unifi-access-webhook`,
+			]);
+			const info = await instance.request('getServerInfo');
+			expect(info).to.include({ running: true, baseUrl: `http://192.0.2.10:${listenPort}` });
+			// it listens on all addresses: the loopback address reaches it too
+			expect((await httpRequest({ url: `http://127.0.0.1:${listenPort}/` })).status).to.equal(404);
+		});
+
+		it('without an external IPv4 address: one warning, nothing registered, no base URL', async () => {
+			fakeInterfaces({
+				lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+				eth0: [{ address: '2001:db8::5', family: 'IPv6', internal: false }],
+			});
+			const instance = await startConnected({ listenIp: '0.0.0.0' });
+			await waitFor(() => instance.log.of('warn').length > 0, { description: 'warning' });
+			expect(instance.log.of('warn')).to.deep.equal([
+				'Webhook registration skipped: no usable network address found.',
+			]);
+			expect(mock.webhookEndpoints).to.deep.equal([]);
+			expect(instance.val('info.webhookRegistered')).to.equal(false);
+			expect((await instance.request('getServerInfo')).baseUrl).to.equal(null);
+		});
+
+		it('an empty listen address is treated like 0.0.0.0', async () => {
+			fakeInterfaces({ eth0: [{ address: '192.0.2.10', family: 'IPv4', internal: false }] });
+			const instance = await startConnected({ listenIp: '' });
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+			expect(mock.webhookEndpoints[0].endpoint).to.equal(`http://192.0.2.10:${listenPort}/unifi-access-webhook`);
+		});
+	});
+
 	describe('public base URL (publicBaseUrl)', () => {
 		const PUBLIC = 'https://iobroker.example.com/unifi';
 
