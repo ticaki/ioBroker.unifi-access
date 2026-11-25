@@ -4,6 +4,7 @@
  */
 import { useMemo, useSyncExternalStore } from 'react';
 import { vi } from 'vitest';
+import { qualifyStateId } from '../stateId';
 
 export const ADAPTER_INSTANCE = 0;
 export const ADAPTER_NAMESPACE = 'unifi-access.0';
@@ -14,8 +15,7 @@ let loading = new Set<string>();
 const listeners = new Set<() => void>();
 
 export function fullId(id: string): string {
-    // ids of other objects (system.adapter.<instance>.alive) are passed on as they are
-    return id.startsWith(`${ADAPTER_NAMESPACE}.`) || id.startsWith('system.') ? id : `${ADAPTER_NAMESPACE}.${id}`;
+    return qualifyStateId(id, ADAPTER_NAMESPACE);
 }
 
 function makeState(val: ioBroker.StateValue, ts: number): ioBroker.State {

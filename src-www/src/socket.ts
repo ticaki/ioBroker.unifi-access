@@ -1,5 +1,6 @@
 import { Connection } from '@iobroker/socket-client';
 import { useEffect, useState, useSyncExternalStore } from 'react';
+import { qualifyStateId } from './stateId';
 
 /**
  * Instance number the panel shows: `index.html?instance=1` selects `unifi-access.1`, default is 0.
@@ -147,8 +148,7 @@ export function useConnectionStatus(): boolean {
 }
 
 export function fullId(id: string): string {
-    // ids of other objects (system.adapter.<instance>.alive) are passed on as they are
-    return id.startsWith(`${ADAPTER_NAMESPACE}.`) || id.startsWith('system.') ? id : `${ADAPTER_NAMESPACE}.${id}`;
+    return qualifyStateId(id, ADAPTER_NAMESPACE);
 }
 
 export function useIobState(id: string | null): ioBroker.State | null | undefined {
