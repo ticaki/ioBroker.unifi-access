@@ -205,9 +205,14 @@ describe('WebhookHandler (UniFi Access webhook receiver)', () => {
 				expect(received).to.deep.equal([]);
 				const warnings = logger.of('warn');
 				expect(warnings).to.have.length(1);
-				expect(warnings[0]).to.match(
-					/^Webhook rejected: its timestamp differs by 360\d s from the clock of this host \(allowed: 300 s\)\. Check date and time/,
-				);
+				const match =
+					/^Webhook rejected: its timestamp differs by (\d+) s from the clock of this host \(allowed: 300 s\)\. Check date and time/.exec(
+						warnings[0],
+					);
+				expect(match, warnings[0]).to.not.equal(null);
+				// signed with "now ± 3600 s"; a second boundary between signing and checking (slow runner)
+				// shifts the difference by a few seconds in either direction
+				expect(Number(match![1])).to.be.closeTo(3600, 5);
 			});
 		}
 
