@@ -23,6 +23,7 @@
 
     "actor_select_label": "Użytkownik otwierający (widoczny w dziennikach)",
     "actor_select_none": "Brak (użyj nazwy tokena API)",
+    "actor_select_unknown": "Użytkownika nie ma na liście (ID: %s)",
     "actor_select_loading": "Ładowanie użytkowników…",
     "actor_select_error": "Nie można załadować użytkowników. Czy adapter działa?",
     "actor_select_refresh": "Odśwież listę użytkowników",
@@ -32,5 +33,8 @@
     "generic_webhook_url_loading": "Ładowanie interfejsów sieciowych…",
     "generic_webhook_url_no_addresses": "Nie znaleziono adresów interfejsów sieciowych.",
     "generic_webhook_copy": "Kopiuj do schowka",
-    "generic_webhook_copied": "Skopiowano!"
+    "generic_webhook_copied": "Skopiowano!",
+
+    "adapter_not_running": "Instancja adaptera nie jest uruchomiona. Uruchom ją i spróbuj ponownie.",
+    "adapter_no_response": "Adapter nie odpowiedział na czas."
 }

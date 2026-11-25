@@ -23,6 +23,7 @@
 
     "actor_select_label": "Инициатор разблокировки (отображается в журналах)",
     "actor_select_none": "Нет (использовать имя API-токена)",
+    "actor_select_unknown": "Пользователя нет в списке (ID: %s)",
     "actor_select_loading": "Загрузка пользователей…",
     "actor_select_error": "Не удалось загрузить пользователей. Запущен ли адаптер?",
     "actor_select_refresh": "Обновить список пользователей",
@@ -32,5 +33,8 @@
     "generic_webhook_url_loading": "Загрузка сетевых интерфейсов…",
     "generic_webhook_url_no_addresses": "Адреса сетевых интерфейсов не найдены.",
     "generic_webhook_copy": "Копировать в буфер обмена",
-    "generic_webhook_copied": "Скопировано!"
+    "generic_webhook_copied": "Скопировано!",
+
+    "adapter_not_running": "Экземпляр адаптера не запущен. Запустите его и повторите попытку.",
+    "adapter_no_response": "Адаптер не ответил вовремя."
 }

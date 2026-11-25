@@ -23,6 +23,7 @@
 
     "actor_select_label": "Utente di apertura (mostrato nei log)",
     "actor_select_none": "Nessuno (usa il nome del token API)",
+    "actor_select_unknown": "Utente non presente nell'elenco (ID: %s)",
     "actor_select_loading": "Caricamento utenti…",
     "actor_select_error": "Impossibile caricare gli utenti. L'adapter è in esecuzione?",
     "actor_select_refresh": "Aggiorna elenco utenti",
@@ -32,5 +33,8 @@
     "generic_webhook_url_loading": "Caricamento interfacce di rete…",
     "generic_webhook_url_no_addresses": "Nessun indirizzo di interfaccia di rete trovato.",
     "generic_webhook_copy": "Copia negli appunti",
-    "generic_webhook_copied": "Copiato!"
+    "generic_webhook_copied": "Copiato!",
+
+    "adapter_not_running": "L'istanza dell'adapter non è in esecuzione. Avviala e riprova.",
+    "adapter_no_response": "L'adapter non ha risposto in tempo."
 }

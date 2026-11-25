@@ -23,6 +23,7 @@
 
     "actor_select_label": "Türöffner-Akteur (in Logs angezeigt)",
     "actor_select_none": "Keiner (API-Token-Name verwenden)",
+    "actor_select_unknown": "Benutzer nicht in der Liste (ID: %s)",
     "actor_select_loading": "Benutzer werden geladen…",
     "actor_select_error": "Benutzer konnten nicht geladen werden. Läuft der Adapter?",
     "actor_select_refresh": "Benutzerliste aktualisieren",
@@ -32,5 +33,8 @@
     "generic_webhook_url_loading": "Netzwerk-Interfaces werden geladen…",
     "generic_webhook_url_no_addresses": "Keine Netzwerk-Interface-Adressen gefunden.",
     "generic_webhook_copy": "In Zwischenablage kopieren",
-    "generic_webhook_copied": "Kopiert!"
+    "generic_webhook_copied": "Kopiert!",
+
+    "adapter_not_running": "Die Adapter-Instanz läuft nicht. Bitte starten und erneut versuchen.",
+    "adapter_no_response": "Der Adapter hat nicht rechtzeitig geantwortet."
 }

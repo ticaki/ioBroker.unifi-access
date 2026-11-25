@@ -23,6 +23,7 @@
 
     "actor_select_label": "Utilizador de abertura (apresentado nos registos)",
     "actor_select_none": "Nenhum (usar o nome do token da API)",
+    "actor_select_unknown": "Utilizador não está na lista (ID: %s)",
     "actor_select_loading": "A carregar utilizadores…",
     "actor_select_error": "Não foi possível carregar os utilizadores. O adaptador está em execução?",
     "actor_select_refresh": "Atualizar lista de utilizadores",
@@ -32,5 +33,8 @@
     "generic_webhook_url_loading": "A carregar interfaces de rede…",
     "generic_webhook_url_no_addresses": "Não foram encontrados endereços de interfaces de rede.",
     "generic_webhook_copy": "Copiar para a área de transferência",
-    "generic_webhook_copied": "Copiado!"
+    "generic_webhook_copied": "Copiado!",
+
+    "adapter_not_running": "A instância do adaptador não está em execução. Inicie-a e tente novamente.",
+    "adapter_no_response": "O adaptador não respondeu a tempo."
 }

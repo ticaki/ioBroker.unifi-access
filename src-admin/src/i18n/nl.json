@@ -23,6 +23,7 @@
 
     "actor_select_label": "Ontgrendelende gebruiker (zichtbaar in logboeken)",
     "actor_select_none": "Geen (naam van het API-token gebruiken)",
+    "actor_select_unknown": "Gebruiker niet in de lijst (ID: %s)",
     "actor_select_loading": "Gebruikers laden…",
     "actor_select_error": "Gebruikers konden niet worden geladen. Draait de adapter?",
     "actor_select_refresh": "Gebruikerslijst vernieuwen",
@@ -32,5 +33,8 @@
     "generic_webhook_url_loading": "Netwerkinterfaces laden…",
     "generic_webhook_url_no_addresses": "Geen netwerkinterface-adressen gevonden.",
     "generic_webhook_copy": "Naar klembord kopiëren",
-    "generic_webhook_copied": "Gekopieerd!"
+    "generic_webhook_copied": "Gekopieerd!",
+
+    "adapter_not_running": "De adapterinstantie draait niet. Start deze en probeer het opnieuw.",
+    "adapter_no_response": "De adapter heeft niet op tijd gereageerd."
 }

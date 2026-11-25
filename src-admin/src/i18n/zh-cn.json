@@ -23,6 +23,7 @@
 
     "actor_select_label": "开门操作者(显示在日志中)",
     "actor_select_none": "无(使用 API 令牌名称)",
+    "actor_select_unknown": "用户不在列表中 (ID: %s)",
     "actor_select_loading": "正在加载用户…",
     "actor_select_error": "无法加载用户。适配器正在运行吗?",
     "actor_select_refresh": "刷新用户列表",
@@ -32,5 +33,8 @@
     "generic_webhook_url_loading": "正在加载网络接口…",
     "generic_webhook_url_no_addresses": "未找到网络接口地址。",
     "generic_webhook_copy": "复制到剪贴板",
-    "generic_webhook_copied": "已复制!"
+    "generic_webhook_copied": "已复制!",
+
+    "adapter_not_running": "适配器实例未运行。请启动后重试。",
+    "adapter_no_response": "适配器未及时响应。"
 }

@@ -23,6 +23,7 @@
 
     "actor_select_label": "Ініціатор розблокування (показується в журналах)",
     "actor_select_none": "Немає (використовувати назву API-токена)",
+    "actor_select_unknown": "Користувача немає у списку (ID: %s)",
     "actor_select_loading": "Завантаження користувачів…",
     "actor_select_error": "Не вдалося завантажити користувачів. Чи запущено адаптер?",
     "actor_select_refresh": "Оновити список користувачів",
@@ -32,5 +33,8 @@
     "generic_webhook_url_loading": "Завантаження мережевих інтерфейсів…",
     "generic_webhook_url_no_addresses": "Адреси мережевих інтерфейсів не знайдено.",
     "generic_webhook_copy": "Копіювати до буфера обміну",
-    "generic_webhook_copied": "Скопійовано!"
+    "generic_webhook_copied": "Скопійовано!",
+
+    "adapter_not_running": "Екземпляр адаптера не запущено. Запустіть його та повторіть спробу.",
+    "adapter_no_response": "Адаптер не відповів вчасно."
 }
