@@ -2020,7 +2020,9 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				},
 				{ description: 'lockdown=true confirmed' },
 			);
-			expect(mock.findRequests({ method: 'PUT', path: '/doors/settings/emergency' }).map(r => r.body)).to.deep.equal([
+			expect(
+				mock.findRequests({ method: 'PUT', path: '/doors/settings/emergency' }).map(r => r.body),
+			).to.deep.equal([
 				{ lockdown: false, evacuation: true },
 				{ lockdown: true, evacuation: false },
 			]);
