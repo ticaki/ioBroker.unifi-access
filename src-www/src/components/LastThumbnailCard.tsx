@@ -1,5 +1,5 @@
 import { Box, Card, CardContent, MenuItem, Select, Stack, Typography } from '@mui/material';
-import { useEffect, useMemo, useState } from 'react';
+import { type JSX, useEffect, useMemo, useState } from 'react';
 import { ADAPTER_NAMESPACE, useIobState, useIobStates } from '../socket';
 import { useSettings } from '../settings';
 
@@ -77,9 +77,7 @@ export function LastThumbnailCard(): JSX.Element {
             <CardContent>
                 <Stack
                     direction="row"
-                    justifyContent="space-between"
-                    alignItems="center"
-                    sx={{ mb: 1 }}
+                    sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 1 }}
                 >
                     <Typography variant="h6">Last event image</Typography>
                     <Select

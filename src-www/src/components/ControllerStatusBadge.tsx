@@ -1,6 +1,7 @@
+import type { JSX } from 'react';
 import { Chip } from '@mui/material';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
-import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutlineOutlined';
 import { useConnectionStatus, useIobState } from '../socket';
 
 export function ControllerStatusBadge(): JSX.Element {

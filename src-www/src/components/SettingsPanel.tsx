@@ -1,6 +1,6 @@
 import { Box, Divider, Drawer, FormControlLabel, IconButton, Slider, Stack, Switch, Tooltip, Typography } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
-import { useState } from 'react';
+import { type JSX, useState } from 'react';
 import { useSettings } from '../settings';
 
 export function SettingsPanel(): JSX.Element {

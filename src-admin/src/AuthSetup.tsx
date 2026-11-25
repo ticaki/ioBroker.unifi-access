@@ -1,8 +1,8 @@
-import React from 'react';
+import type React from 'react';
 import { Alert, Box, Button, CircularProgress, Snackbar, Stack, Tooltip } from '@mui/material';
 import WifiTetheringIcon from '@mui/icons-material/WifiTethering';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
-import { I18n } from '@iobroker/adapter-react-v5';
+import { I18n } from '@iobroker/gui-components';
 
 interface AuthSetupState extends ConfigGenericState {
 	testing: boolean;
@@ -51,8 +51,7 @@ class AuthSetup extends ConfigGeneric<ConfigGenericProps, AuthSetupState> {
 				{ host, port, token, verifyTLS },
 			);
 			const r = raw as
-				| { ok?: boolean; error?: /*'unauthorized' | 'network' |*/ string; controllerName?: string }
-				| undefined;
+				{ ok?: boolean; error?: /*'unauthorized' | 'network' |*/ string; controllerName?: string } | undefined;
 			if (r?.ok) {
 				this.setState({
 					testing: false,
