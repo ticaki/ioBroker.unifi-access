@@ -115,11 +115,17 @@ interface SettingsCtx {
      * @param persist false: only change what is shown (e.g. while a slider is dragged), do not store it yet
      */
     update: (patch: Partial<AppSettings>, persist?: boolean) => void;
+    /**
+     * A drag that ended without its final change (the slider was unmounted while it was dragged, e.g. the
+     * drawer closed with Escape - MUI then sends no onChangeCommitted): store what is shown.
+     */
+    endDrag: () => void;
 }
 
 export const SettingsContext = createContext<SettingsCtx>({
     settings: DEFAULTS,
     update: () => {},
+    endDrag: () => {},
 });
 
 export function useSettingsProvider(): SettingsCtx {
@@ -203,7 +209,20 @@ export function useSettingsProvider(): SettingsCtx {
         [apply, store],
     );
 
-    return useMemo(() => ({ settings: local, update }), [local, update]);
+    const endDrag = useCallback(() => {
+        if (Object.keys(draft.current).length === 0) {
+            return;
+        }
+        if (!loaded.current) {
+            // stored once the settings were read (see update)
+            pending.current = { patch: { ...pending.current?.patch, ...draft.current }, persist: true };
+            draft.current = {};
+            return;
+        }
+        store(latest.current);
+    }, [store]);
+
+    return useMemo(() => ({ settings: local, update, endDrag }), [local, update, endDrag]);
 }
 
 export function useSettings(): SettingsCtx {

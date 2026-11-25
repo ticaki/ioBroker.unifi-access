@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { JSX } from 'react';
 import { SettingsPanel } from './SettingsPanel';
 import { DEFAULTS, SettingsContext, useSettingsProvider, type AppSettings } from '../settings';
-import { resetSocketMock, setIobState, setStates } from '../test/socketMock';
+import { resetSocketMock, setIobState, setStates, updateState } from '../test/socketMock';
 
 vi.mock('../socket', () => import('../test/socketMock'));
 
@@ -79,6 +79,37 @@ describe('SettingsPanel', () => {
 
         expect(stored()).toEqual([{ ...DEFAULTS, [key]: value }]);
         expect(screen.getByText(text)).toBeTruthy();
+    });
+
+    // R3F U-1: the drawer closes (Escape) while a slider is still being dragged. The slider is unmounted with
+    // it and removes its listeners - MUI never sends onChangeCommitted for this drag.
+    it('a drag that ends with the drawer is stored, and later changes from elsewhere are taken over', async () => {
+        setStates({ 'admin.uiSettings': JSON.stringify(DEFAULTS) });
+        function WithProbe(): JSX.Element {
+            const ctx = useSettingsProvider();
+            return (
+                <SettingsContext.Provider value={ctx}>
+                    <SettingsPanel />
+                    <output data-testid="settings">{JSON.stringify(ctx.settings)}</output>
+                </SettingsContext.Provider>
+            );
+        }
+        const shown = (): AppSettings => JSON.parse(screen.getByTestId('settings').textContent ?? '{}') as AppSettings;
+        render(<WithProbe />);
+        fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+        const root = screen.getByRole('slider', { name: 'Event thumbnail width' }).closest('.MuiSlider-root')!;
+        root.getBoundingClientRect = () =>
+            ({ left: 0, top: 0, width: 200, height: 20, right: 200, bottom: 20, x: 0, y: 0 }) as DOMRect;
+        fireEvent.pointerDown(root, { button: 0, clientX: 152, clientY: 10, pointerId: 1, pointerType: 'mouse' });
+        expect(shown().thumbWidth).toBe(152);
+        expect(stored()).toEqual([]);
+
+        fireEvent.keyDown(screen.getByRole('presentation'), { key: 'Escape' });
+        await waitFor(() => expect(screen.queryByRole('slider')).toBeNull());
+
+        expect(stored()).toEqual([{ ...DEFAULTS, thumbWidth: 152 }]);
+        act(() => updateState('admin.uiSettings', JSON.stringify({ ...DEFAULTS, thumbWidth: 40, maxWidth: 900 })));
+        expect(shown()).toEqual({ ...DEFAULTS, thumbWidth: 40, maxWidth: 900 });
     });
 
     it('starts from the stored settings', () => {
