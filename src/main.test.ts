@@ -1264,6 +1264,89 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			});
 		});
 
+		describe('a late webhook of an earlier call does not push aside the call that is ringing (R2K-01)', () => {
+			const incoming = (requestId: string): Promise<unknown> =>
+				mock.deliverWebhook(
+					fixtures.webhookEvents.doorbellIncoming({
+						door: door(DOOR_3855),
+						device: mock.findDevice(DEVICE_G2_PRO)!,
+						requestId,
+					}),
+				);
+			const completed = (requestId: string): Promise<unknown> =>
+				mock.deliverWebhook(
+					fixtures.webhookEvents.doorbellCompleted({
+						door: door(DOOR_3855),
+						device: hub(),
+						reasonCode: 108,
+						requestId,
+					}),
+				);
+			const logged = (type: string): number => events().filter(e => e.type === type).length;
+
+			/**
+			 * Late webhooks of call A while call B rings; then the end of B.
+			 *
+			 * @param instance The adapter
+			 * @param callB Published call id of B
+			 */
+			async function lateWebhooksOfA(instance: FakeAdapter, callB: string): Promise<void> {
+				await incoming('CALL_A');
+				await waitFor(() => logged('access.doorbell.incoming') === 1, { description: 'late incoming of A' });
+				await delay(30);
+				expect(instance.val('doorbell.activeCallId'), 'after the late incoming of A').to.equal(callB);
+				expect(instance.val('doorbell.activeFromDevice')).to.equal('A2 Door');
+
+				await completed('CALL_A');
+				await waitFor(() => logged('access.doorbell.completed') === 1, { description: 'completed of A' });
+				await delay(30);
+				expect(instance.val('doorbell.activeCallId'), 'after the completed of A').to.equal(callB);
+
+				mock.emitRemoteViewChange(400, { data: { remote_call_request_id: 'CALL_B' } });
+				await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'B ended' });
+			}
+
+			it('call A ended by WebSocket before B rang', async () => {
+				const instance = await startConnected();
+				mock.emitRemoteView({ data: { request_id: 'CALL_A', device_id: DEVICE_G2_PRO } });
+				await waitFor(() => instance.val('doorbell.activeCallId') !== null, { description: 'ring A' });
+				mock.emitRemoteViewChange(108, { data: { remote_call_request_id: 'CALL_A' } });
+				await waitFor(() => instance.val('doorbell.activeCallId') === null, { description: 'A ended' });
+				const b = mock.emitRemoteView({
+					data: { request_id: 'CALL_B', device_id: DEVICE_HUB, door_name: 'A2 Door' },
+				});
+				await waitFor(() => instance.val('doorbell.activeCallId') === b.event_object_id, {
+					description: 'ring B',
+				});
+				await lateWebhooksOfA(instance, String(b.event_object_id));
+			});
+
+			it('call A replaced by B without an end event in between', async () => {
+				const instance = await startConnected();
+				mock.emitRemoteView({ data: { request_id: 'CALL_A', device_id: DEVICE_G2_PRO } });
+				await waitFor(() => instance.val('doorbell.activeCallId') !== null, { description: 'ring A' });
+				const b = mock.emitRemoteView({
+					data: { request_id: 'CALL_B', device_id: DEVICE_HUB, door_name: 'A2 Door' },
+				});
+				await waitFor(() => instance.val('doorbell.activeCallId') === b.event_object_id, {
+					description: 'ring B',
+				});
+				await lateWebhooksOfA(instance, String(b.event_object_id));
+			});
+
+			it('a webhook call that is not over yet still replaces a call whose end was missed', async () => {
+				const instance = await startConnected();
+				await incoming('request-1');
+				await waitFor(() => instance.val('doorbell.activeCallId') === 'request-1', { description: 'call 1' });
+				await completed('request-0');
+				await incoming('request-2');
+				await waitFor(() => instance.val('doorbell.activeCallId') === 'request-2', { description: 'call 2' });
+				// and the WebSocket may report a call again whose id was noted as over
+				mock.emitRemoteView({ data: { request_id: 'request-1' } });
+				await waitFor(() => instance.val('doorbell.activeCallId') !== 'request-2', { description: 'ws ring' });
+			});
+		});
+
 		it('the webhook does not replace the call id already set by the WebSocket event of the same call', async () => {
 			const instance = await startConnected();
 			const ring = mock.emitRemoteView({ data: { request_id: 'request-0815' } });

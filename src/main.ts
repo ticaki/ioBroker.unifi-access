@@ -198,6 +198,8 @@ class UnifiAccess extends utils.Adapter {
 	 */
 	private readonly recentDoorUnlocks = new Map<string, number>();
 	private static readonly UNLOCK_DEDUP_MS = 4000;
+	/** Upper bound of the memory of finished doorbell calls. */
+	private static readonly FINISHED_DOORBELL_CALLS_MAX = 20;
 
 	/** Last value the adapter acknowledged per control state — what an invalid write is reset to. */
 	private readonly lastAckedControlValues = new Map<string, number>();
@@ -213,6 +215,11 @@ class UnifiAccess extends utils.Adapter {
 	private readonly lockRuleUnavailableDoors = new Set<string>();
 	/** The doorbell call currently published in doorbell.active*. */
 	private activeDoorbellCall: { requestId?: string; fromWebhook: boolean } | null = null;
+	/**
+	 * Request ids of calls that are over (end event seen, time limit, or replaced by a newer call) →
+	 * when that was noted (ms epoch). A late webhook of such a call must not publish it again.
+	 */
+	private readonly finishedDoorbellCalls = new Map<string, number>();
 	/** Periodic check that the webhook endpoint is still registered at the controller. */
 	private webhookCheckInterval: ioBroker.Interval | undefined;
 	/** Start of the last resync after a reconnect (ms epoch, 0 = none yet). */
@@ -1410,6 +1417,23 @@ class UnifiAccess extends utils.Adapter {
 		authoritative: boolean,
 	): Promise<void> {
 		const current = this.activeDoorbellCall;
+		if (
+			!authoritative &&
+			requestId !== undefined &&
+			current?.requestId !== requestId &&
+			this.isFinishedDoorbellCall(requestId)
+		) {
+			// Webhooks arrive after the WebSocket event of the same call. A call that already ended, or
+			// that a newer call has replaced, is not ringing any more: publishing it would push aside the
+			// call that is (and its own end event would then clear everything). Webhooks carry no event
+			// time, so the order is all there is to go by.
+			this.log.debug(`Doorbell: webhook for call ${requestId}, which is already over — not published.`);
+			return;
+		}
+		if (authoritative && requestId !== undefined) {
+			// the WebSocket reports it ringing: whatever was noted about this id is out of date
+			this.finishedDoorbellCalls.delete(requestId);
+		}
 		if (current) {
 			const sameCall =
 				requestId === undefined || current.requestId === undefined || current.requestId === requestId;
@@ -1423,6 +1447,10 @@ class UnifiAccess extends utils.Adapter {
 				// the WebSocket event of the call the webhook already announced: keep the published id
 				return;
 			}
+		}
+		if (current?.requestId !== undefined && current.requestId !== requestId) {
+			// replaced by a newer call: the earlier one is over
+			this.noteFinishedDoorbellCall(current.requestId);
 		}
 		this.activeDoorbellCall = { requestId, fromWebhook: !authoritative };
 		await this.setState('doorbell.activeCallId', { val: callId, ack: true });
@@ -1456,6 +1484,12 @@ class UnifiAccess extends utils.Adapter {
 	 */
 	private async endDoorbellCall(requestId: string | undefined, what: string): Promise<void> {
 		const current = this.activeDoorbellCall;
+		if (requestId !== undefined) {
+			this.noteFinishedDoorbellCall(requestId);
+		} else if (current?.requestId !== undefined) {
+			// an end without id clears the published call (see above) — that call is over as well
+			this.noteFinishedDoorbellCall(current.requestId);
+		}
 		if (current && requestId !== undefined && current.requestId !== undefined && current.requestId !== requestId) {
 			this.log.debug(
 				`Doorbell: ${what} for call ${requestId}, but call ${current.requestId} is published — it stays active.`,
@@ -1463,6 +1497,32 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		await this.clearActiveDoorbellCall();
+	}
+
+	/**
+	 * Remember that a call is over. The memory is short (the time limit of a call) and small: a late
+	 * webhook arrives seconds after the WebSocket event, not minutes.
+	 *
+	 * @param requestId Request id of the call
+	 */
+	private noteFinishedDoorbellCall(requestId: string): void {
+		const now = Date.now();
+		this.finishedDoorbellCalls.delete(requestId);
+		this.finishedDoorbellCalls.set(requestId, now);
+		for (const [id, at] of this.finishedDoorbellCalls) {
+			if (
+				now - at <= DOORBELL_CALL_MAX_MS &&
+				this.finishedDoorbellCalls.size <= UnifiAccess.FINISHED_DOORBELL_CALLS_MAX
+			) {
+				break; // insertion order: the remaining entries are newer
+			}
+			this.finishedDoorbellCalls.delete(id);
+		}
+	}
+
+	private isFinishedDoorbellCall(requestId: string): boolean {
+		const at = this.finishedDoorbellCalls.get(requestId);
+		return at !== undefined && Date.now() - at <= DOORBELL_CALL_MAX_MS;
 	}
 
 	private async clearActiveDoorbellCall(): Promise<void> {
