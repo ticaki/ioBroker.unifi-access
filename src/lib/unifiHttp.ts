@@ -1,5 +1,6 @@
 import axios, { type AxiosInstance, AxiosError } from 'axios';
 import https from 'node:https';
+import { sanitizeStaticPath } from './pathSafety';
 import type {
 	UnifiDeviceRaw,
 	UnifiDoorRaw,
@@ -18,6 +19,43 @@ export interface UnifiHttpOptions {
 	verifyTLS?: boolean;
 	caCert?: string;
 	debugLog?: (msg: string) => void;
+}
+
+const STATIC_PREFIX = '/api/v1/developer/system/static/';
+
+/** Thrown by {@link UnifiHttp.getStaticResource} for a path that is not a plain static-resource path. */
+export class InvalidStaticPathError extends Error {
+	constructor() {
+		super('invalid static resource path');
+		this.name = 'InvalidStaticPathError';
+	}
+}
+
+const REDACTED_KEYS = /secret|token|password|authorization|cookie/i;
+
+/**
+ * Deep copy of a value for logging with every credential-like property masked
+ * (webhook signing secrets, tokens, passwords, authorization headers).
+ *
+ * @param value Any JSON-like value
+ * @param depth Recursion guard
+ */
+export function redactSecrets(value: unknown, depth = 0): unknown {
+	if (value === null || typeof value !== 'object') {
+		return value;
+	}
+	if (depth > 8) {
+		return '[…]';
+	}
+	if (Array.isArray(value)) {
+		return value.map(entry => redactSecrets(entry, depth + 1));
+	}
+	const copy: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(value)) {
+		copy[key] =
+			REDACTED_KEYS.test(key) && entry !== null && entry !== undefined ? '***' : redactSecrets(entry, depth + 1);
+	}
+	return copy;
 }
 
 export class UnifiHttp {
@@ -42,8 +80,9 @@ export class UnifiHttp {
 			const log = options.debugLog;
 			this.client.interceptors.response.use(r => {
 				if (r.config.url?.includes('webhooks')) {
+					// The body lists the HMAC signing secret of every endpoint — never log it in clear text.
 					log(
-						`webhook response [${r.config.method?.toUpperCase()} ${r.config.url}] status=${r.status} body=${JSON.stringify(r.data)}`,
+						`webhook response [${r.config.method?.toUpperCase()} ${r.config.url}] status=${r.status} body=${JSON.stringify(redactSecrets(r.data))}`,
 					);
 				}
 				return r;
@@ -122,11 +161,28 @@ export class UnifiHttp {
 	 * Fetch a static resource (avatar, preview, capture thumbnail). The path is the
 	 * relative string returned in event payloads, e.g. /preview/reader_xxx.jpg.
 	 *
+	 * The path comes from outside (event payloads, a state). It is validated strictly and the request
+	 * can never leave `/system/static/`: anything with dot segments, encoded characters, a query, a
+	 * scheme or host is refused with {@link InvalidStaticPathError} before a request is sent.
+	 *
 	 * @param path Relative resource path from the event payload
 	 */
 	async getStaticResource(path: string): Promise<Buffer> {
-		const cleaned = path.replace(/^\/+/, '');
-		const r = await this.client.get<ArrayBuffer>(`/api/v1/developer/system/static/${cleaned}`, {
+		const cleaned = sanitizeStaticPath(path);
+		if (cleaned === null) {
+			throw new InvalidStaticPathError();
+		}
+		const target = `${STATIC_PREFIX}${cleaned}`;
+		// Defence in depth: what the HTTP client will actually request must still be below the prefix.
+		const resolved = new URL(target, this.baseUrl);
+		if (
+			resolved.origin !== new URL(this.baseUrl).origin ||
+			resolved.pathname !== target ||
+			resolved.search !== ''
+		) {
+			throw new InvalidStaticPathError();
+		}
+		const r = await this.client.get<ArrayBuffer>(target, {
 			responseType: 'arraybuffer',
 		});
 		return Buffer.from(r.data);

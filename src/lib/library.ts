@@ -54,7 +54,6 @@ export class Library {
 		await this.ensureSwitchState('doors.emergency.evacuation', 'Evacuation – all doors forced unlocked', 'boolean');
 
 		await this.ensureSimpleState('info.webhookEndpointId', 'string', 'Registered webhook endpoint id');
-		await this.ensureSimpleState('info.webhookSecret', 'string', 'Webhook signing secret');
 		await this.ensureSimpleState(
 			'info.webhookRegistered',
 			'boolean',

@@ -1,4 +1,5 @@
 import type { IncomingMessage } from 'node:http';
+import { sanitizeStaticPath } from '../lib/pathSafety';
 import type { UnifiHttp } from '../lib/unifiHttp';
 import type { RequestHandler } from './sharedHttpServer';
 
@@ -65,6 +66,14 @@ export class ThumbnailHandler {
 		if (!path) {
 			res.statusCode = 404;
 			res.end('no thumbnail seen');
+			return true;
+		}
+		if (sanitizeStaticPath(path) === null) {
+			// The stored path stems from an event payload / a state. Whatever is not a plain static-resource
+			// path is never forwarded — the proxy must not become a gateway to other API endpoints.
+			this.options.logger.warn(`Thumbnail for ${deviceId} not served: invalid thumbnail path stored.`);
+			res.statusCode = 404;
+			res.end();
 			return true;
 		}
 		try {

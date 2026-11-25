@@ -124,7 +124,22 @@ class FakeAdapter {
 	}
 
 	async getObjectAsync(id) {
-		return this.objects.get(this.fullId(id)) ?? null;
+		return this.getForeignObjectAsync(this.fullId(id));
+	}
+
+	async getForeignObjectAsync(id) {
+		return this.objects.get(id) ?? null;
+	}
+
+	/** Like js-controller: deleting a state object also removes its state. */
+	async delObjectAsync(id) {
+		const full = this.fullId(id);
+		this.objects.delete(full);
+		this.states.delete(full);
+	}
+
+	async delStateAsync(id) {
+		this.states.delete(this.fullId(id));
 	}
 
 	// ------------------------------------------------------------------ timers

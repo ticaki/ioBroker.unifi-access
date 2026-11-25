@@ -295,6 +295,10 @@ export class FakeAdapter {
 	extendObject(id: string, obj: Record<string, unknown>): Promise<{ id: string }>;
 	setObjectNotExistsAsync(id: string, obj: Record<string, unknown>): Promise<{ id: string }>;
 	extendForeignObjectAsync(id: string, obj: Record<string, unknown>): Promise<{ id: string }>;
+	getObjectAsync(id: string): Promise<any>;
+	getForeignObjectAsync(id: string): Promise<any>;
+	delObjectAsync(id: string): Promise<void>;
+	delStateAsync(id: string): Promise<void>;
 
 	/** Run the adapter's `ready` handler */
 	fireReady(): Promise<void>;

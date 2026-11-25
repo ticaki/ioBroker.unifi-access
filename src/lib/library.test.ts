@@ -41,6 +41,11 @@ describe('Library (object and state management, in-memory adapter)', () => {
 			}
 		});
 
+		it('does not create a state for the webhook signing secret', () => {
+			expect(adapter.obj('info.webhookSecret')).to.equal(undefined);
+			expect([...adapter.states.keys()].filter(id => /secret/i.test(id))).to.deep.equal([]);
+		});
+
 		it('creates the global read-only value states with their types', () => {
 			const expected: Record<string, string> = {
 				'doorbell.activeCallId': 'string',
@@ -49,7 +54,6 @@ describe('Library (object and state management, in-memory adapter)', () => {
 				'events.last': 'string',
 				'admin.uiSettings': 'string',
 				'info.webhookEndpointId': 'string',
-				'info.webhookSecret': 'string',
 				'info.webhookRegistered': 'boolean',
 				'info.protectConnected': 'boolean',
 				'notifications.lastRaw': 'string',

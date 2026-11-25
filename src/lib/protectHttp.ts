@@ -1,5 +1,6 @@
 import axios, { type AxiosInstance, AxiosError } from 'axios';
 import https from 'node:https';
+import { isSafeProtectId, sanitizeProtectClipPath } from './pathSafety';
 
 export interface ProtectHttpOptions {
 	host: string;
@@ -76,6 +77,10 @@ export class ProtectHttp {
 	}
 
 	async getSnapshot(cameraId: string): Promise<Buffer> {
+		if (!isSafeProtectId(cameraId)) {
+			// ids come from system-log entries / request URLs; never let them shape the request path
+			throw new Error('Protect camera id rejected');
+		}
 		return this.withRetry(async retry => {
 			const r = await this.client.get<ArrayBuffer>(
 				`/proxy/protect/api/cameras/${encodeURIComponent(cameraId)}/snapshot`,
@@ -93,6 +98,9 @@ export class ProtectHttp {
 	}
 
 	async getEventMeta(eventId: string): Promise<{ clipUrl?: string } | null> {
+		if (!isSafeProtectId(eventId)) {
+			return null;
+		}
 		try {
 			const r = await this.client.get<Record<string, unknown>>(
 				`/proxy/protect/api/events/${encodeURIComponent(eventId)}`,
@@ -121,7 +129,12 @@ export class ProtectHttp {
 	}
 
 	async getClipBuffer(clipPath: string): Promise<Buffer> {
-		const path = clipPath.startsWith('/') ? clipPath : `/proxy/protect/api/${clipPath}`;
+		// The location is taken from a Protect response and requested with the session cookie attached:
+		// it must stay a path below /proxy/protect/api/ on this host.
+		const path = sanitizeProtectClipPath(clipPath);
+		if (path === null) {
+			throw new Error('Protect clip location rejected');
+		}
 		const r = await this.client.get<ArrayBuffer>(path, {
 			headers: this.authHeaders(),
 			responseType: 'arraybuffer',

@@ -467,6 +467,126 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		});
 	});
 
+	describe('thumbnail paths from events (R-06)', () => {
+		it('stores the documented door_thumbnail path of an event', async () => {
+			const instance = await startConnected({ enableThumbnailServer: true });
+			const event = fixtures.webhookEvents.doorUnlock({
+				door: door(DOOR_3855),
+				device: hub(),
+				readerId: DEVICE_G2_PRO,
+			});
+			await mock.deliverWebhook(event);
+			await waitFor(() => instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`), { description: 'path' });
+			expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`)).to.equal(
+				event.data.location.extras.door_thumbnail,
+			);
+			expect(events()[0].thumbnailPath).to.equal(event.data.location.extras.door_thumbnail);
+		});
+
+		for (const bad of [
+			`/preview/reader_${DEVICE_G2_PRO}_/../../../../users?page_size=1000`,
+			`/preview/reader_${DEVICE_G2_PRO}_%2e%2e/%2e%2e/users`,
+			`/../../users#/reader_${DEVICE_G2_PRO}_x.jpg`,
+			`https://192.0.2.1/preview/reader_${DEVICE_G2_PRO}_x.jpg`,
+		]) {
+			it(`never stores or serves the manipulated thumbnail path ${JSON.stringify(bad)}`, async () => {
+				const instance = await startConnected({ enableThumbnailServer: true });
+				const event = fixtures.webhookEvents.doorUnlock({
+					door: door(DOOR_3855),
+					device: hub(),
+					readerId: DEVICE_G2_PRO,
+				});
+				event.data.location.extras.door_thumbnail = bad;
+				await mock.deliverWebhook(event);
+				await waitFor(() => events().length === 1, { description: 'event logged' });
+				await waitFor(() => instance.log.of('warn').some(m => m.includes('thumbnail path')), {
+					description: 'warning',
+				});
+
+				expect(instance.stateWrites.filter(w => w.id.includes('lastThumbnail'))).to.deep.equal([]);
+				expect(events()[0].thumbnailPath).to.equal(undefined);
+
+				const before = mock.requests.length;
+				const response = await httpRequest({
+					url: `http://127.0.0.1:${listenPort}/unifi-access/0/thumbnail/${DEVICE_G2_PRO}.jpg`,
+				});
+				expect(response.status).to.equal(404);
+				expect(mock.requests.slice(before)).to.deep.equal([]);
+			});
+		}
+
+		it('a manipulated lastThumbnailPath state is not proxied to the controller', async () => {
+			const instance = await startConnected({ enableThumbnailServer: true });
+			await instance.setState(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`, {
+				val: '/preview/../../users',
+				ack: false,
+			});
+			const before = mock.requests.length;
+			const response = await httpRequest({
+				url: `http://127.0.0.1:${listenPort}/unifi-access/0/thumbnail/${DEVICE_G2_PRO}.jpg`,
+			});
+			expect(response.status).to.equal(404);
+			expect(response.text).to.not.contain(fixtures.DEFAULT_USERS[0].id);
+			expect(mock.requests.slice(before)).to.deep.equal([]);
+		});
+	});
+
+	describe('webhook signing secret and API token stay out of states and logs (R-05)', () => {
+		it('writes the secret to no state and logs neither secret nor token at any level', async () => {
+			const instance = await startConnected();
+			const endpoint = mock.webhookEndpoints[0];
+			await instance.request('reregisterWebhook');
+			const fresh = mock.webhookEndpoints[0];
+			expect(fresh.secret).to.not.equal(endpoint.secret);
+
+			for (const secret of [endpoint.secret, fresh.secret]) {
+				expect(
+					instance.stateWrites.filter(w => typeof w.val === 'string' && w.val.includes(secret)),
+					'state writes containing the secret',
+				).to.deep.equal([]);
+				expect(
+					instance.log.messages.filter(m => m.message.includes(secret)),
+					'log lines containing the secret',
+				).to.deep.equal([]);
+			}
+			expect(instance.log.messages.filter(m => m.message.includes(TOKEN))).to.deep.equal([]);
+			expect(instance.log.of('debug').some(m => m.includes('/webhooks/endpoints'))).to.equal(true);
+			expect(instance.obj('info.webhookSecret')).to.equal(undefined);
+			expect(instance.states.has(`${NS}.info.webhookSecret`)).to.equal(false);
+		});
+
+		it('removes the info.webhookSecret object and state left behind by earlier versions', async () => {
+			adapter = createAdapterWithFakeCore(MAIN, {
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				listenPort,
+				listenIp: '127.0.0.1',
+				enableWebhooks: false,
+			});
+			await adapter.setObjectNotExistsAsync('info.webhookSecret', {
+				type: 'state',
+				common: { name: 'Webhook signing secret', type: 'string', role: 'value', read: true, write: false },
+				native: {},
+			});
+			await adapter.setState('info.webhookSecret', { val: 'old-plaintext-secret', ack: true });
+
+			await adapter.fireReady();
+
+			expect(adapter.obj('info.webhookSecret')).to.equal(undefined);
+			expect(adapter.states.has(`${NS}.info.webhookSecret`)).to.equal(false);
+		});
+
+		it('removes the leftover secret state even when host or token are not configured', async () => {
+			adapter = createAdapterWithFakeCore(MAIN, { controllerHost: '', apiToken: '' });
+			await adapter.setObjectNotExistsAsync('info.webhookSecret', { type: 'state', common: {}, native: {} });
+			await adapter.setState('info.webhookSecret', { val: 'old-plaintext-secret', ack: true });
+			await adapter.fireReady();
+			expect(adapter.obj('info.webhookSecret')).to.equal(undefined);
+			expect(adapter.states.has(`${NS}.info.webhookSecret`)).to.equal(false);
+		});
+	});
+
 	describe('unlock event de-duplication (WebSocket remote_unlock vs. webhook door.unlock)', () => {
 		it('logs access.data.device.remote_unlock 4 s later when no door.unlock webhook follows', async () => {
 			const instance = await startConnected();

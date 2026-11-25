@@ -41,7 +41,7 @@ export class ProtectMediaHandler {
 	private async handleSnapshot(url: string, res: ServerResponse): Promise<true> {
 		// URL: <prefix>/<cameraId>/<ts>.jpg
 		const tail = url.slice(this.options.snapshotPathPrefix.length + 1);
-		const match = /^([A-Za-z0-9]+)\/(\d+)\.jpg$/.exec(tail);
+		const match = /^([A-Za-z0-9]{1,64})\/(\d{1,16})\.jpg$/.exec(tail);
 		if (!match) {
 			res.statusCode = 400;
 			res.end();
@@ -71,7 +71,7 @@ export class ProtectMediaHandler {
 	private async handleVideo(url: string, res: ServerResponse): Promise<true> {
 		// URL: <prefix>/<eventId>.mp4
 		const tail = url.slice(this.options.videoPathPrefix.length + 1);
-		const match = /^([A-Za-z0-9_-]+)\.mp4$/.exec(tail);
+		const match = /^([A-Za-z0-9_-]{1,128})\.mp4$/.exec(tail);
 		if (!match) {
 			res.statusCode = 400;
 			res.end();

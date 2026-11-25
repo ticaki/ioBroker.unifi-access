@@ -11,6 +11,7 @@ import { ProtectHttp } from './lib/protectHttp';
 import { UnifiWebSocket } from './lib/unifiWebSocket';
 import { Library } from './lib/library';
 import { detectModel, featuresFor, type DeviceCapability, type UnifiDeviceModel } from './lib/deviceModels';
+import { isSafeProtectId, sanitizeStaticPath } from './lib/pathSafety';
 import {
 	describeValue,
 	extractDpsStatus,
@@ -130,6 +131,7 @@ class UnifiAccess extends utils.Adapter {
 	private async onReady(): Promise<void> {
 		this.library = new Library(this);
 		await this.setState('info.connection', false, true);
+		await this.removeObsoleteObjects();
 
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
@@ -477,9 +479,28 @@ class UnifiAccess extends utils.Adapter {
 		this.ws.start();
 	}
 
+	/**
+	 * Remove objects of earlier adapter versions. `info.webhookSecret` held the webhook signing secret
+	 * in clear text, readable by everything that may read states — the secret now lives only in the
+	 * encrypted instance configuration.
+	 */
+	private async removeObsoleteObjects(): Promise<void> {
+		for (const id of ['info.webhookSecret']) {
+			try {
+				if (await this.getObjectAsync(id)) {
+					await this.delObjectAsync(id);
+					this.log.info(`Removed obsolete state ${id}.`);
+				}
+				// the state may exist without an object
+				await this.delStateAsync(id);
+			} catch (err) {
+				this.log.debug(`Could not remove obsolete state ${id}: ${errorText(err)}`);
+			}
+		}
+	}
+
 	private async persistWebhookCredentials(id: string, secret: string): Promise<void> {
 		await this.setState('info.webhookEndpointId', { val: id, ack: true });
-		await this.setState('info.webhookSecret', { val: secret, ack: true });
 		// webhookSecret ist `encryptedNative`: js-controller entschlüsselt es beim
 		// Adapter-Start automatisch — daher hier symmetrisch verschlüsseln, sonst
 		// landet beim nächsten Start Müll in cfg.webhookSecret.
@@ -508,8 +529,17 @@ class UnifiAccess extends utils.Adapter {
 		const location = (data.location as Record<string, unknown> | undefined) ?? (dataIsLocation ? data : undefined);
 		const extras = (location?.extras as Record<string, unknown> | undefined) ?? undefined;
 		const actor = (data.actor as Record<string, unknown> | undefined) ?? undefined;
-		const thumbnailPath =
-			(extras?.door_thumbnail as string | undefined) ?? (data.door_thumbnail as string | undefined);
+		// The thumbnail path ends up in a state and in the URL of the thumbnail proxy: only a plain
+		// static-resource path is accepted, anything else is dropped here.
+		const rawThumbnailPath: unknown = extras?.door_thumbnail ?? data.door_thumbnail;
+		let thumbnailPath: string | undefined;
+		if (typeof rawThumbnailPath === 'string' && rawThumbnailPath !== '') {
+			if (sanitizeStaticPath(rawThumbnailPath) !== null) {
+				thumbnailPath = rawThumbnailPath;
+			} else {
+				this.log.warn(`Ignoring invalid thumbnail path in ${msg.event} event.`);
+			}
+		}
 
 		const REMOTE_VIEW_CHANGE_REASONS: Record<number, string> = {
 			105: 'timeout',
@@ -708,6 +738,9 @@ class UnifiAccess extends utils.Adapter {
 	}
 
 	private async setThumbnail(deviceId: string, path: string, ts: number): Promise<void> {
+		if (sanitizeStaticPath(path) === null) {
+			return;
+		}
 		const safe = this.safeId(deviceId);
 		await this.setState(`devices.${safe}.lastThumbnailPath`, { val: path, ack: true });
 		await this.setState(`devices.${safe}.lastThumbnailAt`, { val: ts, ack: true });
@@ -1205,10 +1238,13 @@ class UnifiAccess extends utils.Adapter {
 					continue;
 				}
 				const cameraId = parts[1];
-				const eventId = parts.length >= 3 ? parts.slice(2).join('_') : undefined;
-				if (!cameraId) {
+				const rawEventId = parts.length >= 3 ? parts.slice(2).join('_') : undefined;
+				// both ids become part of request paths and of the media URLs handed to clients
+				if (!/^[A-Za-z0-9]{1,64}$/.test(cameraId)) {
+					this.log.debug('[protect] camera event with unusable camera id — skipped');
 					continue;
 				}
+				const eventId = isSafeProtectId(rawEventId) ? rawEventId : undefined;
 				this.log.debug(`[protect] camera event found: cameraId=${cameraId}, eventId=${eventId ?? 'none'}`);
 
 				try {

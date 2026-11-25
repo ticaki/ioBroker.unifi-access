@@ -88,6 +88,9 @@ describe('ProtectMediaHandler (Protect snapshot / clip proxy)', () => {
 			'cam1/1.png',
 			'../x/1.jpg',
 			'cam1/1.jpg/extra',
+			`${'a'.repeat(65)}/1.jpg`,
+			`cam1/${'1'.repeat(17)}.jpg`,
+			'cam1%2F..%2Fx/1.jpg',
 			'',
 		]) {
 			it(`answers 400 for the malformed path "${tail}"`, async () => {
@@ -135,7 +138,15 @@ describe('ProtectMediaHandler (Protect snapshot / clip proxy)', () => {
 			]);
 		});
 
-		for (const tail of ['evt1', 'evt1.jpg', 'a/b.mp4', '../evt1.mp4', 'evt%2F1.mp4', '.mp4']) {
+		for (const tail of [
+			'evt1',
+			'evt1.jpg',
+			'a/b.mp4',
+			'../evt1.mp4',
+			'evt%2F1.mp4',
+			'.mp4',
+			`${'e'.repeat(129)}.mp4`,
+		]) {
 			it(`answers 400 for the malformed path "${tail}"`, async () => {
 				const response = await httpRequest({ url: baseUrl, rawPath: `${VIDEO_PREFIX}/${tail}` });
 				expect(response.status).to.equal(400);

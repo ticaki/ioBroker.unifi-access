@@ -226,11 +226,11 @@ describe('ProtectHttp (against a local UniFi OS / Protect stand-in)', () => {
 	describe('getSnapshot()', () => {
 		it('requests the camera snapshot with session cookie and CSRF token and returns the bytes', async () => {
 			await protect.login();
-			const buffer = await protect.getSnapshot('cam/1 a');
+			const buffer = await protect.getSnapshot('66a1b2c3d4e5f60718293a4b');
 			expect(buffer.equals(stub.snapshot)).to.equal(true);
 			const request = stub.requests[2];
 			expect(request.method).to.equal('GET');
-			expect(request.url).to.equal('/proxy/protect/api/cameras/cam%2F1%20a/snapshot');
+			expect(request.url).to.equal('/proxy/protect/api/cameras/66a1b2c3d4e5f60718293a4b/snapshot');
 			expect(request.headers.cookie).to.equal('TOKEN=session-1');
 			expect(request.headers['x-csrf-token']).to.equal('csrf-1');
 		});
@@ -278,15 +278,34 @@ describe('ProtectHttp (against a local UniFi OS / Protect stand-in)', () => {
 		});
 	});
 
+	describe('ids in request paths', () => {
+		for (const bad of ['..', '.', 'cam/1', 'cam%2F1', 'cam 1', '', 'a'.repeat(129)]) {
+			it(`getSnapshot() refuses the camera id ${JSON.stringify(bad.slice(0, 20))} without sending a request`, async () => {
+				await protect.login();
+				const before = stub.requests.length;
+				const err = await rejection(protect.getSnapshot(bad));
+				expect(err.message).to.equal('Protect camera id rejected');
+				expect(stub.requests).to.have.length(before);
+			});
+
+			it(`getEventMeta() refuses the event id ${JSON.stringify(bad.slice(0, 20))} without sending a request`, async () => {
+				await protect.login();
+				const before = stub.requests.length;
+				expect(await protect.getEventMeta(bad)).to.equal(null);
+				expect(stub.requests).to.have.length(before);
+			});
+		}
+	});
+
 	describe('getEventMeta()', () => {
 		beforeEach(async () => {
 			await protect.login();
 		});
 
 		it('returns the clip URL of an event (field clipUrl)', async () => {
-			stub.events['evt 1'] = { id: 'evt 1', clipUrl: 'video/export?camera=c1&start=1' };
-			expect(await protect.getEventMeta('evt 1')).to.deep.equal({ clipUrl: 'video/export?camera=c1&start=1' });
-			expect(stub.requests[2].url).to.equal('/proxy/protect/api/events/evt%201');
+			stub.events.evt_1 = { id: 'evt_1', clipUrl: 'video/export?camera=c1&start=1' };
+			expect(await protect.getEventMeta('evt_1')).to.deep.equal({ clipUrl: 'video/export?camera=c1&start=1' });
+			expect(stub.requests[2].url).to.equal('/proxy/protect/api/events/evt_1');
 			expect(stub.requests[2].headers.cookie).to.equal('TOKEN=session-1');
 		});
 
@@ -337,6 +356,22 @@ describe('ProtectHttp (against a local UniFi OS / Protect stand-in)', () => {
 			await protect.getClipBuffer('video/export?camera=c1');
 			expect(stub.requests[2].url).to.equal('/proxy/protect/api/video/export?camera=c1');
 		});
+
+		for (const bad of [
+			'//evil.example/clip.mp4',
+			'https://evil.example/clip.mp4',
+			'/api/users',
+			'video/../../../../api/users',
+			'video/%2e%2e/%2e%2e/%2e%2e/%2e%2e/api/users',
+			'video\\..\\x',
+		]) {
+			it(`refuses the clip location ${JSON.stringify(bad)} without sending a request`, async () => {
+				const before = stub.requests.length;
+				const err = await rejection(protect.getClipBuffer(bad));
+				expect(err.message).to.equal('Protect clip location rejected');
+				expect(stub.requests).to.have.length(before);
+			});
+		}
 
 		it('rejects when the clip cannot be fetched', async () => {
 			stub.nextMediaStatus = 404;

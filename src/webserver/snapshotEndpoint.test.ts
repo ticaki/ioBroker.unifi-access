@@ -205,17 +205,30 @@ describe('ThumbnailHandler (thumbnail proxy on the shared HTTP server)', () => {
 			expect(lookups).to.deep.equal([]);
 		});
 
-		// BUG-C-05: the stored thumbnail path is passed to the controller unchecked. Dot segments are resolved
-		// by the HTTP client, so a stored path like "/../../users" makes the proxy fetch
-		// GET /api/v1/developer/users with the adapter's API token and serve the answer to an unauthenticated
-		// client as "image/jpeg". The path originates from event payloads / a state — it must not be able to
-		// leave /system/static/.
-		it.skip('BUG-C-05: a stored path with dot segments never reaches API endpoints outside /system/static/', async () => {
-			paths.set(READER, '/../../users');
-			const response = await httpRequest({ url: `${baseUrl}${PREFIX}/${READER}.jpg` });
-			expect(response.text).to.not.contain(fixtures.DEFAULT_USERS[0].id);
-			expect(response.status).to.not.equal(200);
-			expect(mock.requests.filter(r => !r.path.startsWith('/system/static/'))).to.deep.equal([]);
-		});
+		// The stored thumbnail path originates from event payloads / a state. The HTTP client resolves dot
+		// segments, so an unchecked "/../../users" would make the proxy fetch GET /api/v1/developer/users with
+		// the adapter's API token and serve the answer to an unauthenticated client as "image/jpeg".
+		for (const stored of [
+			'/../../users',
+			'/preview/reader_ab_/../../../../users?page_size=1000',
+			'/preview/%2e%2e/%2e%2e/%2e%2e/users',
+			'/preview/..%2F..%2F..%2Fusers',
+			'/preview/..\\..\\..\\users',
+			'/preview/x.jpg?expand[]=access_policy',
+			'https://192.0.2.1/preview/x.jpg',
+			'//192.0.2.1/preview/x.jpg',
+			'/users',
+			'/doors',
+		]) {
+			it(`a stored path ${JSON.stringify(stored)} is answered with 404 and never reaches the controller`, async () => {
+				paths.set(READER, stored);
+				const response = await httpRequest({ url: `${baseUrl}${PREFIX}/${READER}.jpg` });
+				expect(response.status).to.equal(404);
+				expect(response.text).to.not.contain(fixtures.DEFAULT_USERS[0].id);
+				expect(mock.requests).to.deep.equal([]);
+				expect(logger.of('warn')).to.have.length(1);
+				expect(logger.of('warn')[0]).to.contain('invalid thumbnail path');
+			});
+		}
 	});
 });

@@ -2,7 +2,7 @@ import { expect } from 'chai';
 import { AxiosError } from 'axios';
 
 import { createSelfSignedCert, fixtures, getFreePort, MockUnifiController, rejection } from '../../test/mock';
-import { classifyError, UnifiHttp } from './unifiHttp';
+import { classifyError, InvalidStaticPathError, UnifiHttp } from './unifiHttp';
 
 const TOKEN = 'module-test-token';
 const { DOOR_A2 } = fixtures.IDS;
@@ -232,6 +232,25 @@ describe('UnifiHttp (against the mock controller)', () => {
 			const err = await rejection(http.getStaticResource('/preview/missing.jpg'));
 			expect((err as AxiosError).response?.status).to.equal(404);
 		});
+
+		for (const bad of [
+			'/../../users',
+			'/preview/../../../users?page_size=1000',
+			'/preview/%2e%2e/%2e%2e/users',
+			'/preview/..%2f..%2fusers',
+			'/preview/..\\..\\users',
+			'/preview/x.jpg?page_size=1000',
+			'https://127.0.0.1/preview/x.jpg',
+			'//evil.example/preview/x.jpg',
+			'/users',
+			'',
+		]) {
+			it(`refuses the path ${JSON.stringify(bad)} without sending any request`, async () => {
+				const err = await rejection(http.getStaticResource(bad));
+				expect(err).to.be.instanceOf(InvalidStaticPathError);
+				expect(mock.requests).to.have.length(0);
+			});
+		}
 	});
 
 	describe('emergency status', () => {
@@ -486,9 +505,8 @@ describe('UnifiHttp (against the mock controller)', () => {
 			expect(lines[0]).to.contain('status=200');
 		});
 
-		// BUG-C-02: the debug interceptor dumps the complete response body of every /webhooks/endpoints call,
-		// which contains the HMAC signing secret of each endpoint → the secret ends up in the ioBroker log.
-		it.skip('BUG-C-02: never writes the webhook signing secret into the log', async () => {
+		// The response body of every /webhooks/endpoints call contains the HMAC signing secret of each endpoint.
+		it('never writes the webhook signing secret (or the API token) into the log', async () => {
 			const lines: string[] = [];
 			const client = new UnifiHttp({
 				host: '127.0.0.1',
@@ -504,7 +522,10 @@ describe('UnifiHttp (against the mock controller)', () => {
 			await client.listWebhookEndpoints();
 			const secret = created.endpoint?.secret ?? '';
 			expect(secret).to.have.length.greaterThan(0);
+			expect(lines).to.have.length(2);
 			expect(lines.join('\n')).to.not.contain(secret);
+			expect(lines.join('\n')).to.not.contain(TOKEN);
+			expect(lines.join('\n')).to.contain('"secret":"***"');
 		});
 	});
 });
