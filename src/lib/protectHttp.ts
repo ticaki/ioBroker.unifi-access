@@ -1,12 +1,34 @@
 import axios, { type AxiosInstance, AxiosError } from 'axios';
 import https from 'node:https';
 import { isSafeProtectId, sanitizeProtectClipPath } from './pathSafety';
+import { tlsCertificateErrorCode } from './tlsErrors';
 
 export interface ProtectHttpOptions {
+	/** Host name or address of the UniFi OS console (a `host:port` value is used as it is). */
 	host: string;
+	/** HTTPS port, appended to `host` unless it is 443 or not given. */
+	port?: number;
 	username: string;
 	password: string;
+	/** Verify the console's TLS certificate (against `caCert` when given, else the system CAs). */
 	verifyTLS?: boolean;
+	/** PEM certificate (chain) to trust in addition to the system CAs. */
+	caCert?: string;
+}
+
+export type ProtectLoginFailure = 'credentials' | 'rate-limited' | 'http' | 'no-session';
+
+/** Login was answered by the console but did not produce a session. */
+export class ProtectLoginError extends Error {
+	readonly kind: ProtectLoginFailure;
+	readonly status?: number;
+
+	constructor(kind: ProtectLoginFailure, message: string, status?: number) {
+		super(message);
+		this.name = 'ProtectLoginError';
+		this.kind = kind;
+		this.status = status;
+	}
 }
 
 export class ProtectHttp {
@@ -21,11 +43,13 @@ export class ProtectHttp {
 	constructor(options: ProtectHttpOptions) {
 		this.username = options.username;
 		this.password = options.password;
+		const port = options.port && options.port !== 443 ? `:${options.port}` : '';
 		this.client = axios.create({
-			baseURL: `https://${options.host}`,
+			baseURL: `https://${options.host}${port}`,
 			timeout: 15_000,
 			httpsAgent: new https.Agent({
 				rejectUnauthorized: options.verifyTLS === true,
+				ca: options.caCert ? options.caCert : undefined,
 			}),
 		});
 	}
@@ -59,18 +83,22 @@ export class ProtectHttp {
 
 		if (r.status === 401 || r.status === 403) {
 			this._loggedIn = false;
-			throw new Error('Protect login failed: credentials rejected');
+			throw new ProtectLoginError('credentials', 'Protect login failed: credentials rejected', r.status);
 		}
 		if (r.status >= 400) {
 			this._loggedIn = false;
-			throw new Error(`Protect login failed: HTTP ${r.status}`);
+			throw new ProtectLoginError(
+				r.status === 429 ? 'rate-limited' : 'http',
+				`Protect login failed: HTTP ${r.status}`,
+				r.status,
+			);
 		}
 
 		this.extractSession(r.headers);
 
 		if (!this.sessionCookie) {
 			this._loggedIn = false;
-			throw new Error('Protect login failed: no session cookie in response');
+			throw new ProtectLoginError('no-session', 'Protect login failed: no session cookie in response');
 		}
 
 		this._loggedIn = true;
@@ -184,10 +212,28 @@ export class ProtectHttp {
 	}
 }
 
-export function classifyProtectError(err: unknown): 'unauthorized' | 'network' {
+/**
+ * Classify a failed {@link ProtectHttp.login} so the caller can decide between "fix the
+ * configuration" (`credentials`, `tls`) and "try again later" (`rate-limited`, `network`).
+ *
+ * @param err Error thrown by login()
+ */
+export function classifyProtectError(err: unknown): 'credentials' | 'tls' | 'rate-limited' | 'network' {
+	if (err instanceof ProtectLoginError) {
+		if (err.kind === 'credentials') {
+			return 'credentials';
+		}
+		return err.kind === 'rate-limited' ? 'rate-limited' : 'network';
+	}
+	if (tlsCertificateErrorCode(err) !== undefined) {
+		return 'tls';
+	}
 	if (err instanceof AxiosError) {
 		if (err.response?.status === 401 || err.response?.status === 403) {
-			return 'unauthorized';
+			return 'credentials';
+		}
+		if (err.response?.status === 429) {
+			return 'rate-limited';
 		}
 	}
 	return 'network';

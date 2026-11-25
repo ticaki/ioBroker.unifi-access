@@ -6,6 +6,7 @@ import {
 	LOCK_RULE_BY_INDEX,
 	MAX_UNLOCK_MINUTES,
 	normalizeDefaultUnlockMinutes,
+	normalizePort,
 	parseLockRuleIndex,
 	parseUnlockMinutes,
 } from './controlValues';
@@ -84,6 +85,33 @@ describe('controlValues (validation of control state values)', () => {
 			expect(normalizeDefaultUnlockMinutes(100_000)).to.equal(600);
 			for (const unusable of [0, -3, Number.NaN, Infinity, '', 'abc', null, undefined, true, {}]) {
 				expect(normalizeDefaultUnlockMinutes(unusable), describeValue(unusable)).to.equal(0);
+			}
+		});
+	});
+
+	describe('normalizePort()', () => {
+		it('accepts integers from 1 to 65535 (also as numeric string), otherwise the fallback', () => {
+			expect(normalizePort(8443, 443)).to.equal(8443);
+			expect(normalizePort('8443', 443)).to.equal(8443);
+			expect(normalizePort(1, 443)).to.equal(1);
+			expect(normalizePort(65_535, 443)).to.equal(65_535);
+			for (const bad of [
+				0,
+				-1,
+				65_536,
+				80.5,
+				Number.NaN,
+				Infinity,
+				'',
+				'abc',
+				'80a',
+				'123456',
+				null,
+				undefined,
+				true,
+				{},
+			]) {
+				expect(normalizePort(bad, 443), describeValue(bad)).to.equal(443);
 			}
 		});
 	});

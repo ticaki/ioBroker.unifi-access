@@ -105,13 +105,15 @@
 		"apiToken",
 		"webhookSecret",
 		"genericWebhookPassword",
-		"genericWebhookToken"
+		"genericWebhookToken",
+		"protectPassword"
 	],
 	"encryptedNative": [
 		"apiToken",
 		"webhookSecret",
 		"genericWebhookPassword",
-		"genericWebhookToken"
+		"genericWebhookToken",
+		"protectPassword"
 	],
 	"native": {
 		"controllerHost": "",
@@ -140,7 +142,12 @@
 		"genericWebhookAuth": "none",
 		"genericWebhookUsername": "",
 		"genericWebhookPassword": "",
-		"genericWebhookToken": ""
+		"genericWebhookToken": "",
+		"enableProtect": false,
+		"protectUsername": "",
+		"protectPassword": "",
+		"protectVerifyTLS": false,
+		"protectPort": 443
 	},
 	"objects": [],
 	"instanceObjects": [

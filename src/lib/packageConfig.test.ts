@@ -72,6 +72,7 @@ describe('adapter configuration metadata (io-package.json / admin/jsonConfig.jso
 			'webhookSecret',
 			'genericWebhookPassword',
 			'genericWebhookToken',
+			'protectPassword',
 		]);
 	});
 
@@ -81,10 +82,9 @@ describe('adapter configuration metadata (io-package.json / admin/jsonConfig.jso
 		}
 	});
 
-	// BUG-C-15: admin/jsonConfig.json has the password field `protectPassword` (UniFi Protect login), but the
-	// key is missing in encryptedNative and protectedNative. The password is stored in plain text in the
+	// A password field that is not listed in encryptedNative/protectedNative is stored in plain text in the
 	// instance object and is readable by every adapter / user with object access.
-	it.skip('BUG-C-15: every password field of the admin UI is listed in encryptedNative and protectedNative', () => {
+	it('every password field of the admin UI is listed in encryptedNative and protectedNative', () => {
 		const passwords = [...attributes].filter(([, type]) => type === 'password').map(([key]) => key);
 		expect(passwords).to.include('protectPassword');
 		for (const key of passwords) {
@@ -93,10 +93,9 @@ describe('adapter configuration metadata (io-package.json / admin/jsonConfig.jso
 		}
 	});
 
-	// BUG-C-16: several attributes the admin UI writes (and main.ts reads) have no default in io-package.json
-	// `native`: enableProtect, protectUsername, protectPassword, protectVerifyTLS, unlockActorId. A fresh
-	// instance therefore starts with these keys undefined.
-	it.skip('BUG-C-16: every attribute of the admin UI has a default in io-package.json native', () => {
+	// Attributes the admin UI writes (and main.ts reads) need a default so a fresh instance does not start
+	// with undefined keys.
+	it('every attribute of the admin UI has a default in io-package.json native', () => {
 		const missing = [...attributes.keys()].filter(key => !(key in ioPackage.native));
 		expect(missing).to.deep.equal([]);
 	});

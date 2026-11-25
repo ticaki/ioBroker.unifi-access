@@ -20,6 +20,7 @@ import {
 	httpRequest,
 	isPortFree,
 	MockUnifiController,
+	ProtectStub,
 	waitFor,
 	type FakeAdapter,
 } from '../test/mock';
@@ -584,6 +585,273 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			await adapter.fireReady();
 			expect(adapter.obj('info.webhookSecret')).to.equal(undefined);
 			expect(adapter.states.has(`${NS}.info.webhookSecret`)).to.equal(false);
+		});
+	});
+
+	describe('UniFi Protect integration (stub console)', () => {
+		let protect: ProtectStub;
+
+		beforeEach(async () => {
+			protect = new ProtectStub();
+			await protect.start();
+		});
+
+		afterEach(async () => {
+			await adapter?.fireUnload();
+			adapter = undefined;
+			await protect.stop();
+		});
+
+		const protectConfig = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+			enableWebhooks: false,
+			enableProtect: true,
+			protectUsername: 'viewer',
+			protectPassword: 'protect-secret',
+			protectVerifyTLS: false,
+			protectPort: protect.port,
+			...overrides,
+		});
+
+		describe('TLS verification (protectVerifyTLS, R-16)', () => {
+			it('verification off: logs in to the console with its self-signed certificate', async () => {
+				const instance = await startConnected(protectConfig());
+				expect(protect.logins).to.deep.equal([{ username: 'viewer', password: 'protect-secret', status: 200 }]);
+				expect(instance.val('info.protectConnected')).to.equal(true);
+				expect(instance.log.of('warn')).to.deep.equal([]);
+			});
+
+			it('verification on without CA: one clear warning with instructions, no login, no retry', async () => {
+				const instance = await startConnected(protectConfig({ protectVerifyTLS: true }));
+				const warnings = instance.log.of('warn');
+				expect(warnings).to.have.length(1);
+				expect(warnings[0]).to.contain(
+					'TLS certificate of the console was rejected (DEPTH_ZERO_SELF_SIGNED_CERT)',
+				);
+				expect(warnings[0]).to.contain('disable "Verify TLS certificate" on the Protect tab');
+				expect(warnings[0]).to.contain('CA certificate');
+				expect(protect.requests, 'nothing was sent over the unverified connection').to.deep.equal([]);
+				expect(instance.val('info.protectConnected')).to.equal(false);
+
+				await clock.tickAsync(15 * 60_000);
+				await delay(30);
+				expect(protect.requests, 'no retry loop').to.deep.equal([]);
+				expect(instance.log.of('warn')).to.have.length(1);
+			});
+
+			it('verification on with the console certificate as CA: logs in', async () => {
+				// one CA setting for both: trust the Access mock and the Protect stub
+				const instance = await startConnected(
+					protectConfig({ protectVerifyTLS: true, caCert: `${protect.cert}\n${mock.cert}` }),
+				);
+				expect(protect.logins.map(l => l.status)).to.deep.equal([200]);
+				expect(instance.val('info.protectConnected')).to.equal(true);
+				expect(instance.log.of('warn')).to.deep.equal([]);
+			});
+
+			it('the Access setting verifyTLS no longer decides about Protect', async () => {
+				// Access verified against its CA, Protect explicitly unverified
+				const instance = await startConnected(
+					protectConfig({ verifyTLS: true, caCert: mock.cert, protectVerifyTLS: false }),
+				);
+				expect(instance.val('info.protectConnected')).to.equal(true);
+			});
+		});
+
+		describe('login failures', () => {
+			it('rejected credentials: one warning, integration off, no retry', async () => {
+				const instance = await startConnected(protectConfig({ protectPassword: 'wrong' }));
+				expect(instance.log.of('warn')).to.deep.equal([
+					'Protect login failed: user name or password rejected. The Protect integration stays off until the instance is restarted.',
+				]);
+				expect(instance.val('info.protectConnected')).to.equal(false);
+				const attempts = protect.logins.length;
+				await clock.tickAsync(15 * 60_000);
+				await delay(30);
+				expect(protect.logins).to.have.length(attempts);
+			});
+
+			it('rate limit (429): retries after 30 s through an adapter timer and connects', async () => {
+				protect.failLogins(429);
+				const instance = await startConnected(protectConfig());
+				expect(instance.val('info.protectConnected')).to.equal(false);
+				expect(instance.log.of('warn')).to.deep.equal([
+					'Protect login failed (rate-limited): Protect login failed: HTTP 429 — retrying in 30 s.',
+				]);
+				expect(instance.timers.size, 'retry runs on an adapter timer').to.be.greaterThan(0);
+
+				await clock.tickAsync(29_999);
+				await delay(30);
+				expect(protect.logins).to.have.length(1);
+				await clock.tickAsync(1);
+				await waitFor(() => instance.val('info.protectConnected') === true, {
+					description: 'protect connected',
+				});
+				expect(protect.logins.map(l => l.status)).to.deep.equal([429, 200]);
+			});
+
+			it('keeps retrying with growing distance while the console stays unavailable (30 s, 60 s, 120 s)', async () => {
+				protect.failLogins(503, 3);
+				const instance = await startConnected(protectConfig());
+				for (const [wait, attempts] of [
+					[30_000, 2],
+					[60_000, 3],
+					[120_000, 4],
+				]) {
+					await clock.tickAsync(wait - 1);
+					await delay(30);
+					expect(protect.logins, `before ${wait} ms`).to.have.length(attempts - 1);
+					await clock.tickAsync(1);
+					await waitFor(() => protect.logins.length === attempts, { description: `attempt ${attempts}` });
+				}
+				await waitFor(() => instance.val('info.protectConnected') === true, {
+					description: 'protect connected',
+				});
+				expect(instance.log.of('warn'), 'only the first failure is a warning').to.have.length(1);
+			});
+
+			it('unload cancels a pending login retry', async () => {
+				protect.failLogins(429, 100);
+				const instance = await startConnected(protectConfig());
+				await instance.fireUnload();
+				expect(clock.countTimers()).to.equal(0);
+				await clock.tickAsync(10 * 60_000);
+				await delay(30);
+				expect(protect.logins).to.have.length(1);
+			});
+		});
+
+		describe('migration of a plain-text password to the encrypted attribute (C-16)', () => {
+			/**
+			 * stand-in for adapter.encrypt on a system with AES secret
+			 *
+			 * @param plain Text to encrypt
+			 */
+			const aes = (plain: string): string => `$/aes-192-cbc:00:${Buffer.from(plain).toString('hex')}`;
+
+			/**
+			 * Start an instance whose instance object holds `stored` as protectPassword while js-controller
+			 * handed `decrypted` to the adapter (it decrypts every encryptedNative attribute at start).
+			 *
+			 * @param stored Value in the instance object
+			 * @param decrypted Value in adapter.config
+			 * @param options Encrypt function of the system and whether the attribute is listed as encrypted
+			 * @param options.encrypt Stand-in for adapter.encrypt
+			 * @param options.listed Whether the instance object lists protectPassword in encryptedNative
+			 */
+			async function startWithStoredPassword(
+				stored: unknown,
+				decrypted: unknown,
+				options: { encrypt?: (plain: string) => string; listed?: boolean } = {},
+			): Promise<FakeAdapter> {
+				adapter = createAdapterWithFakeCore(MAIN, {
+					controllerHost: '127.0.0.1',
+					controllerPort: mock.port,
+					apiToken: TOKEN,
+					listenPort,
+					listenIp: '127.0.0.1',
+					...protectConfig({ protectPassword: decrypted }),
+				});
+				adapter.encrypt = options.encrypt ?? aes;
+				adapter.objects.set(INSTANCE_OBJECT, {
+					_id: INSTANCE_OBJECT,
+					native: { protectPassword: stored, controllerHost: '127.0.0.1' },
+					encryptedNative: options.listed === false ? ['apiToken'] : ['apiToken', 'protectPassword'],
+				});
+				await adapter.fireReady();
+				return adapter;
+			}
+			const storedPassword = (): unknown => adapter!.objects.get(INSTANCE_OBJECT).native.protectPassword;
+
+			it('empty password: nothing is written', async () => {
+				const instance = await startWithStoredPassword('', '');
+				expect(storedPassword()).to.equal('');
+				expect(protect.logins.map(l => l.password)).to.deep.equal(['']);
+				expect(instance.log.of('info').filter(m => m.includes('encrypting'))).to.deep.equal([]);
+			});
+
+			it('already encrypted: logs in with the decrypted password, nothing is written', async () => {
+				const instance = await startWithStoredPassword(aes('protect-secret'), 'protect-secret');
+				expect(storedPassword()).to.equal(aes('protect-secret'));
+				expect(protect.logins).to.deep.equal([{ username: 'viewer', password: 'protect-secret', status: 200 }]);
+				expect(instance.val('info.protectConnected')).to.equal(true);
+			});
+
+			it('plain text: logs in with the stored password and stores it encrypted — exactly once', async () => {
+				// js-controller "decrypted" the plain text into garbage
+				const instance = await startWithStoredPassword('protect-secret', '\u0001\u0002garbage');
+				expect(protect.logins, 'login uses the stored plain text, not the garbage').to.deep.equal([
+					{ username: 'viewer', password: 'protect-secret', status: 200 },
+				]);
+				expect(instance.val('info.protectConnected')).to.equal(true);
+				expect(storedPassword()).to.equal(aes('protect-secret'));
+				expect(
+					adapter!.objects.get(INSTANCE_OBJECT).native.controllerHost,
+					'other settings untouched',
+				).to.equal('127.0.0.1');
+				expect(instance.log.messages.filter(m => m.message.includes('protect-secret'))).to.deep.equal([]);
+
+				// the restart js-controller performs after the write: now the value is encrypted
+				await instance.fireUnload();
+				const migrated = storedPassword();
+				const second = await startWithStoredPassword(migrated, 'protect-secret');
+				expect(storedPassword(), 'no second write, no restart loop').to.equal(migrated);
+				expect(second.log.of('info').filter(m => m.includes('encrypting'))).to.deep.equal([]);
+				expect(second.val('info.protectConnected')).to.equal(true);
+			});
+
+			it('old non-AES system secret, plain text: migrated once with the legacy encryption', async () => {
+				const xor = (plain: string): string =>
+					[...plain]
+						.map((c, i) => String.fromCharCode(c.charCodeAt(0) ^ 'Zgfr56gFe87jJOM'.charCodeAt(i % 15)))
+						.join('');
+				const instance = await startWithStoredPassword('protect-secret', xor('protect-secret'), {
+					encrypt: xor,
+				});
+				expect(protect.logins.map(l => l.password)).to.deep.equal(['protect-secret']);
+				expect(storedPassword()).to.equal(xor('protect-secret'));
+
+				await instance.fireUnload();
+				const second = await startWithStoredPassword(xor('protect-secret'), 'protect-secret', { encrypt: xor });
+				expect(storedPassword(), 'no second write').to.equal(xor('protect-secret'));
+				expect(second.val('info.protectConnected')).to.equal(true);
+			});
+
+			it('old non-AES system secret, undecidable value: nothing is written, a rejected login hints at re-entering the password', async () => {
+				// stored value and its XOR form are both printable → cannot be told apart
+				const xor = (plain: string): string =>
+					[...plain].map(c => String.fromCharCode(c.charCodeAt(0) ^ '5'.charCodeAt(0))).join('');
+				const instance = await startWithStoredPassword('abcabc', xor('abcabc'), { encrypt: xor });
+				expect(storedPassword()).to.equal('abcabc');
+				expect(protect.logins.map(l => l.status)).to.deep.equal([401]);
+				expect(instance.log.of('warn')).to.have.length(1);
+				expect(instance.log.of('warn')[0]).to.contain('re-enter the Protect password and save');
+			});
+
+			it('attribute not listed as encrypted in the instance object: stored value is used, nothing is written', async () => {
+				await startWithStoredPassword('protect-secret', 'protect-secret', { listed: false });
+				expect(storedPassword()).to.equal('protect-secret');
+				expect(protect.logins.map(l => l.status)).to.deep.equal([200]);
+			});
+		});
+	});
+
+	describe('TLS diagnostics for the Access controller (verifyTLS)', () => {
+		it('names the rejected certificate and what to do about it', async () => {
+			const instance = await start({ verifyTLS: true, enableWebhooks: false });
+			expect(instance.val('info.connection')).to.equal(false);
+			const warnings = instance.log.of('warn');
+			expect(warnings).to.have.length(1);
+			expect(warnings[0]).to.contain(
+				'TLS certificate of the controller was rejected (DEPTH_ZERO_SELF_SIGNED_CERT)',
+			);
+			expect(warnings[0]).to.contain('disable "Verify TLS certificate" in the connection settings');
+			expect(mock.requests, 'nothing was sent over the unverified connection').to.deep.equal([]);
+		});
+
+		it('connects with verifyTLS when the controller certificate is stored as CA', async () => {
+			const instance = await startConnected({ verifyTLS: true, caCert: mock.cert, enableWebhooks: false });
+			expect(instance.val('info.connection')).to.equal(true);
+			expect(instance.log.of('warn')).to.deep.equal([]);
 		});
 	});
 

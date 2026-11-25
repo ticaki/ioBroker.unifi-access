@@ -37,8 +37,11 @@ class ProtectStub {
 	/** Force this status for the next media/meta request */
 	nextMediaStatus = 0;
 
+	cert = '';
+
 	async start(): Promise<void> {
 		const tls = createSelfSignedCert();
+		this.cert = tls.cert;
 		const server = createServer({ key: tls.key, cert: tls.cert }, (req, res) => {
 			const chunks: Buffer[] = [];
 			req.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -381,20 +384,83 @@ describe('ProtectHttp (against a local UniFi OS / Protect stand-in)', () => {
 	});
 
 	describe('classifyProtectError()', () => {
-		it('maps 401/403 responses to "unauthorized" and everything else to "network"', () => {
-			const withStatus = (status: number): AxiosError =>
-				new AxiosError('failed', 'ERR_BAD_REQUEST', undefined, undefined, {
-					status,
-					statusText: '',
-					headers: {},
-					config: {} as never,
-					data: undefined,
-				});
-			expect(classifyProtectError(withStatus(401))).to.equal('unauthorized');
-			expect(classifyProtectError(withStatus(403))).to.equal('unauthorized');
+		const withStatus = (status: number): AxiosError =>
+			new AxiosError('failed', 'ERR_BAD_REQUEST', undefined, undefined, {
+				status,
+				statusText: '',
+				headers: {},
+				config: {} as never,
+				data: undefined,
+			});
+
+		it('separates configuration problems (credentials, tls) from temporary ones (rate-limited, network)', () => {
+			expect(classifyProtectError(withStatus(401))).to.equal('credentials');
+			expect(classifyProtectError(withStatus(403))).to.equal('credentials');
+			expect(classifyProtectError(withStatus(429))).to.equal('rate-limited');
 			expect(classifyProtectError(withStatus(500))).to.equal('network');
+			expect(classifyProtectError(new AxiosError('tls', 'DEPTH_ZERO_SELF_SIGNED_CERT'))).to.equal('tls');
+			expect(classifyProtectError(new AxiosError('tls', 'ERR_TLS_CERT_ALTNAME_INVALID'))).to.equal('tls');
+			expect(classifyProtectError(new AxiosError('refused', 'ECONNREFUSED'))).to.equal('network');
 			expect(classifyProtectError(new Error('boom'))).to.equal('network');
 			expect(classifyProtectError(undefined)).to.equal('network');
+		});
+
+		it('classifies the errors login() really throws', async () => {
+			stub.loginStatus = 401;
+			expect(classifyProtectError(await rejection(protect.login()))).to.equal('credentials');
+			stub.loginStatus = 429;
+			expect(classifyProtectError(await rejection(protect.login()))).to.equal('rate-limited');
+			stub.loginStatus = 0;
+			stub.sendCookie = false;
+			expect(classifyProtectError(await rejection(protect.login()))).to.equal('network');
+
+			const verifying = new ProtectHttp({
+				host: stub.host,
+				username: 'viewer',
+				password: 'secret',
+				verifyTLS: true,
+			});
+			expect(classifyProtectError(await rejection(verifying.login()))).to.equal('tls');
+		});
+	});
+
+	describe('TLS options', () => {
+		it('verifyTLS=true with the console certificate as caCert logs in', async () => {
+			const trusting = new ProtectHttp({
+				host: '127.0.0.1',
+				port: stub.port,
+				username: 'viewer',
+				password: 'secret',
+				verifyTLS: true,
+				caCert: stub.cert,
+			});
+			await trusting.login();
+			expect(trusting.isLoggedIn()).to.equal(true);
+		});
+
+		it('verifyTLS=true with a foreign CA is refused', async () => {
+			const foreign = new ProtectHttp({
+				host: '127.0.0.1',
+				port: stub.port,
+				username: 'viewer',
+				password: 'secret',
+				verifyTLS: true,
+				caCert: createSelfSignedCert().cert,
+			});
+			expect(classifyProtectError(await rejection(foreign.login()))).to.equal('tls');
+			expect(foreign.isLoggedIn()).to.equal(false);
+		});
+
+		it('appends the port to the host unless it is 443', () => {
+			const client = (options: { host: string; port?: number }): string =>
+				(
+					new ProtectHttp({ ...options, username: 'u', password: 'p' }) as unknown as {
+						client: { defaults: { baseURL: string } };
+					}
+				).client.defaults.baseURL;
+			expect(client({ host: 'console.local' })).to.equal('https://console.local');
+			expect(client({ host: 'console.local', port: 443 })).to.equal('https://console.local');
+			expect(client({ host: 'console.local', port: 8443 })).to.equal('https://console.local:8443');
 		});
 	});
 });

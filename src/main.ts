@@ -7,7 +7,9 @@
 import * as utils from '@iobroker/adapter-core';
 
 import { classifyError, UnifiHttp } from './lib/unifiHttp';
-import { ProtectHttp } from './lib/protectHttp';
+import { classifyProtectError, ProtectHttp } from './lib/protectHttp';
+import { classifyStoredSecret } from './lib/secretMigration';
+import { tlsCertificateErrorCode } from './lib/tlsErrors';
 import { UnifiWebSocket } from './lib/unifiWebSocket';
 import { Library } from './lib/library';
 import { detectModel, featuresFor, type DeviceCapability, type UnifiDeviceModel } from './lib/deviceModels';
@@ -18,6 +20,7 @@ import {
 	LOCK_RULE_BY_INDEX,
 	MAX_UNLOCK_MINUTES,
 	normalizeDefaultUnlockMinutes,
+	normalizePort,
 	parseLockRuleIndex,
 	parseUnlockMinutes,
 } from './lib/controlValues';
@@ -98,6 +101,7 @@ class UnifiAccess extends utils.Adapter {
 	private webhookEndpointId: string | null = null;
 
 	private bootstrapRetryTimer: ioBroker.Timeout | undefined;
+	private protectRetryTimer: ioBroker.Timeout | undefined;
 
 	private devices: Map<string, DeviceCacheEntry> = new Map();
 	private userNameCache: Map<string, string> = new Map();
@@ -117,6 +121,9 @@ class UnifiAccess extends utils.Adapter {
 	/** Last value the adapter acknowledged per control state — what an invalid write is reset to. */
 	private readonly lastAckedControlValues = new Map<string, number>();
 
+	/** Legacy system secret: plain-text and encrypted Protect passwords cannot be told apart. */
+	private protectPasswordUncertain = false;
+
 	public constructor(options: Partial<utils.AdapterOptions> = {}) {
 		super({
 			...options,
@@ -132,6 +139,7 @@ class UnifiAccess extends utils.Adapter {
 		this.library = new Library(this);
 		await this.setState('info.connection', false, true);
 		await this.removeObsoleteObjects();
+		await this.library.ensureBaseObjects();
 
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
@@ -150,44 +158,7 @@ class UnifiAccess extends utils.Adapter {
 
 		this.http = new UnifiHttp({ host, port, token, verifyTLS, caCert, debugLog: (m: string) => this.log.debug(m) });
 
-		if (cfg.enableProtect === true && cfg.protectUsername) {
-			this.protectHttp = new ProtectHttp({
-				host,
-				username: cfg.protectUsername,
-				password: cfg.protectPassword ?? '',
-				verifyTLS,
-			});
-			try {
-				await this.protectHttp.login();
-				this.log.info('UniFi Protect API client initialized');
-			} catch (err) {
-				const msg = (err as Error).message;
-				this.log.warn(`Protect login failed: ${msg}`);
-				if (msg.includes('429')) {
-					// Rate-limited — retry once after 30 s without blocking the adapter start.
-					this.log.info('Protect rate-limited (429) — retrying in 30 s.');
-					setTimeout(() => {
-						void this.protectHttp
-							?.login()
-							.then(() => {
-								this.log.info('Protect login retry succeeded.');
-								void this.setState('info.protectConnected', { val: true, ack: true });
-							})
-							.catch(e => {
-								this.log.warn(`Protect login retry failed: ${(e as Error).message}`);
-								this.protectHttp = null;
-								void this.setState('info.protectConnected', { val: false, ack: true });
-							});
-					}, 30_000);
-				} else {
-					this.protectHttp = null;
-				}
-			}
-		} else if (cfg.enableProtect === true) {
-			this.log.warn('[protect] integration enabled but no username configured — skipping');
-		} else {
-			this.log.debug('[protect] integration disabled');
-		}
+		await this.initProtect(host, caCert);
 
 		this.subscribeStates('doors.*.unlock');
 		this.subscribeStates('doors.*.unlock_duration');
@@ -197,6 +168,131 @@ class UnifiAccess extends utils.Adapter {
 
 		await this.bootstrapAndConnect();
 		await this.startSharedHttpServer();
+	}
+
+	/**
+	 * Set up the optional UniFi Protect client (camera snapshots for door events).
+	 *
+	 * @param host Console host (the same host as UniFi Access)
+	 * @param caCert CA certificate from the connection settings
+	 */
+	private async initProtect(host: string, caCert: string | undefined): Promise<void> {
+		const cfg = this.config;
+		if (cfg.enableProtect !== true) {
+			this.log.debug('[protect] integration disabled');
+			return;
+		}
+		if (!cfg.protectUsername) {
+			this.log.warn('[protect] integration enabled but no username configured — skipping');
+			return;
+		}
+		const password = await this.resolveProtectPassword();
+		this.protectHttp = new ProtectHttp({
+			host,
+			port: normalizePort(cfg.protectPort, 443),
+			username: cfg.protectUsername,
+			password,
+			// exactly as configured — there is no silent fallback to an unverified connection
+			verifyTLS: cfg.protectVerifyTLS === true,
+			caCert,
+		});
+		await this.tryProtectLogin(1);
+	}
+
+	/**
+	 * The Protect password to log in with.
+	 *
+	 * `protectPassword` became an encrypted attribute; instances configured before that still hold it
+	 * in plain text, which js-controller turns into garbage when it "decrypts" the configuration at
+	 * start. The stored value is inspected and — if it is plain text — used directly and written back
+	 * encrypted once (the write restarts the instance; afterwards the value is recognised as encrypted).
+	 */
+	private async resolveProtectPassword(): Promise<string> {
+		const decrypted = typeof this.config.protectPassword === 'string' ? this.config.protectPassword : '';
+		const instanceId = `system.adapter.${this.namespace}`;
+		let instance: ioBroker.Object | null | undefined;
+		try {
+			instance = await this.getForeignObjectAsync(instanceId);
+		} catch (err) {
+			this.log.debug(`[protect] could not read the instance object: ${errorText(err)}`);
+		}
+		if (!instance) {
+			return decrypted;
+		}
+		const encryptedNative = (instance as { encryptedNative?: unknown }).encryptedNative;
+		const stored = classifyStoredSecret({
+			raw: (instance.native as Record<string, unknown> | undefined)?.protectPassword,
+			decrypted,
+			isEncryptedAttribute: Array.isArray(encryptedNative) && encryptedNative.includes('protectPassword'),
+			encrypt: plain => this.encrypt(plain),
+		});
+		if (stored.kind === 'plaintext') {
+			this.log.info('[protect] the stored Protect password is not encrypted yet — encrypting it now.');
+			try {
+				await this.extendForeignObjectAsync(instanceId, { native: { protectPassword: stored.encrypted } });
+			} catch (err) {
+				this.log.warn(`[protect] could not store the encrypted Protect password: ${errorText(err)}`);
+			}
+		} else if (stored.kind === 'ambiguous') {
+			this.protectPasswordUncertain = true;
+		}
+		return stored.password;
+	}
+
+	private async tryProtectLogin(attempt: number): Promise<void> {
+		const protect = this.protectHttp;
+		if (!protect) {
+			return;
+		}
+		try {
+			await protect.login();
+			this.log.info(attempt === 1 ? 'UniFi Protect API client initialized' : 'Protect login retry succeeded.');
+			await this.setState('info.protectConnected', { val: true, ack: true });
+			return;
+		} catch (err) {
+			const kind = classifyProtectError(err);
+			if (kind === 'tls') {
+				// A configuration problem: retrying cannot help, so say exactly once what to do.
+				this.log.warn(
+					`Protect login failed: the TLS certificate of the console was rejected (${tlsCertificateErrorCode(err)}). ` +
+						`Either disable "Verify TLS certificate" on the Protect tab or store the CA certificate of the console ` +
+						`in the connection settings. The Protect integration stays off until the instance is restarted.`,
+				);
+				this.protectHttp = null;
+			} else if (kind === 'credentials') {
+				this.log.warn(
+					`Protect login failed: user name or password rejected.${
+						this.protectPasswordUncertain
+							? ' The password was saved by an earlier adapter version and may need to be entered again: open the instance settings, re-enter the Protect password and save.'
+							: ''
+					} The Protect integration stays off until the instance is restarted.`,
+				);
+				this.protectHttp = null;
+			} else {
+				// rate limit / console not reachable (yet): try again with growing distance
+				const delayMs = Math.min(30_000 * 2 ** Math.min(attempt - 1, 10), 10 * 60_000);
+				const text = `Protect login failed (${kind}): ${errorText(err)} — retrying in ${Math.round(delayMs / 1000)} s.`;
+				if (attempt === 1) {
+					this.log.warn(text);
+				} else {
+					this.log.debug(text);
+				}
+				this.protectRetryTimer = this.setTimeout(() => {
+					this.protectRetryTimer = undefined;
+					this.tryProtectLogin(attempt + 1).catch((e: unknown) => {
+						this.log.debug(`Protect login retry failed unexpectedly: ${errorText(e)}`);
+					});
+				}, delayMs);
+			}
+		}
+		await this.setState('info.protectConnected', { val: false, ack: true });
+	}
+
+	private requireProtect(): ProtectHttp {
+		if (!this.protectHttp) {
+			throw new Error('UniFi Protect is not connected');
+		}
+		return this.protectHttp;
 	}
 
 	private buildTlsOptions(): { key: string; cert: string; ca?: string } | undefined {
@@ -276,10 +372,16 @@ class UnifiAccess extends utils.Adapter {
 			server.registerHandler('thumbnail', handler.matches, handler.handle);
 		}
 
-		if (cfg.enableProtect === true && this.protectHttp !== null) {
+		if (cfg.enableProtect === true && cfg.protectUsername) {
 			const snapshotPrefix = `/unifi-access/${this.instance}/protect-snapshot`;
 			const videoPrefix = `/unifi-access/${this.instance}/protect-video`;
-			const protect = this.protectHttp;
+			// resolved per request: the client is dropped when the login turns out to be misconfigured
+			const protect = {
+				getSnapshot: (cameraId: string): Promise<Buffer> => this.requireProtect().getSnapshot(cameraId),
+				getEventMeta: (eventId: string): Promise<{ clipUrl?: string } | null> =>
+					this.requireProtect().getEventMeta(eventId),
+				getClipBuffer: (clipPath: string): Promise<Buffer> => this.requireProtect().getClipBuffer(clipPath),
+			};
 			const protectHandler = new ProtectMediaHandler({
 				snapshotPathPrefix: snapshotPrefix,
 				videoPathPrefix: videoPrefix,
@@ -381,7 +483,13 @@ class UnifiAccess extends utils.Adapter {
 			const kind = classifyError(err);
 			this.setConnectionStatus(false, kind);
 			const axErr = err as { response?: { status?: number }; message?: string };
-			if (axErr.response?.status === 404) {
+			const tlsCode = tlsCertificateErrorCode(err);
+			if (tlsCode) {
+				this.log.warn(
+					`Bootstrap failed: the TLS certificate of the controller was rejected (${tlsCode}). ` +
+						`Either disable "Verify TLS certificate" in the connection settings or store the CA certificate of the controller there.`,
+				);
+			} else if (axErr.response?.status === 404) {
 				this.log.warn(
 					`Bootstrap failed: 404 — verify that host and port point to a UniFi Access controller (${this.http.url}).`,
 				);
@@ -1286,6 +1394,10 @@ class UnifiAccess extends utils.Adapter {
 			if (this.bootstrapRetryTimer) {
 				this.clearTimeout(this.bootstrapRetryTimer);
 				this.bootstrapRetryTimer = undefined;
+			}
+			if (this.protectRetryTimer) {
+				this.clearTimeout(this.protectRetryTimer);
+				this.protectRetryTimer = undefined;
 			}
 			if (this.httpServer) {
 				await this.httpServer.stop();

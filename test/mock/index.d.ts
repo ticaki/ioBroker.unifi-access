@@ -285,6 +285,8 @@ export class FakeAdapter {
 	stateWrites: { id: string; val: any; ack: boolean }[];
 	subscriptions: string[];
 	sentMessages: { to: string; command: string; message: any; callback: unknown }[];
+	/** Replaceable stand-in for adapter.encrypt (default: `encrypted(<value>)`) */
+	encrypt: (value: string) => string;
 	/** Pending timers created through adapter.setTimeout */
 	timers: Set<unknown>;
 	unloaded: boolean;
@@ -324,6 +326,32 @@ export class FakeAdapter {
  * @param config The instance's `native` configuration
  */
 export function createAdapterWithFakeCore(mainFile: string, config: Record<string, unknown>): FakeAdapter;
+
+/**
+ * Minimal stand-in for a UniFi OS console with UniFi Protect (private API, not part of the documented
+ * UniFi Access developer API): cookie login with CSRF token, camera snapshot, event metadata, clip.
+ */
+export class ProtectStub {
+	constructor(options?: { username?: string; password?: string; altNames?: string[] });
+
+	username: string;
+	password: string;
+	port: number;
+	/** PEM certificate of the stub (usable as `caCert`) */
+	readonly cert: string;
+	requests: { method: string; url: string; headers: IncomingHttpHeaders; body: string; status: number }[];
+	/** Every login attempt with the credentials received and the status answered */
+	logins: { username?: string; password?: string; status: number }[];
+	snapshot: Buffer;
+	clip: Buffer;
+	events: Record<string, Record<string, unknown>>;
+	sessions: number;
+
+	start(): Promise<this>;
+	stop(): Promise<void>;
+	/** Answer the next `times` login attempts (default 1) with the given HTTP status */
+	failLogins(status: number, times?: number): void;
+}
 
 /**
  * Wait a real amount of time (not affected by fake timers).

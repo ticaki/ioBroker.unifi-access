@@ -41,6 +41,8 @@ declare global {
 			protectUsername: string;
 			protectPassword: string;
 			protectVerifyTLS: boolean;
+			/** HTTPS port of the UniFi OS console for the Protect API (no admin field; default 443). */
+			protectPort: number;
 
 			unlockActorId: string;
 		}

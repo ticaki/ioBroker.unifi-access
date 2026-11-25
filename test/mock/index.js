@@ -16,6 +16,7 @@ const { delay, waitFor, rejection, nextEvent } = require('./testUtils');
 const { createTestLogger } = require('./testLogger');
 const { FakeAdapter, createAdapterWithFakeCore } = require('./fakeAdapterCore');
 const fixtures = require('./fixtures');
+const { ProtectStub } = require('./protectStub');
 
 /**
  * Ask the OS for a currently unused TCP port.
@@ -80,6 +81,7 @@ module.exports = {
 	nextEvent,
 	FakeAdapter,
 	createAdapterWithFakeCore,
+	ProtectStub,
 	fixtures,
 	API_PREFIX,
 	WS_PATH,

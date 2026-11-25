@@ -35,7 +35,17 @@ export class Library {
 		this.adapter = adapter;
 	}
 
-	async applyBootstrap(data: { devices: UnifiDeviceRaw[]; doors: UnifiDoorRaw[] }): Promise<void> {
+	private baseObjectsReady = false;
+
+	/**
+	 * Create every object that does not depend on what the controller reports (channels, info,
+	 * doorbell, events and notification states). Called at adapter start, before anything writes a
+	 * state — also when the controller is not reachable yet — and again by applyBootstrap().
+	 */
+	async ensureBaseObjects(): Promise<void> {
+		if (this.baseObjectsReady) {
+			return;
+		}
 		await this.ensureContainer('devices', 'Devices');
 		await this.ensureContainer('doors', 'Doors');
 		await this.ensureNotificationsContainer();
@@ -60,6 +70,11 @@ export class Library {
 			'Whether the webhook is registered with the controller',
 		);
 		await this.ensureSimpleState('info.protectConnected', 'boolean', 'UniFi Protect API connected');
+		this.baseObjectsReady = true;
+	}
+
+	async applyBootstrap(data: { devices: UnifiDeviceRaw[]; doors: UnifiDoorRaw[] }): Promise<void> {
+		await this.ensureBaseObjects();
 
 		for (const device of data.devices ?? []) {
 			await this.ensureDevice(device);

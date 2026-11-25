@@ -70,6 +70,17 @@ export function normalizeDefaultUnlockMinutes(value: unknown): number {
 }
 
 /**
+ * A TCP port from the configuration: an integer from 1 to 65535, otherwise the fallback.
+ *
+ * @param value Raw configuration value (number or numeric string)
+ * @param fallback Port used when the value is not a valid port
+ */
+export function normalizePort(value: unknown, fallback: number): number {
+	const n = typeof value === 'string' && /^\d{1,5}$/.test(value.trim()) ? Number(value.trim()) : value;
+	return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 65_535 ? n : fallback;
+}
+
+/**
  * Short, log-safe description of a rejected value (type and a bounded rendering).
  *
  * @param value Any value
