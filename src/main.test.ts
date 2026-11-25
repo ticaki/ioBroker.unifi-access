@@ -33,6 +33,7 @@ import {
 	type FakeAdapter,
 } from '../test/mock';
 import { ProtectHttp } from './lib/protectHttp';
+import { SnapshotCache } from './lib/snapshotCache';
 import { UnifiHttp } from './lib/unifiHttp';
 import { SharedHttpServer } from './webserver/sharedHttpServer';
 
@@ -2447,6 +2448,13 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			protectVerifyTLS: false,
 			protectPort: protect.port,
 			...overrides,
+		});
+
+		it('keeps at most 50 snapshots / 32 MiB in memory (R2T-03)', async () => {
+			const instance = await startConnected(protectConfig());
+			const cache = (instance as unknown as { protectSnapshotCache: SnapshotCache }).protectSnapshotCache;
+			expect(cache).to.be.instanceOf(SnapshotCache);
+			expect([cache.maxEntries, cache.maxBytes]).to.deep.equal([50, 32 * 1024 * 1024]);
 		});
 
 		describe('TLS verification (protectVerifyTLS, R-16)', () => {

@@ -1,10 +1,15 @@
 import { expect } from 'chai';
 
-import { SnapshotCache } from './snapshotCache';
+import { PROTECT_SNAPSHOT_CACHE_MAX_BYTES, PROTECT_SNAPSHOT_CACHE_MAX_ENTRIES, SnapshotCache } from './snapshotCache';
 
 const bytes = (n: number, fill = 0): Buffer => Buffer.alloc(n, fill);
 
 describe('SnapshotCache (Protect snapshots, RT-04)', () => {
+	it('the limits of the adapter are 50 snapshots and 32 MiB (R2T-03)', () => {
+		expect(PROTECT_SNAPSHOT_CACHE_MAX_ENTRIES).to.equal(50);
+		expect(PROTECT_SNAPSHOT_CACHE_MAX_BYTES).to.equal(33_554_432);
+	});
+
 	it('keeps up to the entry limit and drops the oldest first', () => {
 		const cache = new SnapshotCache(50, 32 * 1024 * 1024);
 		for (let i = 0; i < 51; i++) {

@@ -1,3 +1,8 @@
+/** Most Protect snapshots the adapter keeps for its media endpoint. */
+export const PROTECT_SNAPSHOT_CACHE_MAX_ENTRIES = 50;
+/** Most bytes of Protect snapshots the adapter keeps in total (32 MiB). */
+export const PROTECT_SNAPSHOT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+
 /**
  * Camera snapshots kept for the media endpoint, bounded by the number of entries and by bytes. When a
  * bound is exceeded, the oldest snapshots are dropped first. A single snapshot larger than the byte

@@ -24,7 +24,11 @@ import {
 	type ParsedAccessEvent,
 } from './lib/eventNormalizer';
 import { Library } from './lib/library';
-import { SnapshotCache } from './lib/snapshotCache';
+import {
+	PROTECT_SNAPSHOT_CACHE_MAX_BYTES,
+	PROTECT_SNAPSHOT_CACHE_MAX_ENTRIES,
+	SnapshotCache,
+} from './lib/snapshotCache';
 import { detectModel, featuresFor, type DeviceCapability, type UnifiDeviceModel } from './lib/deviceModels';
 import { isSafeProtectId, sanitizeStaticPath } from './lib/pathSafety';
 import {
@@ -183,7 +187,10 @@ class UnifiAccess extends utils.Adapter {
 	private forwardRules: ForwardRule[] = [];
 
 	/** Camera snapshots of door events for the media endpoint: at most 50 / 32 MiB, oldest dropped first. */
-	private readonly protectSnapshotCache = new SnapshotCache(50, 32 * 1024 * 1024);
+	private readonly protectSnapshotCache = new SnapshotCache(
+		PROTECT_SNAPSHOT_CACHE_MAX_ENTRIES,
+		PROTECT_SNAPSHOT_CACHE_MAX_BYTES,
+	);
 	/** Why TLS could not be activated although it is enabled (null: no problem). */
 	private tlsError: string | null = null;
 
