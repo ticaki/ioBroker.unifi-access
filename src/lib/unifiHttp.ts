@@ -1,4 +1,4 @@
-import axios, { type AxiosInstance, AxiosError } from 'axios';
+import axios, { type AxiosInstance, type AxiosResponse, AxiosError } from 'axios';
 import https from 'node:https';
 import { sanitizeStaticPath } from './pathSafety';
 import type {
@@ -30,6 +30,112 @@ export class InvalidStaticPathError extends Error {
 		super('invalid static resource path');
 		this.name = 'InvalidStaticPathError';
 	}
+}
+
+/**
+ * The controller answered with the documented response envelope and a `code` other than `SUCCESS`
+ * although the HTTP status signalled success (API reference 2.8: "code: Represents the result of
+ * request handling and indicates success or failure").
+ */
+export class UnifiApiError extends Error {
+	/** Error code of the envelope, e.g. `CODE_DEVICE_DEVICE_OFFLINE`. */
+	readonly code: string;
+	/** `msg` of the envelope, if any. */
+	readonly apiMessage?: string;
+	readonly httpStatus: number;
+
+	constructor(code: string, apiMessage: string | undefined, httpStatus: number, request: string) {
+		super(`UniFi Access API error ${code}${apiMessage ? `: ${apiMessage}` : ''} [${request}]`);
+		this.name = 'UnifiApiError';
+		this.code = code;
+		this.apiMessage = apiMessage;
+		this.httpStatus = httpStatus;
+	}
+}
+
+const API_PREFIX = '/api/v1/developer';
+const AUTH_ERROR_CODES = new Set(['CODE_AUTH_FAILED', 'CODE_ACCESS_TOKEN_INVALID', 'CODE_UNAUTHORIZED']);
+const USERS_PAGE_SIZE = 100;
+const USERS_MAX_PAGES = 50;
+
+/**
+ * Permission key an API token needs for a request (taken from the "Permission Key" of each
+ * endpoint in the API reference) — used to make a 403 actionable.
+ *
+ * @param method HTTP method
+ * @param path Request path below the API prefix
+ */
+export function requiredPermission(method: string, path: string): string | undefined {
+	const write = method.toUpperCase() !== 'GET';
+	if (path.startsWith('/devices')) {
+		return write ? 'edit:device' : 'view:device';
+	}
+	if (path.startsWith('/doors')) {
+		return write ? 'edit:space' : 'view:space';
+	}
+	if (path.startsWith('/users')) {
+		return write ? 'edit:user' : 'view:user';
+	}
+	if (path.startsWith('/system/')) {
+		return 'view:system_log';
+	}
+	if (path.startsWith('/webhooks')) {
+		return write ? 'edit:webhook' : 'view:webhook';
+	}
+	return undefined;
+}
+
+/**
+ * `code` / `msg` of a response body when it is (or contains, for binary requests) the documented envelope.
+ *
+ * @param data Response body as delivered by axios
+ * @param contentType Content-Type header of the response
+ */
+function readEnvelope(data: unknown, contentType: unknown): { code?: string; msg?: string } {
+	let body: unknown = data;
+	if (data instanceof ArrayBuffer || Buffer.isBuffer(data)) {
+		// binary request: only a response that declares itself as JSON can be an envelope
+		if (typeof contentType !== 'string' || !contentType.toLowerCase().includes('json')) {
+			return {};
+		}
+		const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+		if (bytes.length > 65_536) {
+			return {};
+		}
+		try {
+			body = JSON.parse(bytes.toString('utf8'));
+		} catch {
+			return {};
+		}
+	}
+	if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+		return {};
+	}
+	const { code, msg } = body as { code?: unknown; msg?: unknown };
+	return {
+		code: typeof code === 'string' && code !== '' ? code : undefined,
+		msg: typeof msg === 'string' && msg !== '' ? msg : undefined,
+	};
+}
+
+function describeRequest(config: { method?: string; url?: string } | undefined): string {
+	const path = (config?.url ?? '').split('?')[0];
+	return `${(config?.method ?? 'GET').toUpperCase()} ${path}`;
+}
+
+/**
+ * The API error code carried by an error of {@link UnifiHttp}, whatever HTTP status it came with.
+ *
+ * @param err Error thrown by a UnifiHttp method
+ */
+export function apiErrorCode(err: unknown): string | undefined {
+	if (err instanceof UnifiApiError) {
+		return err.code;
+	}
+	if (err instanceof AxiosError) {
+		return readEnvelope(err.response?.data, err.response?.headers?.['content-type']).code;
+	}
+	return undefined;
 }
 
 const REDACTED_KEYS = /secret|token|password|authorization|cookie/i;
@@ -77,6 +183,41 @@ export class UnifiHttp {
 				ca: options.caCert ? options.caCert : undefined,
 			}),
 		});
+		// The response envelope is evaluated in one place for all calls: a `code` other than SUCCESS is an
+		// error even with HTTP 2xx, and an HTTP error gets the API code, the endpoint and — for 403 — the
+		// missing token permission added to its message. Bodies without envelope pass through untouched.
+		this.client.interceptors.response.use(
+			(r: AxiosResponse) => {
+				const { code, msg } = readEnvelope(r.data, r.headers?.['content-type']);
+				if (code !== undefined && code !== 'SUCCESS') {
+					throw new UnifiApiError(code, msg, r.status, describeRequest(r.config));
+				}
+				return r;
+			},
+			(err: unknown) => {
+				if (err instanceof AxiosError && err.response) {
+					const { code, msg } = readEnvelope(err.response.data, err.response.headers?.['content-type']);
+					const request = describeRequest(err.config);
+					let text = err.message;
+					if (code) {
+						text += ` (${code}${msg ? `: ${msg}` : ''})`;
+					}
+					text += ` [${request}]`;
+					if (err.response.status === 403) {
+						const path = request.split(' ')[1] ?? '';
+						const permission = requiredPermission(
+							request.split(' ')[0],
+							path.startsWith(API_PREFIX) ? path.slice(API_PREFIX.length) : path,
+						);
+						if (permission) {
+							text += ` — the API token needs the permission "${permission}"`;
+						}
+					}
+					err.message = text;
+				}
+				return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+			},
+		);
 		if (options.debugLog) {
 			const log = options.debugLog;
 			this.client.interceptors.response.use(r => {
@@ -95,15 +236,10 @@ export class UnifiHttp {
 		return this.baseUrl;
 	}
 
-	/** Lightweight connectivity + token check — lists devices (read-only). */
-	async verify(): Promise<void> {
-		await this.client.get('/api/v1/developer/devices');
-	}
-
 	async listDevices(): Promise<UnifiDeviceRaw[]> {
-		// refresh=true asks the controller for live state; without it the documented response
-		// only contains id/name/type/alias and the `online` flag is omitted, so devices would
-		// always appear offline until a webhook/WS event fires.
+		// refresh=true "fetches real-time device info but may be slower" (API reference 8.1). The
+		// documented response lists id, name, type and alias only; `online` and `firmware` are not
+		// documented but sent by controllers in practice — callers must treat them as optional.
 		const r = await this.client.get<{ data: UnifiDeviceRaw[] | UnifiDeviceRaw[][] }>(
 			'/api/v1/developer/devices?refresh=true',
 		);
@@ -152,9 +288,60 @@ export class UnifiHttp {
 		return rule && typeof rule === 'object' && !Array.isArray(rule) ? rule : null;
 	}
 
+	/**
+	 * Fetch all users (API reference 3.5) page by page with the documented `page_num` / `page_size`
+	 * parameters. The default page size without parameters is not documented, so relying on a single
+	 * request could silently truncate the list.
+	 *
+	 * Stops when `pagination.total` is reached, a page is not full, a page brings nothing new, or after
+	 * {@link USERS_MAX_PAGES} pages. Should the controller reject the parameters on the first request,
+	 * the plain request of earlier versions is used.
+	 */
 	async listUsers(): Promise<UnifiUserRaw[]> {
-		const r = await this.client.get<{ data: UnifiUserRaw[] }>('/api/v1/developer/users');
-		return r.data?.data ?? [];
+		type Page = { data?: UnifiUserRaw[]; pagination?: { total?: unknown } };
+		const users: UnifiUserRaw[] = [];
+		const seen = new Set<string>();
+		for (let page = 1; page <= USERS_MAX_PAGES; page++) {
+			let body: Page | undefined;
+			try {
+				body = (
+					await this.client.get<Page>('/api/v1/developer/users', {
+						params: { page_num: page, page_size: USERS_PAGE_SIZE },
+					})
+				).data;
+			} catch (err) {
+				const status = err instanceof AxiosError ? err.response?.status : undefined;
+				if (page === 1 && (status === 400 || apiErrorCode(err) === 'CODE_PARAMS_INVALID')) {
+					const plain = await this.client.get<Page>('/api/v1/developer/users');
+					return Array.isArray(plain.data?.data) ? plain.data.data : [];
+				}
+				throw err;
+			}
+			const items = Array.isArray(body?.data) ? body.data : [];
+			let added = 0;
+			for (const user of items) {
+				const key = typeof user?.id === 'string' ? user.id : undefined;
+				if (key !== undefined && seen.has(key)) {
+					continue;
+				}
+				if (key !== undefined) {
+					seen.add(key);
+				}
+				users.push(user);
+				added += 1;
+			}
+			const total = body?.pagination?.total;
+			if (typeof total === 'number' && Number.isFinite(total)) {
+				if (users.length >= total || items.length === 0) {
+					break;
+				}
+			} else if (items.length < USERS_PAGE_SIZE || added === 0) {
+				// no pagination info: a short page is the last one, a page without new users means the
+				// controller ignores the paging parameters
+				break;
+			}
+		}
+		return users;
 	}
 
 	/**
@@ -163,8 +350,8 @@ export class UnifiHttp {
 	 *
 	 * @param doorId UniFi door identifier
 	 * @param actor  Optional actor identity shown in system logs and webhooks
-	 * @param actor.id
-	 * @param actor.name
+	 * @param actor.id Id of the user the unlock is attributed to
+	 * @param actor.name Display name of that user
 	 */
 	async unlockDoor(doorId: string, actor?: { id: string; name: string }): Promise<void> {
 		const body: Record<string, string> = {};
@@ -231,14 +418,28 @@ export class UnifiHttp {
 		return r.data?.data ?? [];
 	}
 
+	/**
+	 * Register a webhook endpoint (API reference 11.4). A duplicate URL is reported as result
+	 * `{ code: 'CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED' }` — whether the controller sends that code with
+	 * HTTP 200 or with an error status — so the caller can adopt the existing endpoint.
+	 *
+	 * @param payload Name, URL and events of the endpoint
+	 */
 	async createWebhookEndpoint(
 		payload: UnifiWebhookEndpointCreate,
 	): Promise<{ code: string; endpoint?: UnifiWebhookEndpoint & { secret?: string } }> {
-		const r = await this.client.post<{ code?: string; data?: UnifiWebhookEndpoint & { secret?: string } }>(
-			'/api/v1/developer/webhooks/endpoints',
-			payload,
-		);
-		return { code: r.data?.code ?? 'SUCCESS', endpoint: r.data?.data };
+		try {
+			const r = await this.client.post<{ code?: string; data?: UnifiWebhookEndpoint & { secret?: string } }>(
+				'/api/v1/developer/webhooks/endpoints',
+				payload,
+			);
+			return { code: r.data?.code ?? 'SUCCESS', endpoint: r.data?.data };
+		} catch (err) {
+			if (apiErrorCode(err) === 'CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED') {
+				return { code: 'CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED', endpoint: undefined };
+			}
+			throw err;
+		}
 	}
 
 	/**
@@ -281,6 +482,10 @@ export function classifyError(err: unknown): 'unauthorized' | 'network' {
 		if (err.response?.status === 401 || err.response?.status === 403) {
 			return 'unauthorized';
 		}
+	}
+	const code = apiErrorCode(err);
+	if (code !== undefined && AUTH_ERROR_CODES.has(code)) {
+		return 'unauthorized';
 	}
 	return 'network';
 }

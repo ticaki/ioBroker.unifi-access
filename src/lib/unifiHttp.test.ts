@@ -2,7 +2,7 @@ import { expect } from 'chai';
 import { AxiosError } from 'axios';
 
 import { createSelfSignedCert, fixtures, getFreePort, MockUnifiController, rejection } from '../../test/mock';
-import { classifyError, InvalidStaticPathError, UnifiHttp } from './unifiHttp';
+import { apiErrorCode, classifyError, InvalidStaticPathError, UnifiApiError, UnifiHttp } from './unifiHttp';
 
 const TOKEN = 'module-test-token';
 const { DOOR_A2 } = fixtures.IDS;
@@ -44,23 +44,6 @@ describe('UnifiHttp (against the mock controller)', () => {
 		it('sends JSON bodies with a JSON content type', async () => {
 			await http.setDoorLockRule(DOOR_A2, { type: 'keep_lock' });
 			expect(mock.requests[0].headers['content-type']).to.match(/^application\/json/);
-		});
-	});
-
-	describe('verify()', () => {
-		it('performs a read-only GET /devices', async () => {
-			await http.verify();
-			expect(mock.requests).to.have.length(1);
-			expect(mock.requests[0].method).to.equal('GET');
-			expect(mock.requests[0].path).to.equal('/devices');
-			expect(mock.requests[0].rawBody).to.equal('');
-		});
-
-		it('rejects when the token is wrong', async () => {
-			const wrong = new UnifiHttp({ host: '127.0.0.1', port: mock.port, token: 'wrong' });
-			const err = await rejection(wrong.verify());
-			expect(err).to.be.instanceOf(AxiosError);
-			expect((err as AxiosError).response?.status).to.equal(401);
 		});
 	});
 
@@ -122,13 +105,101 @@ describe('UnifiHttp (against the mock controller)', () => {
 			expect(doors).to.deep.equal(fixtures.DEFAULT_DOORS);
 		});
 
-		it('listUsers requests GET /users and returns the user list', async () => {
+		it('listUsers requests GET /users with the documented pagination parameters and returns the user list', async () => {
 			const users = await http.listUsers();
 			expect(mock.requests).to.have.length(1);
 			expect(mock.requests[0].method).to.equal('GET');
 			expect(mock.requests[0].path).to.equal('/users');
+			expect(mock.requests[0].query).to.deep.equal({ page_num: '1', page_size: '100' });
 			expect(users.map(u => u.id)).to.deep.equal(fixtures.DEFAULT_USERS.map(u => u.id));
 			expect(users[0].first_name).to.equal('Hong');
+		});
+
+		describe('listUsers() pagination (api_reference 3.5)', () => {
+			const manyUsers = (count: number): { id: string; first_name: string }[] =>
+				Array.from({ length: count }, (_, i) => ({ id: `user-${i + 1}`, first_name: `User ${i + 1}` }));
+
+			it('fetches all pages until pagination.total is reached', async () => {
+				mock.users = manyUsers(250);
+				const users = await http.listUsers();
+				expect(users).to.have.length(250);
+				expect(users.map(u => u.id)).to.deep.equal(mock.users.map(u => u.id));
+				expect(mock.requests.map(r => r.query)).to.deep.equal([
+					{ page_num: '1', page_size: '100' },
+					{ page_num: '2', page_size: '100' },
+					{ page_num: '3', page_size: '100' },
+				]);
+			});
+
+			it('does not request a further page when the first one is complete (exactly one page size)', async () => {
+				mock.users = manyUsers(100);
+				expect(await http.listUsers()).to.have.length(100);
+				expect(mock.requests).to.have.length(1);
+			});
+
+			it('without a pagination block: continues while pages are full and stops at the first short page', async () => {
+				const all = manyUsers(130);
+				mock.failNext({ path: '/users', status: 200, body: { code: 'SUCCESS', data: all.slice(0, 100) } });
+				mock.failNext({ path: '/users', status: 200, body: { code: 'SUCCESS', data: all.slice(100) } });
+				expect(await http.listUsers()).to.have.length(130);
+				expect(mock.requests).to.have.length(2);
+			});
+
+			it('a controller that ignores the paging parameters and always returns everything is not looped over', async () => {
+				const all = manyUsers(100);
+				mock.failNext({
+					path: '/users',
+					status: 200,
+					body: { code: 'SUCCESS', data: all },
+					times: Number.POSITIVE_INFINITY,
+				});
+				const users = await http.listUsers();
+				// no pagination info and identical pages: stop instead of collecting duplicates
+				expect(users).to.have.length(100);
+				expect(mock.requests.length).to.be.lessThan(4);
+			});
+
+			it('never requests more than 50 pages', async () => {
+				mock.failNext({
+					path: '/users',
+					status: 200,
+					body: {
+						code: 'SUCCESS',
+						data: manyUsers(100),
+						pagination: { page_num: 1, page_size: 100, total: 1e9 },
+					},
+					times: Number.POSITIVE_INFINITY,
+				});
+				await http.listUsers();
+				expect(mock.requests.length).to.be.at.most(50);
+			});
+
+			it('falls back to the plain request when the controller rejects the paging parameters', async () => {
+				mock.failNext({ path: '/users', status: 400, code: 'CODE_PARAMS_INVALID' });
+				const users = await http.listUsers();
+				expect(users).to.have.length(fixtures.DEFAULT_USERS.length);
+				expect(mock.requests.map(r => r.url)).to.deep.equal([
+					'/api/v1/developer/users?page_num=1&page_size=100',
+					'/api/v1/developer/users',
+				]);
+			});
+
+			it('an error on a later page rejects (no silently truncated list)', async () => {
+				mock.users = manyUsers(150);
+				const original = mock.users;
+				mock.failNext({
+					path: '/users',
+					status: 200,
+					body: {
+						code: 'SUCCESS',
+						data: original.slice(0, 100),
+						pagination: { page_num: 1, page_size: 100, total: 150 },
+					},
+				});
+				mock.failNext({ path: '/users', status: 500 });
+				const err = await rejection(http.listUsers());
+				expect((err as AxiosError).response?.status).to.equal(500);
+			});
 		});
 
 		it('fall back to an empty list when "data" is missing', async () => {
@@ -436,12 +507,10 @@ describe('UnifiHttp (against the mock controller)', () => {
 			expect(classifyError('nope')).to.equal('network');
 		});
 
-		// BUG-C-01: UnifiHttp ignores the `code` field of the documented response envelope
-		// (api_reference 2.8: "code: Represents the result of request handling and indicates success or
-		// failure"). A response with HTTP 200 and code != SUCCESS is treated as success: write calls resolve
-		// and read calls silently return an empty list.
+		// api_reference 2.8: "code: Represents the result of request handling and indicates success or failure".
+		// The documentation does not say which HTTP status accompanies an error code, so both are handled.
 		describe('response envelope with code != "SUCCESS" (HTTP 200)', () => {
-			it.skip('BUG-C-01: unlockDoor() rejects when the controller answers with an error code', async () => {
+			it('unlockDoor() rejects when the controller answers with an error code', async () => {
 				mock.failNext({
 					status: 200,
 					code: 'CODE_DEVICE_DEVICE_OFFLINE',
@@ -449,18 +518,157 @@ describe('UnifiHttp (against the mock controller)', () => {
 				});
 				const err = await rejection(http.unlockDoor(DOOR_A2));
 				expect(String((err as Error).message)).to.contain('CODE_DEVICE_DEVICE_OFFLINE');
+				expect(err).to.be.instanceOf(UnifiApiError);
+				expect(err).to.include({
+					code: 'CODE_DEVICE_DEVICE_OFFLINE',
+					apiMessage: 'The device is currently offline.',
+					httpStatus: 200,
+				});
+				expect((err as Error).message).to.contain('The device is currently offline.');
+				expect((err as Error).message).to.contain(`PUT /api/v1/developer/doors/${DOOR_A2}/unlock`);
 			});
 
-			it.skip('BUG-C-01: setDoorLockRule() rejects when the controller answers with an error code', async () => {
+			it('setDoorLockRule() rejects when the controller answers with an error code', async () => {
 				mock.failNext({ status: 200, code: 'CODE_OPERATION_FORBIDDEN' });
 				const err = await rejection(http.setDoorLockRule(DOOR_A2, { type: 'keep_unlock' }));
 				expect(String((err as Error).message)).to.contain('CODE_OPERATION_FORBIDDEN');
 			});
 
-			it.skip('BUG-C-01: listDevices() rejects instead of returning an empty list', async () => {
+			it('listDevices() rejects instead of returning an empty list', async () => {
 				mock.failNext({ status: 200, code: 'CODE_SYSTEM_ERROR' });
 				const err = await rejection(http.listDevices());
 				expect(String((err as Error).message)).to.contain('CODE_SYSTEM_ERROR');
+			});
+
+			for (const [name, call] of [
+				['listDoors', (c: UnifiHttp) => c.listDoors()],
+				['listUsers', (c: UnifiHttp) => c.listUsers()],
+				['getDoor', (c: UnifiHttp) => c.getDoor(DOOR_A2)],
+				['getDoorLockRule', (c: UnifiHttp) => c.getDoorLockRule(DOOR_A2)],
+				['getEmergencyStatus', (c: UnifiHttp) => c.getEmergencyStatus()],
+				['setEmergencyStatus', (c: UnifiHttp) => c.setEmergencyStatus({ lockdown: true })],
+				['listWebhookEndpoints', (c: UnifiHttp) => c.listWebhookEndpoints()],
+				['deleteWebhookEndpoint', (c: UnifiHttp) => c.deleteWebhookEndpoint('x')],
+				[
+					'updateWebhookEndpoint',
+					(c: UnifiHttp) => c.updateWebhookEndpoint('x', { name: 'n', endpoint: 'http://a/b', events: [] }),
+				],
+				['fetchSystemLogsRaw', (c: UnifiHttp) => c.fetchSystemLogsRaw('door_openings', 1, 2)],
+			] as [string, (c: UnifiHttp) => Promise<unknown>][]) {
+				it(`${name}() rejects with the API error code`, async () => {
+					mock.failNext({ status: 200, code: 'CODE_SYSTEM_ERROR', msg: 'An error occurred.', times: 2 });
+					const err = await rejection(call(http));
+					expect(err).to.be.instanceOf(UnifiApiError);
+					expect((err as UnifiApiError).code).to.equal('CODE_SYSTEM_ERROR');
+				});
+			}
+
+			it('getStaticResource() does not hand out a JSON error envelope as image bytes', async () => {
+				mock.failNext({ status: 200, code: 'CODE_RESOURCE_NOT_FOUND', msg: 'not found' });
+				const err = await rejection(http.getStaticResource('/preview/x.jpg'));
+				expect(err).to.be.instanceOf(UnifiApiError);
+				expect((err as UnifiApiError).code).to.equal('CODE_RESOURCE_NOT_FOUND');
+			});
+
+			it('getStaticResource() returns binary data untouched, even when the bytes look like JSON', async () => {
+				const bytes = Buffer.from('{"code":"CODE_SYSTEM_ERROR"}');
+				mock.addStaticResource('/preview/json-looking.jpg', bytes, 'image/jpeg');
+				const result = await http.getStaticResource('/preview/json-looking.jpg');
+				expect(result.equals(bytes)).to.equal(true);
+			});
+
+			it('responses without an envelope (no "code") are passed through', async () => {
+				mock.failNext({ status: 200, body: { data: [{ id: 'door-1', name: 'Plain' }] } });
+				expect(await http.listDoors()).to.deep.equal([{ id: 'door-1', name: 'Plain' }]);
+				mock.failNext({ status: 200, body: [] });
+				expect(await http.listDoors()).to.deep.equal([]);
+			});
+
+			it('classifyError() treats the authentication codes as "unauthorized", other codes as "network"', async () => {
+				for (const code of ['CODE_AUTH_FAILED', 'CODE_ACCESS_TOKEN_INVALID', 'CODE_UNAUTHORIZED']) {
+					mock.failNext({ status: 200, code });
+					expect(classifyError(await rejection(http.listDoors())), code).to.equal('unauthorized');
+				}
+				mock.failNext({ status: 200, code: 'CODE_SYSTEM_ERROR' });
+				expect(classifyError(await rejection(http.listDoors()))).to.equal('network');
+			});
+		});
+
+		describe('error code with an HTTP error status', () => {
+			it('keeps the AxiosError (status available) and adds API code, message and endpoint to its text', async () => {
+				mock.failNext({ status: 400, code: 'CODE_PARAMS_INVALID', msg: 'Invalid parameters.' });
+				const err = await rejection(http.setDoorLockRule(DOOR_A2, { type: 'custom', interval: 5 }));
+				expect(err).to.be.instanceOf(AxiosError);
+				expect((err as AxiosError).response?.status).to.equal(400);
+				expect((err as Error).message).to.equal(
+					`Request failed with status code 400 (CODE_PARAMS_INVALID: Invalid parameters.) [PUT /api/v1/developer/doors/${DOOR_A2}/lock_rule]`,
+				);
+				expect(apiErrorCode(err)).to.equal('CODE_PARAMS_INVALID');
+			});
+
+			it('apiErrorCode() is undefined for errors without an API code', async () => {
+				mock.failNext({ hangUp: true });
+				expect(apiErrorCode(await rejection(http.listDoors()))).to.equal(undefined);
+				expect(apiErrorCode(new Error('boom'))).to.equal(undefined);
+				expect(apiErrorCode(undefined)).to.equal(undefined);
+			});
+
+			for (const [name, call, permission] of [
+				['listDevices', (c: UnifiHttp) => c.listDevices(), 'view:device'],
+				['listDoors', (c: UnifiHttp) => c.listDoors(), 'view:space'],
+				['getDoorLockRule', (c: UnifiHttp) => c.getDoorLockRule(DOOR_A2), 'view:space'],
+				['unlockDoor', (c: UnifiHttp) => c.unlockDoor(DOOR_A2), 'edit:space'],
+				['setEmergencyStatus', (c: UnifiHttp) => c.setEmergencyStatus({ lockdown: true }), 'edit:space'],
+				['listUsers', (c: UnifiHttp) => c.listUsers(), 'view:user'],
+				['getStaticResource', (c: UnifiHttp) => c.getStaticResource('/preview/x.jpg'), 'view:system_log'],
+				[
+					'fetchSystemLogsRaw',
+					(c: UnifiHttp) => c.fetchSystemLogsRaw('door_openings', 1, 2),
+					'view:system_log',
+				],
+				['listWebhookEndpoints', (c: UnifiHttp) => c.listWebhookEndpoints(), 'view:webhook'],
+				['deleteWebhookEndpoint', (c: UnifiHttp) => c.deleteWebhookEndpoint('x'), 'edit:webhook'],
+			] as [string, (c: UnifiHttp) => Promise<unknown>, string][]) {
+				it(`403 on ${name}() names the endpoint and the token permission it needs (${permission})`, async () => {
+					mock.failNext({ status: 403, code: 'CODE_UNAUTHORIZED', times: 2 });
+					const err = await rejection(call(http));
+					expect((err as AxiosError).response?.status).to.equal(403);
+					expect((err as Error).message).to.contain(`API token needs the permission "${permission}"`);
+					expect((err as Error).message).to.match(/\[(GET|PUT|POST|DELETE) \/api\/v1\/developer\//);
+					expect(classifyError(err)).to.equal('unauthorized');
+				});
+			}
+		});
+
+		describe('createWebhookEndpoint(): duplicate endpoint', () => {
+			for (const status of [200, 400, 409]) {
+				it(`reports CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED as a result, not as an error (HTTP ${status})`, async () => {
+					const strict = new MockUnifiController({ token: TOKEN, duplicateEndpointHttpStatus: status });
+					await strict.start();
+					try {
+						const client = new UnifiHttp({ host: '127.0.0.1', port: strict.port, token: TOKEN });
+						const payload = {
+							name: 'n',
+							endpoint: 'http://192.0.2.10:8095/hook',
+							events: ['access.door.unlock'],
+						};
+						expect((await client.createWebhookEndpoint(payload)).code).to.equal('SUCCESS');
+						expect(await client.createWebhookEndpoint(payload)).to.deep.equal({
+							code: 'CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED',
+							endpoint: undefined,
+						});
+					} finally {
+						await strict.stop();
+					}
+				});
+			}
+
+			it('other error codes on create are thrown', async () => {
+				mock.failNext({ status: 200, code: 'CODE_PARAMS_INVALID' });
+				const err = await rejection(
+					http.createWebhookEndpoint({ name: 'n', endpoint: 'http://192.0.2.10:8095/hook', events: [] }),
+				);
+				expect((err as UnifiApiError).code).to.equal('CODE_PARAMS_INVALID');
 			});
 		});
 	});

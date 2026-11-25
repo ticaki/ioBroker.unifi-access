@@ -99,7 +99,7 @@ describe('Library (object and state management, in-memory adapter)', () => {
 				capabilities: ['live-events'],
 				controllerName: 'UA-HUB-3855',
 			});
-			expect(adapter.obj(`devices.${DEVICE_LITE}`).native.model).to.equal('unknown');
+			expect(adapter.obj(`devices.${DEVICE_LITE}`).native.model).to.equal('UA-Lite');
 		});
 
 		it('fills the device states from the bootstrap data', () => {

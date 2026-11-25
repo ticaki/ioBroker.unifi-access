@@ -127,7 +127,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					[
 						'/api/v1/developer/devices?refresh=true',
 						'/api/v1/developer/doors',
-						'/api/v1/developer/users',
+						'/api/v1/developer/users?page_num=1&page_size=100',
 						'/api/v1/developer/doors/settings/emergency',
 						// 7.11: the temporary lock rule of every door
 						...Object.values(DOORS).map(doorId => `/api/v1/developer/doors/${doorId}/lock_rule`),
@@ -160,7 +160,7 @@ function defineAdapterTests({ suite, describe, it }) {
 				expect(await state(`devices.${DEVICE_ULTRA}.model`)).to.equal('UA-Ultra');
 				expect(await state(`devices.${DEVICE_G2_PRO}.model`)).to.equal('UA-G2-Pro');
 				expect(await state(`devices.${DEVICE_HUB}.model`)).to.equal('UA-Hub');
-				expect(await state(`devices.${DEVICE_LITE}.model`)).to.equal('unknown');
+				expect(await state(`devices.${DEVICE_LITE}.model`)).to.equal('UA-Lite');
 
 				const ultra = await tools.getObject(harness, tools.id(`devices.${DEVICE_ULTRA}`));
 				expect(ultra.native.capabilities).to.deep.equal([

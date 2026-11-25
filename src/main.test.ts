@@ -1,7 +1,7 @@
 /**
  * Time-dependent behaviour of the adapter class (src/main.ts).
  *
- * The adapter runs in-process on a stand-in for @iobroker/adapter-core (test/mock/fakeAdapterCore.js)
+ * The adapter runs in-process on a stand-in for `@iobroker/adapter-core` (test/mock/fakeAdapterCore.js)
  * and talks to the mock UniFi Access controller over real sockets, while sinon fake timers
  * control the adapter's long timers (4 s unlock de-duplication, 5 s / N min re-lock, 3 s system
  * log lookup, 30 s bootstrap retry). Everything that does not need fake timers is tested against
@@ -223,9 +223,10 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				});
 				await waitFor(() => instance.timers.size === 1, { description: 'next retry scheduled' });
 			}
-			expect(instance.log.of('warn')).to.deep.equal([
-				'Bootstrap failed (network): Request failed with status code 500',
-			]);
+			expect(instance.log.of('warn')).to.have.length(1);
+			expect(instance.log.of('warn')[0]).to.match(
+				/^Bootstrap failed \(network\): Request failed with status code 500 \(CODE_SYSTEM_ERROR: .+\) \[GET \/api\/v1\/developer\//,
+			);
 
 			mock.clearFaults();
 			mock.token = 'rotated-token';
@@ -288,9 +289,10 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			const instance = await startConnected({ webhookEndpointId: 'stored-id', webhookSecret: 'stored-secret' });
 			expect(instance.val('info.webhookRegistered')).to.equal(false);
 			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(false);
-			expect(instance.log.of('warn')).to.deep.equal([
-				'Webhook registration failed: Request failed with status code 500',
-			]);
+			expect(instance.log.of('warn')).to.have.length(1);
+			expect(instance.log.of('warn')[0]).to.match(
+				/^Webhook registration failed: Request failed with status code 500 .*\[GET \/api\/v1\/developer\/webhooks\/endpoints\]$/,
+			);
 		});
 
 		it('makes up for a failed registration at the next reconnect and does not repeat the warning', async () => {
@@ -811,6 +813,63 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			});
 			expect(mock.findRequests({ method: 'GET', path: /\/lock_rule$/ })).to.have.length(asked);
 			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+	});
+
+	describe('API error codes in successful HTTP responses (D-02)', () => {
+		it('an unlock answered with an error code is not acknowledged and the door is not shown as unlocked', async () => {
+			const instance = await startConnected();
+			mock.failNext({
+				method: 'PUT',
+				path: `/doors/${DOOR_3855}/unlock`,
+				status: 200,
+				code: 'CODE_DEVICE_DEVICE_OFFLINE',
+				msg: 'The device is currently offline.',
+			});
+			const timersBefore = instance.timers.size;
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+			await waitFor(() => instance.log.of('warn').length === 1, { description: 'warning' });
+			expect(instance.log.of('warn')[0]).to.contain(`Unlock door ${DOOR_3855} failed`);
+			expect(instance.log.of('warn')[0]).to.contain(
+				'CODE_DEVICE_DEVICE_OFFLINE: The device is currently offline.',
+			);
+			expect(instance.states.get(`${NS}.doors.${DOOR_3855}.unlock`)).to.include({ val: true, ack: false });
+			expect(instance.val(`doors.${DOOR_3855}.locked`)).to.equal(true);
+			expect(instance.timers.size, 'no status check scheduled').to.equal(timersBefore);
+			expect(instance.log.of('info').filter(m => m.includes('unlocked'))).to.deep.equal([]);
+		});
+
+		it('a lock rule answered with an error code is not acknowledged', async () => {
+			const instance = await startConnected();
+			mock.failNext({
+				method: 'PUT',
+				path: `/doors/${DOOR_3855}/lock_rule`,
+				status: 200,
+				code: 'CODE_OPERATION_FORBIDDEN',
+			});
+			instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, 1);
+			await waitFor(() => instance.log.of('warn').length === 1, { description: 'warning' });
+			expect(instance.log.of('warn')[0]).to.contain('CODE_OPERATION_FORBIDDEN');
+			expect(instance.states.get(`${NS}.doors.${DOOR_3855}.lock_rule`)).to.include({ val: 1, ack: false });
+			expect(instance.val(`doors.${DOOR_3855}.locked`)).to.equal(true);
+		});
+
+		it('a bootstrap answered with an error code counts as failed (no empty device list, retry scheduled)', async () => {
+			mock.failNext({ path: '/devices', status: 200, code: 'CODE_SYSTEM_ERROR' });
+			const instance = await start({ enableWebhooks: false });
+			expect(instance.val('info.connection')).to.equal(false);
+			expect(instance.log.of('warn')[0]).to.contain('CODE_SYSTEM_ERROR');
+			await clock.tickAsync(30_000);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'connected after retry' });
+		});
+
+		it('an authentication error code with HTTP 200 is reported as "unauthorized"', async () => {
+			mock.failNext({ status: 200, code: 'CODE_ACCESS_TOKEN_INVALID', times: Number.POSITIVE_INFINITY });
+			const instance = await start({ enableWebhooks: false });
+			expect(await instance.request('getConnectionStatus')).to.include({
+				connected: false,
+				lastError: 'unauthorized',
+			});
 		});
 	});
 
@@ -2028,6 +2087,12 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'network' });
 
 			mock.failNext({ path: '/users', status: 401, code: 'CODE_ACCESS_TOKEN_INVALID' });
+			expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'unauthorized' });
+
+			// error code in the response envelope although the HTTP status is 200
+			mock.failNext({ path: '/users', status: 200, body: { code: 'CODE_SYSTEM_ERROR', msg: 'failed' } });
+			expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'network' });
+			mock.failNext({ path: '/users', status: 200, body: { code: 'CODE_UNAUTHORIZED', msg: 'no' } });
 			expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'unauthorized' });
 		});
 
