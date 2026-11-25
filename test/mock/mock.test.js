@@ -283,6 +283,15 @@ describe('mock UniFi Access controller (self-test)', () => {
 			expect(JSON.parse((await api('/users')).text).data).to.deep.equal([]);
 			expect(mock.findDoor(fixtures.IDS.DOOR_3855).door_lock_relay_status).to.equal('unlock');
 			expect((await control('POST', '/data', { door: { id: 'nope' } })).status).to.equal(404);
+
+			const hit = { _source: { target: [{ type: 'camera event', id: 'protect_cam_evt' }] } };
+			await control('POST', '/data', { systemLogHits: [hit] });
+			const logs = await api('/system/logs', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ topic: 'door_openings', since: 1, until: 2 }),
+			});
+			expect(JSON.parse(logs.text).data.hits).to.deep.equal([hit]);
 		});
 
 		it('POST /__mock/static registers content for /system/static', async () => {

@@ -1028,6 +1028,9 @@ class MockUnifiController extends EventEmitter {
 				if (body.emergency && typeof body.emergency === 'object') {
 					this.emergency = { ...this.emergency, ...body.emergency };
 				}
+				if (Array.isArray(body.systemLogHits)) {
+					this.systemLogHits = body.systemLogHits;
+				}
 				if (body.door && typeof body.door.id === 'string') {
 					const door = this.findDoor(body.door.id);
 					if (!door) {
@@ -1200,7 +1203,7 @@ const CONTROL_ROUTES = {
 	'POST /__mock/fail':
 		'make upcoming API requests fail: {method?, path?, status?, code?, msg?, times?, hangUp?, delayMs?} (delayMs alone: answer late)',
 	'POST /__mock/data':
-		'replace data at runtime: {devices?: Device[] | Device[][], doors?: Door[], users?: User[], emergency?: {...}, door?: {id, ...fields to change}}',
+		'replace data at runtime: {devices?: Device[] | Device[][], doors?: Door[], users?: User[], emergency?: {...}, systemLogHits?: object[], door?: {id, ...fields to change}}',
 	'POST /__mock/static':
 		'content for GET /system/static/<path>: {"path": "...", "base64"?: "...", "contentType"?: "image/jpeg"}',
 	'POST /__mock/options':
