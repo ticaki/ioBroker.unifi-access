@@ -1,20 +1,15 @@
 {
-    "auth_status_loading": "Comprobando estado del adaptador…",
-    "auth_status_connected": "Conectado al controlador UniFi Access",
-    "auth_status_connected_named": "Conectado a %s",
-    "auth_status_missingToken": "Falta el token de API — introdúcelo y haz clic en «Probar conexión»",
-    "auth_status_unauthorized": "El controlador rechazó el token (no autorizado)",
-    "auth_status_network": "No se puede contactar con el controlador (error de red)",
-    "auth_status_disconnected": "No conectado",
     "auth_test_button": "Probar conexión",
     "auth_test_tooltip": "Prueba el controlador con los valores introducidos arriba (no guarda).",
     "auth_test_running": "Probando controlador…",
     "auth_test_missingFields": "Introduce primero el host y el token de API.",
+    "auth_test_placeholder": "El campo del token de API todavía contiene el marcador oculto. Vacía el campo por completo e introduce de nuevo el token completo.",
     "auth_test_success": "Conexión correcta",
     "auth_test_success_named": "Conexión correcta — controlador: %s",
     "auth_test_error_unauthorized": "Token rechazado (no autorizado).",
     "auth_test_error_network": "No se puede contactar con el controlador (error de red).",
     "auth_test_error_unknown": "Error en la prueba de conexión.",
+
     "devices_title": "Dispositivos UniFi Access detectados",
     "devices_refresh": "Actualizar",
     "devices_loading": "Cargando dispositivos…",
@@ -26,10 +21,21 @@
     "devices_cap_doorbell": "timbre",
     "devices_cap_door_unlock": "apertura de puerta",
     "devices_cap_live_events": "eventos en vivo",
-    "actor_select_label": "Unlock actor (shown in logs)",
-    "actor_select_none": "None (use API token name)",
-    "actor_select_loading": "Loading users…",
-    "actor_select_error": "Could not load users. Is the adapter running?",
-    "actor_select_refresh": "Refresh user list",
-    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
+
+    "actor_select_label": "Usuario de apertura (mostrado en los registros)",
+    "actor_select_none": "Ninguno (usar el nombre del token de API)",
+    "actor_select_unknown": "Usuario no incluido en la lista (ID: %s)",
+    "actor_select_loading": "Cargando usuarios…",
+    "actor_select_error": "No se pudieron cargar los usuarios. ¿Está el adaptador en ejecución?",
+    "actor_select_refresh": "Actualizar lista de usuarios",
+    "actor_select_help": "El usuario seleccionado aparece en los registros y webhooks de UniFi Access cuando ioBroker abre una puerta.",
+
+    "generic_webhook_urls": "URL(s) del webhook",
+    "generic_webhook_url_loading": "Cargando interfaces de red…",
+    "generic_webhook_url_no_addresses": "No se encontraron direcciones en las interfaces de red.",
+    "generic_webhook_copy": "Copiar al portapapeles",
+    "generic_webhook_copied": "¡Copiado!",
+
+    "adapter_not_running": "La instancia del adaptador no está en ejecución. Iníciala y vuelve a intentarlo.",
+    "adapter_no_response": "El adaptador no respondió a tiempo."
 }

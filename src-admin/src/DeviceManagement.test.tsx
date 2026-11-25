@@ -1,0 +1,111 @@
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import DeviceManagement from './DeviceManagement';
+import { initI18n, makeHarness } from './test/harness';
+
+const ULTRA = {
+	id: 'aabbccddeeff',
+	name: 'Front door',
+	alias: 'Front',
+	type: 'UA-Ultra',
+	model: 'UA-Ultra',
+	firmware: '1.4.2',
+	online: true,
+	capabilities: ['event-thumbnail', 'doorbell', 'door-unlock', 'live-events'],
+};
+const HUB = { id: '112233445566', name: 'Garage hub', model: 'UA-Hub', online: false, capabilities: ['live-events'] };
+
+beforeAll(initI18n);
+
+describe('DeviceManagement', () => {
+	it('lists the devices with model, firmware, state and capability chips', async () => {
+		const { props, socket } = makeHarness({ answers: { listDevices: { devices: [ULTRA, HUB] } } });
+		render(<DeviceManagement {...props} />);
+
+		expect(await screen.findByText('Front door')).toBeTruthy();
+		expect(socket.sendTo).toHaveBeenCalledWith('unifi-access.0', 'listDevices', {});
+		expect(screen.getByText('UA-Ultra · 1.4.2')).toBeTruthy();
+		expect(screen.getByText('Garage hub')).toBeTruthy();
+		expect(screen.getByText('UA-Hub')).toBeTruthy();
+		expect(screen.getByText('online')).toBeTruthy();
+		expect(screen.getByText('offline')).toBeTruthy();
+		expect(screen.getByText('event thumbnail')).toBeTruthy();
+		expect(screen.getByText('doorbell')).toBeTruthy();
+		expect(screen.getByText('door-unlock')).toBeTruthy();
+		// one chip per device
+		expect(screen.getAllByText('live events')).toHaveLength(2);
+		expect(screen.queryByRole('alert')).toBeNull();
+	});
+
+	it('explains an empty list', async () => {
+		const { props } = makeHarness({ answers: { listDevices: { devices: [] } } });
+		render(<DeviceManagement {...props} />);
+
+		expect(
+			await screen.findByText('No devices yet — make sure the adapter is running and connected.'),
+		).toBeTruthy();
+		expect(screen.queryByRole('alert')).toBeNull();
+	});
+
+	it('shows the error of the adapter', async () => {
+		const { props } = makeHarness({ answers: { listDevices: { error: 'controller unreachable' } } });
+		render(<DeviceManagement {...props} />);
+
+		expect((await screen.findByRole('alert')).textContent).toBe('controller unreachable');
+	});
+
+	it('shows an error for an answer without devices', async () => {
+		const { props } = makeHarness({ answers: { listDevices: {} } });
+		render(<DeviceManagement {...props} />);
+
+		expect((await screen.findByRole('alert')).textContent).toBe('Could not load devices. Is the adapter running?');
+	});
+
+	it('shows an error instead of a spinner if the instance is not running', async () => {
+		const { props, socket } = makeHarness({ alive: false, aliveState: false });
+		render(<DeviceManagement {...props} />);
+
+		expect((await screen.findByRole('alert')).textContent).toBe(
+			'The adapter instance is not running. Start it and try again.',
+		);
+		expect(socket.sendTo).not.toHaveBeenCalled();
+		expect(screen.queryByText('Loading devices…')).toBeNull();
+		expect(screen.getByRole('button', { name: 'Refresh' })).toHaveProperty('disabled', false);
+	});
+
+	it('reloads the list with the refresh button', async () => {
+		const { props, socket } = makeHarness({ answers: { listDevices: { devices: [] } } });
+		render(<DeviceManagement {...props} />);
+		await screen.findByText('No devices yet — make sure the adapter is running and connected.');
+
+		socket.sendTo.mockResolvedValueOnce({ devices: [HUB] });
+		fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+		expect(await screen.findByText('Garage hub')).toBeTruthy();
+		expect(socket.sendTo).toHaveBeenCalledTimes(2);
+	});
+
+	it('survives incomplete device entries and unknown capabilities', async () => {
+		const error = vi.spyOn(console, 'error');
+		const { props } = makeHarness({
+			answers: {
+				listDevices: {
+					devices: [
+						null,
+						{ name: 'no id' },
+						{ id: 'dev-without-caps' },
+						{ id: 'dev-new', name: 'Future reader', model: 'unknown', capabilities: ['face-unlock', 7] },
+					],
+				},
+			},
+		});
+		render(<DeviceManagement {...props} />);
+
+		expect(await screen.findByText('Future reader')).toBeTruthy();
+		expect(screen.getByText('dev-without-caps')).toBeTruthy();
+		expect(screen.getByText('face-unlock')).toBeTruthy();
+		expect(screen.queryByText('no id')).toBeNull();
+		await waitFor(() => expect(screen.getAllByText('offline')).toHaveLength(2));
+		expect(error).not.toHaveBeenCalled();
+	});
+});

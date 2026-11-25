@@ -1,20 +1,15 @@
 {
-    "auth_status_loading": "Vérification de l'état de l'adaptateur…",
-    "auth_status_connected": "Connecté au contrôleur UniFi Access",
-    "auth_status_connected_named": "Connecté à %s",
-    "auth_status_missingToken": "Jeton API manquant — saisissez-le et cliquez sur « Tester la connexion »",
-    "auth_status_unauthorized": "Jeton refusé par le contrôleur (non autorisé)",
-    "auth_status_network": "Impossible de joindre le contrôleur (erreur réseau)",
-    "auth_status_disconnected": "Non connecté",
     "auth_test_button": "Tester la connexion",
     "auth_test_tooltip": "Sonde le contrôleur avec les valeurs saisies ci-dessus (sans enregistrer).",
     "auth_test_running": "Sondage du contrôleur…",
     "auth_test_missingFields": "Veuillez d'abord saisir l'hôte et le jeton API.",
+    "auth_test_placeholder": "Le champ du jeton API contient encore l'espace réservé masqué. Videz complètement le champ et saisissez à nouveau le jeton complet.",
     "auth_test_success": "Connexion réussie",
     "auth_test_success_named": "Connexion réussie — contrôleur : %s",
     "auth_test_error_unauthorized": "Jeton refusé (non autorisé).",
     "auth_test_error_network": "Impossible de joindre le contrôleur (erreur réseau).",
     "auth_test_error_unknown": "Échec du test de connexion.",
+
     "devices_title": "Appareils UniFi Access détectés",
     "devices_refresh": "Actualiser",
     "devices_loading": "Chargement des appareils…",
@@ -26,10 +21,21 @@
     "devices_cap_doorbell": "sonnette",
     "devices_cap_door_unlock": "ouverture de porte",
     "devices_cap_live_events": "événements en direct",
-    "actor_select_label": "Unlock actor (shown in logs)",
-    "actor_select_none": "None (use API token name)",
-    "actor_select_loading": "Loading users…",
-    "actor_select_error": "Could not load users. Is the adapter running?",
-    "actor_select_refresh": "Refresh user list",
-    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
+
+    "actor_select_label": "Auteur de l'ouverture (affiché dans les journaux)",
+    "actor_select_none": "Aucun (utiliser le nom du jeton API)",
+    "actor_select_unknown": "Utilisateur absent de la liste (ID : %s)",
+    "actor_select_loading": "Chargement des utilisateurs…",
+    "actor_select_error": "Impossible de charger les utilisateurs. L'adaptateur est-il en cours d'exécution ?",
+    "actor_select_refresh": "Actualiser la liste des utilisateurs",
+    "actor_select_help": "L'utilisateur sélectionné apparaît dans les journaux et les webhooks UniFi Access lorsque ioBroker ouvre une porte.",
+
+    "generic_webhook_urls": "URL(s) du webhook",
+    "generic_webhook_url_loading": "Chargement des interfaces réseau…",
+    "generic_webhook_url_no_addresses": "Aucune adresse d'interface réseau trouvée.",
+    "generic_webhook_copy": "Copier dans le presse-papiers",
+    "generic_webhook_copied": "Copié !",
+
+    "adapter_not_running": "L'instance de l'adaptateur n'est pas en cours d'exécution. Démarrez-la et réessayez.",
+    "adapter_no_response": "L'adaptateur n'a pas répondu à temps."
 }

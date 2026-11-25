@@ -36,7 +36,8 @@
 					"xl": 2
 				},
 				"apiToken": {
-					"type": "text",
+					"type": "password",
+					"visible": true,
 					"label": "apiToken",
 					"help": "apiToken_help",
 					"newLine": true,
@@ -284,11 +285,14 @@
 					"xl": 3
 				},
 				"_reregisterWebhook": {
-					"type": "sendto",
+					"type": "sendTo",
 					"label": "reregisterWebhook",
 					"help": "reregisterWebhook_help",
 					"command": "reregisterWebhook",
 					"jsonData": "{}",
+					"error": {
+						"not-configured": "reregisterWebhook_error_not_configured"
+					},
 					"variant": "contained",
 					"icon": "refresh",
 					"showProcess": true,
@@ -411,7 +415,8 @@
 					"xl": 3
 				},
 				"genericWebhookToken": {
-					"type": "text",
+					"type": "password",
+					"visible": true,
 					"label": "genericWebhookToken",
 					"hidden": "!data.enableGenericWebhook || data.genericWebhookAuth !== 'bearer'",
 					"newLine": true,
@@ -491,7 +496,8 @@
 				"protectVerifyTLS": {
 					"type": "checkbox",
 					"label": "protect_verify_tls",
-					"default": true,
+					"help": "protect_verify_tls_help",
+					"default": false,
 					"disabled": "!data.enableProtect",
 					"newLine": true,
 					"xs": 12,
@@ -538,20 +544,20 @@
 							"title": "ev_type",
 							"default": "access.door.unlock",
 							"options": [
-								{ "value": "access.remote_view", "label": "WebSocket: doorbell ringing (access.remote_view)" },
-								{ "value": "access.remote_view.change", "label": "WebSocket: doorbell status change (access.remote_view.change)" },
-								{ "value": "access.data.device.remote_unlock", "label": "WebSocket: admin remote unlock (access.data.device.remote_unlock)" },
-								{ "value": "access.doorbell.incoming", "label": "Webhook: doorbell incoming (access.doorbell.incoming)" },
-								{ "value": "access.doorbell.completed", "label": "Webhook: doorbell completed (access.doorbell.completed)" },
-								{ "value": "access.doorbell.incoming.REN", "label": "Webhook: doorbell REN (access.doorbell.incoming.REN)" },
-								{ "value": "access.device.dps_status", "label": "Webhook: door position changed (access.device.dps_status)" },
-								{ "value": "access.door.unlock", "label": "Webhook: door unlocked (access.door.unlock)" },
-								{ "value": "access.device.emergency_status", "label": "Webhook: emergency mode (access.device.emergency_status)" },
-								{ "value": "access.unlock_schedule.activate", "label": "Webhook: unlock schedule activated (access.unlock_schedule.activate)" },
-								{ "value": "access.unlock_schedule.deactivate", "label": "Webhook: unlock schedule deactivated (access.unlock_schedule.deactivate)" },
-								{ "value": "access.temporary_unlock.start", "label": "Webhook: temporary unlock start (access.temporary_unlock.start)" },
-								{ "value": "access.temporary_unlock.end", "label": "Webhook: temporary unlock end (access.temporary_unlock.end)" },
-								{ "value": "access.visitor.status.changed", "label": "Webhook: visitor status (access.visitor.status.changed)" }
+								{ "value": "access.remote_view", "label": "ev_opt_remote_view" },
+								{ "value": "access.remote_view.change", "label": "ev_opt_remote_view_change" },
+								{ "value": "access.data.device.remote_unlock", "label": "ev_opt_remote_unlock" },
+								{ "value": "access.doorbell.incoming", "label": "ev_opt_doorbell_incoming" },
+								{ "value": "access.doorbell.completed", "label": "ev_opt_doorbell_completed" },
+								{ "value": "access.doorbell.incoming.REN", "label": "ev_opt_doorbell_incoming_ren" },
+								{ "value": "access.device.dps_status", "label": "ev_opt_dps_status" },
+								{ "value": "access.door.unlock", "label": "ev_opt_door_unlock" },
+								{ "value": "access.device.emergency_status", "label": "ev_opt_emergency_status" },
+								{ "value": "access.unlock_schedule.activate", "label": "ev_opt_unlock_schedule_activate" },
+								{ "value": "access.unlock_schedule.deactivate", "label": "ev_opt_unlock_schedule_deactivate" },
+								{ "value": "access.temporary_unlock.start", "label": "ev_opt_temporary_unlock_start" },
+								{ "value": "access.temporary_unlock.end", "label": "ev_opt_temporary_unlock_end" },
+								{ "value": "access.visitor.status.changed", "label": "ev_opt_visitor_status_changed" }
 							]
 						},
 						{

@@ -1,7 +1,18 @@
 import { Connection } from '@iobroker/socket-client';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 
-export const ADAPTER_NAMESPACE = 'unifi-access.0';
+/**
+ * Instance number the panel shows: `index.html?instance=1` selects `unifi-access.1`, default is 0.
+ *
+ * @param search query string of the page
+ */
+export function resolveInstance(search: string): number {
+    const raw = new URLSearchParams(search).get('instance');
+    return raw !== null && /^\d{1,4}$/.test(raw) ? Number(raw) : 0;
+}
+
+export const ADAPTER_INSTANCE = resolveInstance(globalThis.location?.search ?? '');
+export const ADAPTER_NAMESPACE = `unifi-access.${ADAPTER_INSTANCE}`;
 
 let connectionPromise: Promise<Connection> | null = null;
 let cachedConnection: Connection | null = null;
@@ -12,6 +23,20 @@ function notifyConnected(): void {
     for (const l of connectedListeners) {
         l();
     }
+}
+
+function setConnected(connected: boolean): void {
+    if (isConnected !== connected) {
+        isConnected = connected;
+        notifyConnected();
+    }
+}
+
+function logError(what: string): (err: unknown) => void {
+    return err => {
+        // eslint-disable-next-line no-console
+        console.error(`${what}:`, err);
+    };
 }
 
 function awaitSocketIo(): Promise<void> {
@@ -47,24 +72,14 @@ export function getConnection(): Promise<Connection> {
                     name: 'unifi-access.www',
                     onReady: () => {
                         cachedConnection = conn;
-                        isConnected = true;
-                        notifyConnected();
+                        setConnected(true);
                         resolve(conn);
                     },
-                    onError: err => {
-                        // eslint-disable-next-line no-console
-                        console.error('socket-client error:', err);
-                    },
+                    onError: logError('socket-client error'),
                 });
-                const sock = (conn as unknown as { _socket?: { on: (ev: string, fn: () => void) => void } })._socket;
-                sock?.on('disconnect', () => {
-                    isConnected = false;
-                    notifyConnected();
-                });
-                sock?.on('reconnect', () => {
-                    isConnected = true;
-                    notifyConnected();
-                });
+                // The socket itself is created asynchronously by the Connection, so its events cannot be
+                // bound here - the handler below is called on every disconnect and reconnect.
+                conn.registerConnectionHandler(connected => setConnected(connected));
             }),
     );
     return connectionPromise;
@@ -74,7 +89,7 @@ export function useConnection(): Connection | null {
     const [conn, setConn] = useState<Connection | null>(cachedConnection);
     useEffect(() => {
         if (!conn) {
-            getConnection().then(setConn);
+            void getConnection().then(setConn);
         }
     }, [conn]);
     return conn;
@@ -91,43 +106,50 @@ export function useConnectionStatus(): boolean {
     );
 }
 
-function fullId(id: string): string {
-    return id.includes('.') && id.startsWith(`${ADAPTER_NAMESPACE}.`) ? id : `${ADAPTER_NAMESPACE}.${id}`;
+export function fullId(id: string): string {
+    return id.startsWith(`${ADAPTER_NAMESPACE}.`) ? id : `${ADAPTER_NAMESPACE}.${id}`;
 }
 
 export function useIobState(id: string | null): ioBroker.State | null | undefined {
     const conn = useConnection();
-    const [state, setState] = useState<ioBroker.State | null | undefined>(undefined);
+    // Part of the effect dependencies: after a reconnect the value is read again, because changes that
+    // happened while the connection was down are never reported.
+    const connected = useConnectionStatus();
+    const [entry, setEntry] = useState<{ id: string; state: ioBroker.State | null } | null>(null);
     useEffect(() => {
-        if (!conn || !id) {
+        if (!conn || !id || !connected) {
             return;
         }
         const sid = fullId(id);
         let active = true;
         const handler: ioBroker.StateChangeHandler = (changedId, s) => {
             if (changedId === sid && active) {
-                setState(s);
+                setEntry({ id: sid, state: s ?? null });
             }
         };
-        conn.subscribeState(sid, handler).catch(() => {});
-        conn.getState(sid).then(s => {
-            if (active) {
-                setState(s ?? null);
-            }
-        });
+        conn.subscribeState(sid, handler).catch(logError(`Cannot subscribe to ${sid}`));
+        conn.getState(sid)
+            .then(s => {
+                if (active) {
+                    setEntry({ id: sid, state: s ?? null });
+                }
+            })
+            .catch(logError(`Cannot read ${sid}`));
         return () => {
             active = false;
             conn.unsubscribeState(sid, handler);
         };
-    }, [conn, id]);
-    return state;
+    }, [conn, id, connected]);
+    // Never hand out the value of the state that was requested before `id` changed
+    return id && entry && entry.id === fullId(id) ? entry.state : undefined;
 }
 
 export function useIobStates(pattern: string | null): Record<string, ioBroker.State> {
     const conn = useConnection();
+    const connected = useConnectionStatus();
     const [states, setStates] = useState<Record<string, ioBroker.State>>({});
     useEffect(() => {
-        if (!conn || !pattern) {
+        if (!conn || !pattern || !connected) {
             return;
         }
         const fullPattern = fullId(pattern);
@@ -146,17 +168,19 @@ export function useIobStates(pattern: string | null): Record<string, ioBroker.St
                 return next;
             });
         };
-        conn.subscribeState(fullPattern, handler).catch(() => {});
-        conn.getStates(fullPattern).then(initial => {
-            if (active) {
-                setStates(initial || {});
-            }
-        });
+        conn.subscribeState(fullPattern, handler).catch(logError(`Cannot subscribe to ${fullPattern}`));
+        conn.getStates(fullPattern)
+            .then(initial => {
+                if (active) {
+                    setStates(initial || {});
+                }
+            })
+            .catch(logError(`Cannot read ${fullPattern}`));
         return () => {
             active = false;
             conn.unsubscribeState(fullPattern, handler);
         };
-    }, [conn, pattern]);
+    }, [conn, pattern, connected]);
     return states;
 }
 

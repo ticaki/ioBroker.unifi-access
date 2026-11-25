@@ -26,7 +26,11 @@ export function useThemeMode(): { mode: ThemeMode; toggle: () => void; theme: Th
         }
         const mq = window.matchMedia('(prefers-color-scheme: dark)');
         const onChange = (e: MediaQueryListEvent): void => {
-            setMode(e.matches ? 'dark' : 'light');
+            // The user may have chosen a mode with the toggle since this listener was registered:
+            // an explicit choice wins over the system setting.
+            if (!readStoredMode()) {
+                setMode(e.matches ? 'dark' : 'light');
+            }
         };
         mq.addEventListener('change', onChange);
         return () => mq.removeEventListener('change', onChange);

@@ -16,6 +16,7 @@ import {
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
 import { I18n } from '@iobroker/gui-components';
+import { describeRequestError, requestAdapter } from './adapterRequest';
 
 interface UnifiUser {
 	id: string;
@@ -29,7 +30,24 @@ interface ActorSelectState extends ConfigGenericState {
 	users: UnifiUser[];
 }
 
+function normalizeUsers(raw: unknown): UnifiUser[] {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	const users: UnifiUser[] = [];
+	for (const entry of raw as unknown[]) {
+		const user = entry as Partial<UnifiUser> | null;
+		if (user && typeof user.id === 'string' && user.id) {
+			users.push({ id: user.id, name: typeof user.name === 'string' && user.name ? user.name : user.id });
+		}
+	}
+	return users;
+}
+
 class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
+	private unmounted = false;
+	private requestCounter = 0;
+
 	constructor(props: ConfigGenericProps) {
 		super(props);
 		Object.assign(this.state, {
@@ -45,35 +63,69 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
 		await this.loadUsers();
 	}
 
+	componentDidUpdate(prevProps: ConfigGenericProps): void {
+		// The instance was started while the settings are open: fetch what could not be loaded before.
+		if (!prevProps.alive && this.props.alive && !this.state.loading && this.state.error) {
+			void this.loadUsers();
+		}
+	}
+
+	componentWillUnmount(): void {
+		this.unmounted = true;
+		super.componentWillUnmount();
+	}
+
 	private async loadUsers(): Promise<void> {
+		const requestId = ++this.requestCounter;
 		this.setState({ loading: true, error: null });
 		try {
-			const raw: unknown = await this.props.oContext.socket.sendTo(
-				`unifi-access.${this.props.oContext.instance}`,
+			const answer = await requestAdapter<{ users?: unknown; error?: string } | undefined>(
+				this.props,
 				'listUsers',
-				{},
 			);
-			const r = raw as { users?: UnifiUser[]; error?: string } | undefined;
-			const users = r?.users ?? [];
-			this.setState({ users, loaded: true, loading: false });
-		} catch (err) {
+			if (this.unmounted || requestId !== this.requestCounter) {
+				return;
+			}
 			this.setState({
-				error: (err as Error)?.message ?? I18n.t('actor_select_error'),
+				users: normalizeUsers(answer?.users),
+				error: answer?.error ? I18n.t('actor_select_error') : null,
+				loaded: true,
+				loading: false,
+			});
+		} catch (err) {
+			if (this.unmounted || requestId !== this.requestCounter) {
+				return;
+			}
+			// Keep the list of an earlier successful request
+			this.setState({
+				error: describeRequestError(err, 'actor_select_error'),
 				loaded: true,
 				loading: false,
 			});
 		}
 	}
 
-	private handleChange(e: SelectChangeEvent<string>): void {
-		console.log('Selected user ID:', e.target.value);
-		this.setState({ value: e.target.value }); // Update state with the new value
-		void this.onChange(this.props.attr ?? '', e.target.value);
+	/** The stored user id: the just selected one or the one from the configuration */
+	private getSelectedId(): string {
+		const value: unknown = this.state.value ?? ConfigGeneric.getValue(this.props.data, this.props.attr);
+		return typeof value === 'string' ? value : '';
 	}
 
-	renderItem(): React.JSX.Element {
+	private handleChange(e: SelectChangeEvent): void {
+		const value = e.target.value;
+		this.setState({ value });
+		const attr = this.props.attr;
+		if (attr) {
+			this.onChange(attr, value).catch((err: unknown) => this.onError(attr, String(err)));
+		}
+	}
+
+	renderItem(_error: unknown, disabled: boolean): React.JSX.Element {
 		const { loading, loaded, error, users } = this.state;
-		const selectedId = (this.state.value as string) || '';
+		const selectedId = this.getSelectedId();
+		// A stored user that the controller does not report (deleted, or the list could not be loaded)
+		// must stay selectable, otherwise the select would show an empty value and MUI complains.
+		const selectedIsUnknown = !!selectedId && !users.some(u => u.id === selectedId);
 
 		return (
 			<Box sx={{ width: '100%', mt: 1 }}>
@@ -113,9 +165,11 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
 						<FormControl
 							size="small"
 							sx={{ minWidth: 280 }}
+							disabled={disabled}
 						>
-							<InputLabel>{I18n.t('actor_select_label')}</InputLabel>
+							<InputLabel id="unifi-access-actor-select-label">{I18n.t('actor_select_label')}</InputLabel>
 							<Select
+								labelId="unifi-access-actor-select-label"
 								value={selectedId}
 								label={I18n.t('actor_select_label')}
 								onChange={e => this.handleChange(e)}
@@ -123,6 +177,9 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
 								<MenuItem value="">
 									<em>{I18n.t('actor_select_none')}</em>
 								</MenuItem>
+								{selectedIsUnknown ? (
+									<MenuItem value={selectedId}>{I18n.t('actor_select_unknown', selectedId)}</MenuItem>
+								) : null}
 								{users.map(u => (
 									<MenuItem
 										key={u.id}
@@ -139,6 +196,7 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
 						<span>
 							<IconButton
 								size="small"
+								aria-label={I18n.t('actor_select_refresh')}
 								onClick={() => void this.loadUsers()}
 								disabled={loading}
 							>
