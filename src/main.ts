@@ -60,6 +60,8 @@ const DOOR_CHECK_AFTER_EVENT_MS = 7000;
 const DOORBELL_CALL_MAX_MS = 3 * 60_000;
 /** Rules ending later than this are not given a timer of their own (the next reload plans it). */
 const RULE_END_CHECK_HORIZON_MS = 24 * 60 * 60_000;
+/** Minimum distance between two full reloads after WebSocket reconnects. */
+const RESYNC_MIN_INTERVAL_MS = 60_000;
 /** A planned end-of-rule check that differs by less than this from the controller's end time is kept. */
 const RULE_END_TOLERANCE_MS = 5000;
 /** API codes that say "not now" rather than "not for this door". */
@@ -201,6 +203,10 @@ class UnifiAccess extends utils.Adapter {
 	private readonly lockRuleUnavailableDoors = new Set<string>();
 	/** The doorbell call currently published in doorbell.active*. */
 	private activeDoorbellCall: { requestId?: string; fromWebhook: boolean } | null = null;
+	/** Start of the last resync after a reconnect (ms epoch, 0 = none yet). */
+	private lastResyncAt = 0;
+	/** A resync that waits for the minimum distance to the previous one. */
+	private resyncTimer: ioBroker.Timeout | undefined;
 	/** Clears the published doorbell call when its end event never arrives. */
 	private doorbellExpiryTimer: ioBroker.Timeout | undefined;
 	/** Emergency flags as last confirmed by the controller (what a failed command is put back to). */
@@ -964,6 +970,33 @@ class UnifiAccess extends utils.Adapter {
 		};
 	}
 
+	/**
+	 * Reload devices and doors after a reconnect — at most once per {@link RESYNC_MIN_INTERVAL_MS}. A
+	 * connection that keeps flapping would otherwise trigger a full load (devices, doors, all user
+	 * pages, emergency status, one lock rule per door) every few seconds.
+	 */
+	private requestResync(): void {
+		if (this.resyncTimer || this.unloading) {
+			// a delayed resync is pending already and covers this reconnect as well
+			return;
+		}
+		const waitMs = this.lastResyncAt + RESYNC_MIN_INTERVAL_MS - Date.now();
+		if (this.lastResyncAt === 0 || waitMs <= 0) {
+			this.lastResyncAt = Date.now();
+			this.log.info('UniFi Access WebSocket reconnected — refreshing devices and doors.');
+			this.runDetached('resync after reconnect', this.bootstrapAndConnect());
+			return;
+		}
+		this.log.debug(
+			`UniFi Access WebSocket reconnected — refreshing devices and doors in ${Math.ceil(waitMs / 1000)} s.`,
+		);
+		this.resyncTimer = this.setTimeout(() => {
+			this.resyncTimer = undefined;
+			this.lastResyncAt = Date.now();
+			this.runDetached('resync after reconnect', this.bootstrapAndConnect());
+		}, waitMs);
+	}
+
 	private startWebSocket(): void {
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
@@ -1004,8 +1037,7 @@ class UnifiAccess extends utils.Adapter {
 				// true before the outage. An endpoint that is still there costs one GET and changes nothing.
 				// Until the check says otherwise the endpoint keeps counting as registered.
 				this.webhookRegistrationStale = true;
-				this.log.info('UniFi Access WebSocket reconnected — refreshing devices and doors.');
-				this.runDetached('resync after reconnect', this.bootstrapAndConnect());
+				this.requestResync();
 			} else {
 				this.log.info('UniFi Access WebSocket open.');
 			}
@@ -2591,6 +2623,10 @@ class UnifiAccess extends utils.Adapter {
 			if (this.doorbellExpiryTimer) {
 				this.clearTimeout(this.doorbellExpiryTimer);
 				this.doorbellExpiryTimer = undefined;
+			}
+			if (this.resyncTimer) {
+				this.clearTimeout(this.resyncTimer);
+				this.resyncTimer = undefined;
 			}
 			for (const timer of this.unlockPendingTimers.values()) {
 				this.clearTimeout(timer);

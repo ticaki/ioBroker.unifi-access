@@ -457,9 +457,52 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			clock.tick(5000);
 			await waitFor(() => counts.open === 1, { description: 'successful connect' });
 
+			// the back-off starts again only after the connection stayed up for 30 s (K-12)
+			clock.tick(30_000);
 			mock.dropWsConnections();
 			await waitFor(() => reconnectLog().length === 5, { description: 'reconnect after drop' });
 			expect(reconnectLog()[4]).to.equal('WebSocket reconnect in 2s (attempt 1)');
+		});
+
+		// K-12: a controller (or proxy) that accepts the upgrade and drops the connection right away
+		it('a connection that drops right after the upgrade does not reset the back-off', async () => {
+			clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+			const { socket, logger, counts } = create({ reconnectDelaySeconds: 60 });
+			const reconnectLog = (): string[] =>
+				logger.messages.map(m => m.message).filter(m => m.startsWith('WebSocket reconnect'));
+			socket.start();
+			const delays: string[] = [];
+			for (let attempt = 1; attempt <= 4; attempt++) {
+				await waitFor(() => counts.open === attempt, { description: `open ${attempt}` });
+				clock.tick(100); // 100 ms later the peer drops the connection
+				mock.dropWsConnections();
+				await waitFor(() => reconnectLog().length === attempt, { description: `reconnect ${attempt}` });
+				delays.push(reconnectLog()[attempt - 1]);
+				clock.tick(2 ** attempt * 1000);
+			}
+			expect(delays).to.deep.equal([
+				'WebSocket reconnect in 2s (attempt 1)',
+				'WebSocket reconnect in 4s (attempt 2)',
+				'WebSocket reconnect in 8s (attempt 3)',
+				'WebSocket reconnect in 16s (attempt 4)',
+			]);
+		});
+
+		it('stableAfterMs is configurable', async () => {
+			clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+			const { socket, logger, counts } = create({ reconnectDelaySeconds: 60, stableAfterMs: 1000 });
+			const reconnectLog = (): string[] =>
+				logger.messages.map(m => m.message).filter(m => m.startsWith('WebSocket reconnect'));
+			socket.start();
+			await waitFor(() => counts.open === 1, { description: 'open' });
+			mock.dropWsConnections();
+			await waitFor(() => reconnectLog().length === 1, { description: 'reconnect 1' });
+			clock.tick(2000);
+			await waitFor(() => counts.open === 2, { description: 'open 2' });
+			clock.tick(1000);
+			mock.dropWsConnections();
+			await waitFor(() => reconnectLog().length === 2, { description: 'reconnect 2' });
+			expect(reconnectLog()[1]).to.equal('WebSocket reconnect in 2s (attempt 1)');
 		});
 	});
 
@@ -478,7 +521,7 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 		it('leaves no timers behind (heartbeat and pending reconnect are cleared)', async () => {
 			clock = sinon.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
 			const { socket, logger } = await startAndWaitOpen({ reconnectDelaySeconds: 5 });
-			expect(clock.countTimers(), 'heartbeat running').to.equal(1);
+			expect(clock.countTimers(), 'heartbeat and stability timer running').to.equal(2);
 
 			mock.dropWsConnections();
 			await waitFor(() => logger.of('info').some(m => m.includes('reconnect')), {
@@ -528,14 +571,17 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 	describe('timers (repo checker E5004/E5005: adapter timers only)', () => {
 		it('creates heartbeat and reconnect timers exclusively through the injected timer host', async () => {
 			const { socket, timers, counts } = await startAndWaitOpen();
-			expect(timers.calls).to.deep.equal(['setInterval 30000']);
+			expect(timers.calls).to.deep.equal(['setTimeout 30000', 'setInterval 30000']);
 
 			mock.dropWsConnections();
 			await waitFor(() => counts.open === 2, { description: 'reconnect' });
 			expect(timers.calls).to.deep.equal([
+				'setTimeout 30000',
 				'setInterval 30000',
+				'clearTimeout',
 				'clearInterval',
 				`setTimeout ${FAST_RECONNECT_SECONDS * 1000}`,
+				'setTimeout 30000',
 				'setInterval 30000',
 			]);
 
@@ -545,7 +591,7 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 
 		it('honours a custom heartbeat interval', async () => {
 			const { timers } = await startAndWaitOpen({ heartbeatIntervalMs: 1234 });
-			expect(timers.calls).to.deep.equal(['setInterval 1234']);
+			expect(timers.calls).to.deep.equal(['setTimeout 30000', 'setInterval 1234']);
 		});
 
 		it('start() on a running instance replaces the connection instead of adding one', async () => {

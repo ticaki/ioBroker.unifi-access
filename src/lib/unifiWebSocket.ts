@@ -15,6 +15,12 @@ export interface UnifiWebSocketOptions {
 	timers: TimerHost;
 	/** Heartbeat period in milliseconds (default 30 s). A connection that misses one pong is dropped. */
 	heartbeatIntervalMs?: number;
+	/**
+	 * A connection counts as stable after this time (default 30 s); only then the reconnect back-off
+	 * starts from the beginning again. A controller that accepts the upgrade and drops the connection
+	 * right away must not be reconnected to every 2 s for ever.
+	 */
+	stableAfterMs?: number;
 	logger?: { debug: (msg: string) => void; warn: (msg: string) => void; info: (msg: string) => void };
 }
 
@@ -26,6 +32,7 @@ type ListenerMap = {
 };
 
 const DEFAULT_HEARTBEAT_MS = 30_000;
+const DEFAULT_STABLE_AFTER_MS = 30_000;
 
 /**
  * Persistent WebSocket connection to /api/v1/developer/devices/notifications.
@@ -35,7 +42,8 @@ const DEFAULT_HEARTBEAT_MS = 30_000;
  * 400 answered elsewhere), access.data.device.remote_unlock (admin remote unlock).
  * Other access.* events are delivered via the webhook channel, not this socket.
  *
- * Reconnects on close with exponential back-off (capped at reconnectDelaySeconds).
+ * Reconnects on close with exponential back-off (capped at reconnectDelaySeconds); the back-off starts
+ * from the beginning only after a connection stayed up for `stableAfterMs`.
  * Heartbeat: a ping every 30 s; when neither the pong nor any other frame has arrived by the
  * next tick the connection is considered dead (half-open TCP connection) and terminated,
  * which triggers the normal reconnect.
@@ -48,6 +56,7 @@ export class UnifiWebSocket extends EventEmitter {
 	private socket: WebSocket | null = null;
 	private reconnectTimer: unknown;
 	private heartbeatTimer: unknown;
+	private stableTimer: unknown;
 	private awaitingPong = false;
 	private retryAttempt = 0;
 	private stopped = true;
@@ -89,6 +98,7 @@ export class UnifiWebSocket extends EventEmitter {
 			this.options.timers.clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = undefined;
 		}
+		this.stopStableTimer();
 		this.stopHeartbeat();
 		const ws = this.socket;
 		this.socket = null;
@@ -121,7 +131,8 @@ export class UnifiWebSocket extends EventEmitter {
 			if (!isCurrent()) {
 				return;
 			}
-			this.retryAttempt = 0;
+			// the back-off is reset only once the connection has proven stable (see stableAfterMs)
+			this.startStableTimer(ws);
 			this.startHeartbeat(ws);
 			this.emit('open');
 		});
@@ -167,6 +178,7 @@ export class UnifiWebSocket extends EventEmitter {
 			if (!isCurrent()) {
 				return;
 			}
+			this.stopStableTimer();
 			this.stopHeartbeat();
 			this.socket = null;
 			this.emit('close');
@@ -213,6 +225,23 @@ export class UnifiWebSocket extends EventEmitter {
 				/* a failing ping is caught by the pong check of the next tick */
 			}
 		}, period);
+	}
+
+	private startStableTimer(ws: WebSocket): void {
+		this.stopStableTimer();
+		this.stableTimer = this.options.timers.setTimeout(() => {
+			this.stableTimer = undefined;
+			if (this.socket === ws && ws.readyState === WebSocket.OPEN) {
+				this.retryAttempt = 0;
+			}
+		}, this.options.stableAfterMs ?? DEFAULT_STABLE_AFTER_MS);
+	}
+
+	private stopStableTimer(): void {
+		if (this.stableTimer !== undefined) {
+			this.options.timers.clearTimeout(this.stableTimer);
+			this.stableTimer = undefined;
+		}
 	}
 
 	private stopHeartbeat(): void {

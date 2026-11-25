@@ -394,6 +394,10 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
 				await clock.tickAsync(200);
 				await waitFor(() => instance.val('info.connection') === true, { description: 'reconnected' });
+				if (i > 0) {
+					// a second reconnect within a minute reloads only when the minute is over (K-12)
+					await clock.tickAsync(60_000);
+				}
 				await waitFor(() => mock.findRequests({ method: 'GET', path: '/webhooks/endpoints' }).length >= i + 2, {
 					description: 'registration attempt',
 				});
@@ -2362,6 +2366,28 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 	});
 
 	describe('connection state and resync (R-02)', () => {
+		// K-12: a connection that keeps flapping must not trigger a full reload every few seconds
+		it('reloads at most once per minute after reconnects; a pending reload covers further reconnects', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			const loads = (): number => mock.findRequests({ path: '/devices' }).length;
+			const reconnect = async (): Promise<void> => {
+				mock.dropWsConnections();
+				await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+				await clock.tickAsync(200);
+				await waitFor(() => instance.val('info.connection') === true, { description: 'reconnected' });
+			};
+			await reconnect();
+			await waitFor(() => loads() === 2, { description: 'first reload right away' });
+			await reconnect();
+			await reconnect();
+			await delay(30);
+			expect(loads(), 'no further reload within the minute').to.equal(2);
+			await clock.tickAsync(60_000);
+			await waitFor(() => loads() === 3, { description: 'one delayed reload' });
+			await delay(30);
+			expect(loads()).to.equal(3);
+		});
+
 		it('info.connection turns false when the WebSocket is lost and true again after the reconnect', async () => {
 			const instance = await startConnected({ enableWebhooks: false });
 			expect(instance.val('info.connection')).to.equal(true);
