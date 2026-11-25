@@ -1675,6 +1675,27 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				expect(instance.log.of('warn')).to.deep.equal([]);
 			});
 
+			// K-16: the chain is trusted; only the address used is not in the certificate
+			it('verification on, console certificate for another host name: the warning points to the host name', async () => {
+				const other = new ProtectStub({ altNames: ['console.example'] });
+				await other.start();
+				try {
+					const instance = await startConnected(
+						protectConfig({ protectVerifyTLS: true, caCert: other.cert, protectPort: other.port }),
+					);
+					const warnings = instance.log.of('warn');
+					expect(warnings).to.have.length(1);
+					expect(warnings[0]).to.contain('rejected (ERR_TLS_CERT_ALTNAME_INVALID)');
+					expect(warnings[0]).to.contain('not issued for the configured host name');
+					expect(warnings[0]).to.not.contain('store the CA certificate');
+					expect(other.logins).to.deep.equal([]);
+				} finally {
+					await adapter?.fireUnload();
+					adapter = undefined;
+					await other.stop();
+				}
+			});
+
 			it('the Access setting verifyTLS no longer decides about Protect', async () => {
 				// Access verified against its CA, Protect explicitly unverified
 				const instance = await startConnected(
@@ -1891,6 +1912,62 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			const instance = await startConnected({ verifyTLS: true, caCert: mock.cert, enableWebhooks: false });
 			expect(instance.val('info.connection')).to.equal(true);
 			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+
+		// U-02: a single-line admin field may have swallowed the line breaks — repaired, not reported
+		it('connects with verifyTLS when the stored CA certificate lost its line breaks', async () => {
+			const instance = await startConnected({
+				verifyTLS: true,
+				caCert: mock.cert.replace(/\n/g, ' '),
+				enableWebhooks: false,
+			});
+			expect(instance.val('info.connection')).to.equal(true);
+			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+
+		// U-02: Node ignores an unreadable CA silently — the adapter says so instead
+		it('warns about a CA certificate that cannot be used', async () => {
+			const instance = await start({ verifyTLS: true, caCert: 'not a certificate', enableWebhooks: false });
+			const warnings = instance.log.of('warn');
+			expect(warnings[0]).to.equal(
+				'The CA certificate in the connection settings is not usable: no "-----BEGIN CERTIFICATE-----" … "-----END CERTIFICATE-----" block found. ' +
+					'It is ignored. Paste the complete PEM text including the "-----BEGIN CERTIFICATE-----" and "-----END CERTIFICATE-----" lines.',
+			);
+		});
+
+		it('mentions an unusable CA certificate only at debug level while no TLS verification uses it', async () => {
+			const instance = await startConnected({
+				verifyTLS: false,
+				caCert: 'not a certificate',
+				enableWebhooks: false,
+			});
+			expect(instance.log.of('warn')).to.deep.equal([]);
+			expect(
+				instance.log
+					.of('debug')
+					.some(m => m.startsWith('The CA certificate in the connection settings is not usable')),
+			).to.equal(true);
+		});
+
+		// K-16: with a trusted chain, a host name mismatch is not cured by storing the CA certificate
+		it('a certificate for another host name: the warning points to the host name, not to the CA certificate', async () => {
+			const other = new MockUnifiController({ token: TOKEN, altNames: ['other.example'] });
+			await other.start();
+			try {
+				const instance = await start({
+					controllerPort: other.port,
+					verifyTLS: true,
+					caCert: other.cert,
+					enableWebhooks: false,
+				});
+				const warnings = instance.log.of('warn');
+				expect(warnings).to.have.length(1);
+				expect(warnings[0]).to.contain('rejected (ERR_TLS_CERT_ALTNAME_INVALID)');
+				expect(warnings[0]).to.contain('not issued for the configured host name');
+				expect(warnings[0]).to.not.contain('store the CA certificate');
+			} finally {
+				await other.stop();
+			}
 		});
 	});
 

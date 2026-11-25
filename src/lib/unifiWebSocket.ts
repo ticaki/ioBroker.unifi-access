@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import type { TimerHost } from './timerHost';
 import type { UnifiWebSocketMessage } from './types';
+import { trustedCertificates } from './caCert';
 
 export interface UnifiWebSocketOptions {
 	host: string;
@@ -107,7 +108,7 @@ export class UnifiWebSocket extends EventEmitter {
 
 		const ws = new WebSocket(url, {
 			rejectUnauthorized: verifyTLS === true,
-			ca: caCert ? caCert : undefined,
+			ca: trustedCertificates(caCert),
 			headers: { Authorization: `Bearer ${token}` },
 			handshakeTimeout: 10_000,
 		});

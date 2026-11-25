@@ -158,6 +158,32 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			expect(counts.open).to.equal(1);
 			expect(mock.wsClients.size).to.equal(1);
 		});
+
+		// T-01: a certificate of a trusted CA, but for another host, must be refused (no man in the middle)
+		it('verifyTLS=true also verifies the host name: a trusted certificate for another host is rejected', async () => {
+			const other = new MockUnifiController({ token: TOKEN, altNames: ['other.example'] });
+			await other.start();
+			try {
+				const { socket, errors, counts } = create({
+					port: other.port,
+					verifyTLS: true,
+					caCert: other.cert,
+				});
+				socket.start();
+				await waitFor(() => errors.length > 0, { description: 'TLS error' });
+				socket.stop();
+				expect((errors[0] as NodeJS.ErrnoException).code).to.equal('ERR_TLS_CERT_ALTNAME_INVALID');
+				expect(counts.open).to.equal(0);
+				expect(other.wsHandshakes).to.have.length(0);
+			} finally {
+				await other.stop();
+			}
+		});
+
+		it('verifyTLS=true with the controller certificate pasted without line breaks connects (U-02)', async () => {
+			const { counts } = await startAndWaitOpen({ verifyTLS: true, caCert: mock.cert.replace(/\n/g, ' ') });
+			expect(counts.open).to.equal(1);
+		});
 	});
 
 	describe('event dispatch', () => {

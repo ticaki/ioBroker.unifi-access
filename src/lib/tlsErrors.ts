@@ -37,3 +37,34 @@ export function tlsCertificateErrorCode(err: unknown): string | undefined {
 	}
 	return undefined;
 }
+
+/**
+ * Whether the code says that the certificate is valid but not issued for the host that was contacted.
+ *
+ * @param code Code from {@link tlsCertificateErrorCode}
+ */
+export function isHostnameMismatch(code: string | undefined): boolean {
+	return code === 'ERR_TLS_CERT_ALTNAME_INVALID' || code === 'HOSTNAME_MISMATCH';
+}
+
+/**
+ * What the user can do about a rejected certificate. A host name mismatch is not cured by storing a CA
+ * certificate — the chain may well be trusted already; the address used does not appear in the certificate.
+ *
+ * @param code Code from {@link tlsCertificateErrorCode}
+ * @param where Which connection failed: the Access controller or the Protect console
+ */
+export function tlsAdvice(code: string | undefined, where: 'controller' | 'protect'): string {
+	const toggle =
+		where === 'controller'
+			? '"Verify TLS certificate" in the connection settings'
+			: '"Verify TLS certificate" on the Protect tab';
+	if (isHostnameMismatch(code)) {
+		return (
+			`The certificate is not issued for the configured host name / IP address. Enter the controller host exactly ` +
+			`as it appears in the certificate (subject alternative name), or disable ${toggle}.`
+		);
+	}
+	const device = where === 'controller' ? 'controller' : 'console';
+	return `Either disable ${toggle} or store the CA certificate of the ${device} in the connection settings.`;
+}

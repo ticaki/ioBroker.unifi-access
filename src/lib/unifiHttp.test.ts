@@ -749,23 +749,38 @@ describe('UnifiHttp (against the mock controller)', () => {
 			expect(mock.requests).to.have.length(1);
 		});
 
-		it('verifyTLS=true with the certificate also verifies the host name (localhost)', async () => {
-			const client = new UnifiHttp({
-				host: 'localhost',
-				port: mock.port,
-				token: TOKEN,
-				verifyTLS: true,
-				caCert: mock.cert,
-			});
-			let doors;
+		// T-01: a certificate of a trusted CA, but for another host, must be refused (no man in the middle)
+		it('verifyTLS=true also verifies the host name: a trusted certificate for another host is rejected', async () => {
+			const other = new MockUnifiController({ token: TOKEN, altNames: ['other.example'] });
+			await other.start();
 			try {
-				doors = await client.listDoors();
-			} catch (err) {
-				// "localhost" may resolve to ::1 only, where the mock (bound to 127.0.0.1) does not listen
-				expect((err as AxiosError).code).to.equal('ECONNREFUSED');
-				return;
+				const client = new UnifiHttp({
+					host: '127.0.0.1',
+					port: other.port,
+					token: TOKEN,
+					verifyTLS: true,
+					caCert: other.cert,
+				});
+				const err = await rejection(client.listDoors());
+				expect((err as AxiosError).code).to.equal('ERR_TLS_CERT_ALTNAME_INVALID');
+				expect(other.requests).to.have.length(0);
+			} finally {
+				await other.stop();
 			}
-			expect(doors).to.have.length(2);
+		});
+
+		// U-02: what a single-line input field makes of a pasted PEM still works
+		it('verifyTLS=true with the controller certificate pasted without line breaks succeeds', async () => {
+			for (const mangled of [mock.cert.replace(/\n/g, ''), mock.cert.replace(/\n/g, ' ')]) {
+				const client = new UnifiHttp({
+					host: '127.0.0.1',
+					port: mock.port,
+					token: TOKEN,
+					verifyTLS: true,
+					caCert: mangled,
+				});
+				expect(await client.listDoors()).to.have.length(2);
+			}
 		});
 
 		it('verifyTLS=true with a foreign CA certificate is rejected', async () => {

@@ -9,7 +9,8 @@ import * as utils from '@iobroker/adapter-core';
 import { classifyError, UnifiApiError, UnifiHttp } from './lib/unifiHttp';
 import { classifyProtectError, ProtectHttp, type ProtectClipStream } from './lib/protectHttp';
 import { classifyStoredSecret } from './lib/secretMigration';
-import { tlsCertificateErrorCode } from './lib/tlsErrors';
+import { parseCaCert } from './lib/caCert';
+import { tlsAdvice, tlsCertificateErrorCode } from './lib/tlsErrors';
 import { UnifiWebSocket } from './lib/unifiWebSocket';
 import type { TimerHost } from './lib/timerHost';
 import {
@@ -260,6 +261,7 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 
+		this.checkCaCert();
 		this.http = new UnifiHttp({ host, port, token, verifyTLS, caCert, debugLog: (m: string) => this.log.debug(m) });
 
 		this.subscribeStates('doors.*.unlock');
@@ -285,6 +287,31 @@ class UnifiAccess extends utils.Adapter {
 		// Last: the Protect login may take long when the console does not answer; door control and
 		// events must not wait for it.
 		await this.initProtect(host, caCert);
+	}
+
+	/**
+	 * Report a CA certificate that cannot be used. Node would ignore it silently and every strict TLS
+	 * check would fail without a visible reason. Repairable damage (lost line breaks) is repaired by the
+	 * clients and not reported.
+	 */
+	private checkCaCert(): void {
+		const cfg = this.config;
+		const { certificates, problems } = parseCaCert(cfg.caCert);
+		if (problems.length === 0) {
+			return;
+		}
+		const text =
+			`The CA certificate in the connection settings is ${certificates.length > 0 ? 'partly ' : ''}not usable: ` +
+			`${problems.join('; ')}. ${
+				certificates.length > 0 ? `Only ${certificates.length} certificate(s) are trusted.` : 'It is ignored.'
+			} Paste the complete PEM text including the "-----BEGIN CERTIFICATE-----" and "-----END CERTIFICATE-----" lines.`;
+		// only a certificate that is actually used for a verification is worth a warning
+		const used = cfg.verifyTLS === true || (cfg.enableProtect === true && cfg.protectVerifyTLS === true);
+		if (used) {
+			this.log.warn(text);
+		} else {
+			this.log.debug(text);
+		}
 	}
 
 	/** Read the first characters of the installation UUID (part of the webhook endpoint name). */
@@ -389,10 +416,10 @@ class UnifiAccess extends utils.Adapter {
 			const kind = classifyProtectError(err);
 			if (kind === 'tls') {
 				// A configuration problem: retrying cannot help, so say exactly once what to do.
+				const code = tlsCertificateErrorCode(err);
 				this.log.warn(
-					`Protect login failed: the TLS certificate of the console was rejected (${tlsCertificateErrorCode(err)}). ` +
-						`Either disable "Verify TLS certificate" on the Protect tab or store the CA certificate of the console ` +
-						`in the connection settings. The Protect integration stays off until the instance is restarted.`,
+					`Protect login failed: the TLS certificate of the console was rejected (${code}). ` +
+						`${tlsAdvice(code, 'protect')} The Protect integration stays off until the instance is restarted.`,
 				);
 				this.protectHttp = null;
 			} else if (kind === 'credentials') {
@@ -781,9 +808,7 @@ class UnifiAccess extends utils.Adapter {
 			const tlsCode = tlsCertificateErrorCode(err);
 			let text: string;
 			if (tlsCode) {
-				text =
-					`Bootstrap failed: the TLS certificate of the controller was rejected (${tlsCode}). ` +
-					`Either disable "Verify TLS certificate" in the connection settings or store the CA certificate of the controller there.`;
+				text = `Bootstrap failed: the TLS certificate of the controller was rejected (${tlsCode}). ${tlsAdvice(tlsCode, 'controller')}`;
 			} else if (axErr.response?.status === 404) {
 				text = `Bootstrap failed: 404 — verify that host and port point to a UniFi Access controller (${this.http.url}).`;
 			} else {

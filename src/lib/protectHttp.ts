@@ -3,6 +3,7 @@ import https from 'node:https';
 import type { Readable } from 'node:stream';
 import { isSafeProtectId, sanitizeProtectClipPath } from './pathSafety';
 import { tlsCertificateErrorCode } from './tlsErrors';
+import { trustedCertificates } from './caCert';
 
 export interface ProtectHttpOptions {
 	/** Host name or address of the UniFi OS console (a `host:port` value is used as it is). */
@@ -62,7 +63,8 @@ export class ProtectHttp {
 			timeout: 15_000,
 			httpsAgent: new https.Agent({
 				rejectUnauthorized: options.verifyTLS === true,
-				ca: options.caCert ? options.caCert : undefined,
+				// in addition to the system CAs (Node's `ca` alone would replace them)
+				ca: trustedCertificates(options.caCert),
 			}),
 		});
 	}

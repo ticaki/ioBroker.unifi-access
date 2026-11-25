@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance, type AxiosResponse, AxiosError } from 'axios';
 import https from 'node:https';
 import { sanitizeStaticPath } from './pathSafety';
+import { trustedCertificates } from './caCert';
 import type {
 	UnifiDeviceRaw,
 	UnifiDoorLockRule,
@@ -203,7 +204,8 @@ export class UnifiHttp {
 			},
 			httpsAgent: new https.Agent({
 				rejectUnauthorized: options.verifyTLS === true,
-				ca: options.caCert ? options.caCert : undefined,
+				// system CAs plus the configured certificate(s), repaired if the admin field mangled them
+				ca: trustedCertificates(options.caCert),
 			}),
 		});
 		// The response envelope is evaluated in one place for all calls: a `code` other than SUCCESS is an
