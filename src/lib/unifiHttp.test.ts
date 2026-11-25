@@ -528,6 +528,37 @@ describe('UnifiHttp (against the mock controller)', () => {
 		});
 	});
 
+	describe('updateWebhookEndpoint()', () => {
+		it('sends PUT /webhooks/endpoints/:id with name, URL and events and returns the endpoint (secret unchanged)', async () => {
+			const existing = mock.addWebhookEndpoint({
+				endpoint: 'http://192.0.2.10:8095/hook',
+				name: 'old',
+				events: ['a'],
+			});
+			const updated = await http.updateWebhookEndpoint(existing.id, {
+				name: 'new',
+				endpoint: 'http://192.0.2.11:8095/hook',
+				events: ['access.door.unlock', 'access.device.dps_status'],
+			});
+			expect(mock.requests[0].method).to.equal('PUT');
+			expect(mock.requests[0].url).to.equal(`/api/v1/developer/webhooks/endpoints/${existing.id}`);
+			expect(mock.requests[0].body).to.deep.equal({
+				name: 'new',
+				endpoint: 'http://192.0.2.11:8095/hook',
+				events: ['access.door.unlock', 'access.device.dps_status'],
+			});
+			expect(updated).to.deep.include({ id: existing.id, secret: existing.secret, name: 'new' });
+			expect(mock.webhookEndpoints[0].events).to.deep.equal(['access.door.unlock', 'access.device.dps_status']);
+		});
+
+		it('rejects for an unknown endpoint id', async () => {
+			const err = await rejection(
+				http.updateWebhookEndpoint('missing', { name: 'n', endpoint: 'http://x/y', events: [] }),
+			);
+			expect((err as AxiosError).response?.status).to.equal(400);
+		});
+	});
+
 	describe('debugLog', () => {
 		it('logs method, url and status of webhook endpoint calls only', async () => {
 			const lines: string[] = [];

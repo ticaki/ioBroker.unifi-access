@@ -37,6 +37,8 @@ class FakeAdapter {
 		this.name = options.name ?? 'unifi-access';
 		this.instance = 0;
 		this.namespace = `${this.name}.${this.instance}`;
+		/** ioBroker host name the instance runs on (adapter.host) */
+		this.host = 'test-host';
 		/** @type {Record<string, any>} */
 		this.config = { ...FakeAdapter.pendingConfig };
 		this.log = createTestLogger();

@@ -241,6 +241,26 @@ export class UnifiHttp {
 		return { code: r.data?.code ?? 'SUCCESS', endpoint: r.data?.data };
 	}
 
+	/**
+	 * Update a webhook endpoint (API reference 11.5): name, URL, events and optional headers are
+	 * replaced, id and secret are kept by the controller.
+	 *
+	 * @param id Endpoint id
+	 * @param payload New name, URL, events (and headers)
+	 * @returns The updated endpoint as reported by the controller, if the response carries one
+	 */
+	async updateWebhookEndpoint(
+		id: string,
+		payload: UnifiWebhookEndpointCreate,
+	): Promise<(UnifiWebhookEndpoint & { secret?: string }) | undefined> {
+		const r = await this.client.put<{ data?: UnifiWebhookEndpoint & { secret?: string } }>(
+			`/api/v1/developer/webhooks/endpoints/${encodeURIComponent(id)}`,
+			payload,
+		);
+		const data = r.data?.data;
+		return data && typeof data === 'object' ? data : undefined;
+	}
+
 	async deleteWebhookEndpoint(id: string): Promise<void> {
 		await this.client.delete(`/api/v1/developer/webhooks/endpoints/${encodeURIComponent(id)}`);
 	}

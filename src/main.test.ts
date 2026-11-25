@@ -30,6 +30,8 @@ const TOKEN = 'main-test-token';
 const MAIN = join(__dirname, 'main');
 const NS = 'unifi-access.0';
 const INSTANCE_OBJECT = `system.adapter.${NS}`;
+/** Webhook endpoint name of this installation: instance and ioBroker host */
+const ENDPOINT_NAME = `ioBroker.unifi-access (${NS}@test-host)`;
 const { DOOR_A2, DOOR_3855, DEVICE_HUB, DEVICE_G2_PRO } = fixtures.IDS;
 
 interface LoggedEvent {
@@ -138,11 +140,12 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		it('does not touch the instance config when the stored webhook credentials are still valid (no restart loop)', async () => {
 			const existing = mock.addWebhookEndpoint({
 				endpoint: `http://127.0.0.1:${listenPort}/unifi-access-webhook`,
-				name: `ioBroker.unifi-access (${NS})`,
+				name: ENDPOINT_NAME,
 			});
 			const instance = await startConnected({ webhookEndpointId: existing.id, webhookSecret: existing.secret });
 			expect(instance.objects.has(INSTANCE_OBJECT)).to.equal(false);
 			expect(mock.webhookEndpoints).to.deep.equal([existing]);
+			expect(mock.requests.filter(r => r.path.startsWith('/webhooks') && r.method !== 'GET')).to.deep.equal([]);
 			expect(instance.val('info.webhookRegistered')).to.equal(true);
 
 			// and the stored secret is the one that verifies incoming webhooks
@@ -248,11 +251,9 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			await waitFor(() => instance.val('info.connection') === true, { description: 'connected' });
 		});
 
-		// BUG-C-14: the webhook endpoint is registered exactly once, right after the first bootstrap attempt.
-		// If the controller is unreachable at that moment the registration fails ("Webhook registration failed")
-		// and is never repeated — not even after the bootstrap retry succeeded. Webhook events stay off until
-		// the adapter is restarted.
-		it.skip('BUG-C-14: registers the webhook after the controller became reachable', async () => {
+		// A controller that is unreachable at adapter start (power failure: ioBroker is up before the UniFi
+		// console) must not leave the webhooks off until the next manual restart.
+		it('registers the webhook after the controller became reachable (R-10)', async () => {
 			mock.failNext({ status: 500, times: Number.POSITIVE_INFINITY });
 			const instance = await start({ enableWebhooks: true });
 			expect(mock.webhookEndpoints).to.have.length(0);
@@ -263,6 +264,124 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 
 			await waitFor(() => mock.webhookEndpoints.length === 1, { description: 'webhook registration' });
 			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'webhookRegistered' });
+			const [result] = await mock.deliverWebhook(
+				fixtures.webhookEvents.doorbellCompleted({ door: door(DOOR_A2), device: hub() }),
+			);
+			expect(result.status).to.equal(200);
+		});
+	});
+
+	describe('webhook endpoint registration', () => {
+		const webhookUrl = (): string => `http://127.0.0.1:${listenPort}/unifi-access-webhook`;
+		const webhookWrites = (): string[] =>
+			mock.requests
+				.filter(r => r.path.startsWith('/webhooks') && r.method !== 'GET')
+				.map(r => `${r.method} ${r.path}`);
+
+		it('names its endpoint after instance and ioBroker host', async () => {
+			await startConnected();
+			expect(mock.webhookEndpoints.map(e => e.name)).to.deep.equal([ENDPOINT_NAME]);
+		});
+
+		it('reports the registration as failed (also via getConnectionStatus) while it could not be made, although credentials are stored', async () => {
+			mock.failNext({ path: '/webhooks/endpoints', status: 500, times: Number.POSITIVE_INFINITY });
+			const instance = await startConnected({ webhookEndpointId: 'stored-id', webhookSecret: 'stored-secret' });
+			expect(instance.val('info.webhookRegistered')).to.equal(false);
+			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(false);
+			expect(instance.log.of('warn')).to.deep.equal([
+				'Webhook registration failed: Request failed with status code 500',
+			]);
+		});
+
+		it('makes up for a failed registration at the next reconnect and does not repeat the warning', async () => {
+			mock.failNext({ path: '/webhooks/endpoints', status: 500, times: 2 });
+			const instance = await startConnected();
+			expect(instance.val('info.webhookRegistered')).to.equal(false);
+
+			for (let i = 0; i < 2 && instance.val('info.webhookRegistered') !== true; i++) {
+				mock.dropWsConnections();
+				await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+				await clock.tickAsync(200);
+				await waitFor(() => instance.val('info.connection') === true, { description: 'reconnected' });
+				await waitFor(() => mock.findRequests({ method: 'GET', path: '/webhooks/endpoints' }).length >= i + 2, {
+					description: 'registration attempt',
+				});
+				await delay(50);
+			}
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+			expect(mock.webhookEndpoints).to.have.length(1);
+			expect(instance.log.of('warn').filter(m => m.startsWith('Webhook registration failed'))).to.have.length(1);
+			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(true);
+		});
+
+		it('brings an existing endpoint with fewer events in line via PUT: same secret, nothing stored, no restart (D-23)', async () => {
+			const existing = mock.addWebhookEndpoint({
+				endpoint: webhookUrl(),
+				name: ENDPOINT_NAME,
+				events: ['access.door.unlock'],
+			});
+			const { id, secret } = existing;
+			const instance = await startConnected({ webhookEndpointId: id, webhookSecret: secret });
+
+			expect(webhookWrites()).to.deep.equal([`PUT /webhooks/endpoints/${id}`]);
+			expect(mock.webhookEndpoints).to.have.length(1);
+			expect([...mock.webhookEndpoints[0].events].sort()).to.deep.equal([...fixtures.WEBHOOK_EVENTS].sort());
+			expect(mock.webhookEndpoints[0].secret).to.equal(secret);
+			expect(instance.objects.has(INSTANCE_OBJECT), 'instance config untouched').to.equal(false);
+
+			// an event type that was not subscribed before is delivered and verified with the unchanged secret
+			const [result] = await mock.deliverWebhook(
+				fixtures.webhookEvents.dpsStatus({ door: door(DOOR_3855), device: hub(), status: 'open' }),
+			);
+			expect(result.status).to.equal(200);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.position`) === 'open', {
+				description: 'event processed',
+			});
+		});
+
+		it('takes over the endpoint registered by an earlier version (old name scheme, stored id) without new credentials', async () => {
+			const existing = mock.addWebhookEndpoint({ endpoint: webhookUrl(), name: `ioBroker.unifi-access (${NS})` });
+			const { id, secret } = existing;
+			const instance = await startConnected({ webhookEndpointId: id, webhookSecret: secret });
+			expect(webhookWrites()).to.deep.equal([`PUT /webhooks/endpoints/${id}`]);
+			expect(mock.webhookEndpoints.map(e => `${e.id} ${e.name} ${e.secret}`)).to.deep.equal([
+				`${id} ${ENDPOINT_NAME} ${secret}`,
+			]);
+			expect(instance.objects.has(INSTANCE_OBJECT)).to.equal(false);
+		});
+
+		it('leaves the endpoint of a second installation at the same controller alone (R-18b)', async () => {
+			// another ioBroker host running the same instance number, and one still using the old name scheme
+			const otherHost = mock.addWebhookEndpoint({
+				endpoint: 'http://192.0.2.77:8095/unifi-access-webhook',
+				name: `ioBroker.unifi-access (${NS}@other-host)`,
+			});
+			const oldScheme = mock.addWebhookEndpoint({
+				endpoint: 'http://192.0.2.78:8095/unifi-access-webhook',
+				name: `ioBroker.unifi-access (${NS})`,
+			});
+			const snapshot = JSON.stringify([otherHost, oldScheme]);
+
+			const instance = await startConnected();
+			await instance.request('reregisterWebhook');
+
+			expect(mock.findRequests({ method: 'DELETE' }).map(r => r.path)).to.not.include.members([
+				`/webhooks/endpoints/${otherHost.id}`,
+				`/webhooks/endpoints/${oldScheme.id}`,
+			]);
+			expect(JSON.stringify(mock.webhookEndpoints.slice(0, 2))).to.equal(snapshot);
+			expect(mock.webhookEndpoints).to.have.length(3);
+			expect(mock.webhookEndpoints[2]).to.include({ name: ENDPOINT_NAME, endpoint: webhookUrl() });
+		});
+
+		it('a controller that omits the secret in its endpoint list does not cause new credentials on every start (R-18a)', async () => {
+			const existing = mock.addWebhookEndpoint({ endpoint: webhookUrl(), name: ENDPOINT_NAME });
+			mock.omitSecretInList = true;
+			const instance = await startConnected({ webhookEndpointId: existing.id, webhookSecret: existing.secret });
+			expect(webhookWrites()).to.deep.equal([]);
+			expect(instance.objects.has(INSTANCE_OBJECT), 'no write to the instance config → no restart').to.equal(
+				false,
+			);
 			const [result] = await mock.deliverWebhook(
 				fixtures.webhookEvents.doorbellCompleted({ door: door(DOOR_A2), device: hub() }),
 			);

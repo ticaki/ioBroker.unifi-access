@@ -275,6 +275,8 @@ export class FakeAdapter {
 	name: string;
 	instance: number;
 	namespace: string;
+	/** ioBroker host name the instance runs on */
+	host: string;
 	config: Record<string, any>;
 	log: TestLogger;
 	/** Objects by full id */

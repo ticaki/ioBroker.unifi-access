@@ -50,7 +50,7 @@ Alle Routen unter `https://<host>:<port>/api/v1/developer`, Antwort-Hülle `{"co
 | POST | `/system/logs` | 9.2 | liefert `mock.systemLogHits`; Topics laut Doku **plus** `all` (siehe Annahmen) |
 | GET | `/system/static/<pfad>` | 9.5 | Inhalte per `mock.addStaticResource(pfad, buffer)` |
 | GET / POST | `/webhooks/endpoints` | 11.3 / 11.4 | POST liefert `id` und `secret`; gleiche URL → `CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED` |
-| PUT / DELETE | `/webhooks/endpoints/:id` | 11.5 / 11.6 | |
+| PUT / DELETE | `/webhooks/endpoints/:id` | 11.5 / 11.6 | PUT ersetzt `name`, `endpoint`, `events` (und `headers`); `id` und `secret` bleiben wie im Doku-Beispiel unverändert |
 | WebSocket | `/devices/notifications` | 11.1 | Bearer-Token im Upgrade-Request, sonst `401` |
 
 Fehler: fehlender/kaputter `Authorization`-Header → `401 CODE_AUTH_FAILED`, falscher Token →

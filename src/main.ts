@@ -109,6 +109,12 @@ class UnifiAccess extends utils.Adapter {
 	private controllerName: string | null = null;
 	private webhookSecret: string | null = null;
 	private webhookEndpointId: string | null = null;
+	/** True once the endpoint is known to be registered with the controller in this run. */
+	private webhookRegistered = false;
+	private webhookRegistrationRunning = false;
+	private webhookRegistrationFailureLog = '';
+	/** The shared HTTP server is listening with the webhook receiver mounted. */
+	private webhookReceiverActive = false;
 
 	private bootstrapRetryTimer: ioBroker.Timeout | undefined;
 	private bootstrapRunning = false;
@@ -183,6 +189,9 @@ class UnifiAccess extends utils.Adapter {
 		const caCert = cfg.caCert || undefined;
 
 		this.forwardRules = Array.isArray(cfg.forwardEvents) ? cfg.forwardEvents : [];
+		// credentials of the webhook endpoint registered by an earlier run
+		this.webhookEndpointId = asString(cfg.webhookEndpointId) ?? null;
+		this.webhookSecret = asString(cfg.webhookSecret) ?? null;
 
 		if (!host || !token) {
 			this.log.warn('Controller host or API token missing — open the admin UI to configure.');
@@ -384,13 +393,12 @@ class UnifiAccess extends utils.Adapter {
 		};
 
 		const server = new SharedHttpServer({ port, ip, tls, logger });
+		let webhookHandlerMounted = false;
 
 		if (cfg.enableWebhooks === true) {
 			if (!this.http) {
 				this.log.warn('Webhook receiver not enabled: no HTTP client.');
 			} else {
-				this.webhookEndpointId = cfg.webhookEndpointId || null;
-				this.webhookSecret = cfg.webhookSecret || null;
 				const handler = new WebhookHandler({
 					path: WEBHOOK_PATH,
 					secret: () => this.webhookSecret,
@@ -398,6 +406,7 @@ class UnifiAccess extends utils.Adapter {
 					onEvent: env => this.handleAccessEvent(env, 'webhook'),
 				});
 				server.registerHandler('unifi-webhook', handler.matches, handler.handle);
+				webhookHandlerMounted = true;
 			}
 		}
 
@@ -463,40 +472,95 @@ class UnifiAccess extends utils.Adapter {
 		try {
 			await server.start();
 			this.httpServer = server;
+			this.webhookReceiverActive = webhookHandlerMounted;
 		} catch (err) {
 			this.log.warn(`Shared HTTP server failed to start: ${(err as Error).message}`);
 			this.httpServer = null;
 			return;
 		}
 
-		if (cfg.enableWebhooks === true && this.http) {
-			const publicUrl = this.buildWebhookPublicUrl();
-			if (!publicUrl) {
+		await this.ensureWebhookRegistration();
+	}
+
+	/**
+	 * Name of this installation's webhook endpoint on the controller. It contains the ioBroker host
+	 * name: two installations at the same controller (e.g. production and a dev-server, both with
+	 * instance 0) get different names and never clean up each other's endpoint.
+	 */
+	private webhookEndpointName(): string {
+		return `ioBroker.unifi-access (${this.namespace}@${this.host || 'iobroker'})`;
+	}
+
+	private registrationLogger(): { debug: (m: string) => void; info: (m: string) => void; warn: (m: string) => void } {
+		return {
+			debug: (m: string) => this.log.debug(m),
+			info: (m: string) => this.log.info(m),
+			warn: (m: string) => this.log.warn(m),
+		};
+	}
+
+	/**
+	 * Register the webhook endpoint with the controller unless that already happened. Called when the
+	 * receiver is listening and again after every successful (re)load of the controller state, so a
+	 * registration that failed because the controller was not reachable at start is made up for.
+	 */
+	private async ensureWebhookRegistration(): Promise<void> {
+		if (
+			this.config.enableWebhooks !== true ||
+			!this.http ||
+			!this.webhookReceiverActive ||
+			this.webhookRegistered ||
+			this.webhookRegistrationRunning ||
+			this.unloading
+		) {
+			return;
+		}
+		if (!this.bootstrapSucceededOnce) {
+			this.log.debug('Webhook registration postponed until the controller is reachable.');
+			return;
+		}
+		const publicUrl = this.buildWebhookPublicUrl();
+		if (!publicUrl) {
+			if (!this.webhookRegistrationFailureLog) {
+				this.webhookRegistrationFailureLog = 'no-address';
 				this.log.warn('Webhook registration skipped: no usable network address found.');
-			} else {
-				try {
-					const result = await ensureRegistration({
-						http: this.http,
-						publicUrl,
-						name: `ioBroker.unifi-access (${this.namespace})`,
-						events: DEFAULT_WEBHOOK_EVENTS,
-						logger,
-					});
-					this.webhookEndpointId = result.id;
-					this.webhookSecret = result.secret;
-					// Only write to native when credentials actually changed — extendForeignObjectAsync
-					// triggers a js-controller restart, so we must not call it on every start.
-					const idChanged = result.id !== (cfg.webhookEndpointId || null);
-					const secretChanged = result.secret !== (cfg.webhookSecret || null);
-					if (idChanged || secretChanged) {
-						await this.persistWebhookCredentials(result.id, result.secret);
-					}
-					await this.setState('info.webhookRegistered', { val: true, ack: true });
-				} catch (err) {
-					this.log.warn(`Webhook registration failed: ${(err as Error).message}`);
-					await this.setState('info.webhookRegistered', { val: false, ack: true });
-				}
 			}
+			return;
+		}
+		this.webhookRegistrationRunning = true;
+		try {
+			const storedId = this.webhookEndpointId;
+			const storedSecret = this.webhookSecret;
+			const result = await ensureRegistration({
+				http: this.http,
+				publicUrl,
+				name: this.webhookEndpointName(),
+				storedId,
+				storedSecret,
+				events: DEFAULT_WEBHOOK_EVENTS,
+				logger: this.registrationLogger(),
+			});
+			this.webhookEndpointId = result.id;
+			this.webhookSecret = result.secret;
+			this.webhookRegistered = true;
+			this.webhookRegistrationFailureLog = '';
+			await this.setState('info.webhookRegistered', { val: true, ack: true });
+			// Only write to native when credentials actually changed — extendForeignObjectAsync
+			// triggers a js-controller restart, so we must not call it on every start.
+			if (result.id !== storedId || result.secret !== storedSecret) {
+				await this.persistWebhookCredentials(result.id, result.secret);
+			}
+		} catch (err) {
+			const text = `Webhook registration failed: ${errorText(err)}`;
+			if (text !== this.webhookRegistrationFailureLog) {
+				this.webhookRegistrationFailureLog = text;
+				this.log.warn(text);
+			} else {
+				this.log.debug(text);
+			}
+			await this.setState('info.webhookRegistered', { val: false, ack: true });
+		} finally {
+			this.webhookRegistrationRunning = false;
 		}
 	}
 
@@ -598,6 +662,8 @@ class UnifiAccess extends utils.Adapter {
 			} else if (this.ws.isOpen) {
 				this.setConnectionStatus(true, null);
 			}
+			// a registration that could not be made at start (controller unreachable) is made up for here
+			await this.ensureWebhookRegistration();
 			// else: the WebSocket is reconnecting; its "open" sets the status and triggers a resync
 		} finally {
 			this.bootstrapRunning = false;
@@ -1624,7 +1690,7 @@ class UnifiAccess extends utils.Adapter {
 					lastError: this.lastErrorKind,
 					hasToken: !!this.config.apiToken,
 					controllerName: this.controllerName,
-					webhookRegistered: this.webhookEndpointId !== null && this.webhookSecret !== null,
+					webhookRegistered: this.webhookRegistered,
 				};
 
 			case 'listDevices':
@@ -1716,18 +1782,16 @@ class UnifiAccess extends utils.Adapter {
 				{
 					http: this.http,
 					publicUrl,
-					name: `ioBroker.unifi-access (${this.namespace})`,
+					name: this.webhookEndpointName(),
 					events: DEFAULT_WEBHOOK_EVENTS,
-					logger: {
-						debug: (m: string) => this.log.debug(m),
-						info: (m: string) => this.log.info(m),
-						warn: (m: string) => this.log.warn(m),
-					},
+					logger: this.registrationLogger(),
 				},
 				this.webhookEndpointId,
 			);
 			this.webhookEndpointId = result.id;
 			this.webhookSecret = result.secret;
+			this.webhookRegistered = true;
+			await this.setState('info.webhookRegistered', { val: true, ack: true });
 			// Storing the credentials changes the instance object, which makes js-controller restart the
 			// adapter — the answer has to be on its way before that.
 			defer(() => this.persistWebhookCredentials(result.id, result.secret));

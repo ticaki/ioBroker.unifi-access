@@ -6,7 +6,11 @@ import { UnifiHttp } from '../lib/unifiHttp';
 import { DEFAULT_WEBHOOK_EVENTS, ensureRegistration, reregister, type RegistrationOptions } from './registration';
 
 const TOKEN = 'registration-test-token';
-const NAME = 'ioBroker.unifi-access (unifi-access.0)';
+/** Name scheme with the ioBroker host: identifies one installation */
+const NAME = 'ioBroker.unifi-access (unifi-access.0@iobroker-prod)';
+/** Name scheme of earlier adapter versions — the same for every installation */
+const LEGACY_NAME = 'ioBroker.unifi-access (unifi-access.0)';
+const OTHER_HOST_NAME = 'ioBroker.unifi-access (unifi-access.0@dev-server)';
 const PUBLIC_URL = 'http://192.0.2.10:8095/unifi-access-webhook';
 const OLD_URL = 'http://192.0.2.99:8095/unifi-access-webhook';
 const ENDPOINTS = '/webhooks/endpoints';
@@ -77,32 +81,81 @@ describe('webhook registration (against the mock controller)', () => {
 			expect(mock.webhookEndpoints).to.deep.equal([existing]);
 		});
 
-		it('reuses an endpoint with the same URL even if it was registered under another name', async () => {
-			const existing = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: 'created by hand' });
+		it('adopts an endpoint with the same URL that was registered under another name: renamed via PUT, id and secret kept', async () => {
+			const existing = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: LEGACY_NAME });
 			const result = await ensureRegistration(options);
-			expect(result.id).to.equal(existing.id);
-			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`]);
+			expect(result).to.deep.equal({ id: existing.id, secret: existing.secret, endpoint: PUBLIC_URL });
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`, `PUT ${ENDPOINTS}/${existing.id}`]);
+			expect(mock.webhookEndpoints).to.have.length(1);
+			expect(mock.webhookEndpoints[0].name).to.equal(NAME);
 		});
 
-		// BUG-C-07: an endpoint that already exists for the URL is reused as it is — its event subscription is
-		// never compared with the events the adapter needs. An endpoint that was registered with fewer events
-		// (older adapter version, created by hand) therefore never delivers the missing event types.
-		it.skip('BUG-C-07: an existing endpoint ends up subscribed to all required events', async () => {
-			mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME, events: ['access.door.unlock'] });
+		// An endpoint that was registered with fewer events (older adapter version, created by hand) would
+		// never deliver the missing event types.
+		it('an existing endpoint ends up subscribed to all required events — via PUT, with unchanged id and secret', async () => {
+			const existing = mock.addWebhookEndpoint({
+				endpoint: PUBLIC_URL,
+				name: NAME,
+				events: ['access.door.unlock'],
+			});
+			const { id, secret } = existing;
 			const result = await ensureRegistration(options);
+
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`, `PUT ${ENDPOINTS}/${id}`]);
+			expect(mock.requests[1].body).to.deep.equal({
+				name: NAME,
+				endpoint: PUBLIC_URL,
+				events: [...DEFAULT_WEBHOOK_EVENTS],
+			});
 			const registered = mock.webhookEndpoints.filter(e => e.endpoint === PUBLIC_URL);
 			expect(registered).to.have.length(1);
 			expect(registered[0].id).to.equal(result.id);
 			expect(registered[0].secret).to.equal(result.secret);
 			expect([...registered[0].events].sort()).to.deep.equal([...DEFAULT_WEBHOOK_EVENTS].sort());
+			// no new credentials → nothing to store, no adapter restart
+			expect(result).to.deep.equal({ id, secret, endpoint: PUBLIC_URL });
 		});
 
-		it('removes stale endpoints of this adapter instance (same name, outdated URL) and keeps foreign ones', async () => {
-			const stale1 = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: NAME });
-			const stale2 = mock.addWebhookEndpoint({
-				endpoint: 'http://172.17.0.2:8095/unifi-access-webhook',
+		it('does not send an update when only the order of the events differs', async () => {
+			mock.addWebhookEndpoint({
+				endpoint: PUBLIC_URL,
 				name: NAME,
+				events: [...DEFAULT_WEBHOOK_EVENTS].reverse(),
 			});
+			await ensureRegistration(options);
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`]);
+		});
+
+		it('keeps custom headers of the endpoint when it is updated', async () => {
+			const existing = mock.addWebhookEndpoint({
+				endpoint: PUBLIC_URL,
+				name: NAME,
+				events: ['access.door.unlock'],
+				headers: { 'X-Proxy-Auth': 'abc' },
+			});
+			await ensureRegistration(options);
+			expect(mock.requests[1].body.headers).to.deep.equal({ 'X-Proxy-Auth': 'abc' });
+			expect(mock.webhookEndpoints.find(e => e.id === existing.id)?.headers).to.deep.equal({
+				'X-Proxy-Auth': 'abc',
+			});
+		});
+
+		it('keeps working with the old event list when the update is refused (warning)', async () => {
+			const existing = mock.addWebhookEndpoint({
+				endpoint: PUBLIC_URL,
+				name: NAME,
+				events: ['access.door.unlock'],
+			});
+			mock.failNext({ method: 'PUT', status: 500 });
+			const result = await ensureRegistration(options);
+			expect(result).to.deep.equal({ id: existing.id, secret: existing.secret, endpoint: PUBLIC_URL });
+			expect(logger.of('warn')).to.have.length(1);
+			expect(logger.of('warn')[0]).to.contain('could not be updated');
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`, `PUT ${ENDPOINTS}/${existing.id}`]);
+		});
+
+		it('moves the endpoint of this installation to the new URL (changed IP) via PUT — id and secret stay', async () => {
+			const stale = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: NAME });
 			const foreign = mock.addWebhookEndpoint({
 				endpoint: 'https://example.invalid/hook',
 				name: 'other integration',
@@ -110,16 +163,33 @@ describe('webhook registration (against the mock controller)', () => {
 
 			const result = await ensureRegistration(options);
 
-			expect(calls()).to.deep.equal([
-				`GET ${ENDPOINTS}`,
-				`DELETE ${ENDPOINTS}/${stale1.id}`,
-				`DELETE ${ENDPOINTS}/${stale2.id}`,
-				`POST ${ENDPOINTS}`,
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`, `PUT ${ENDPOINTS}/${stale.id}`]);
+			expect(result).to.deep.equal({ id: stale.id, secret: stale.secret, endpoint: PUBLIC_URL });
+			expect(mock.webhookEndpoints.map(e => `${e.id} ${e.endpoint}`)).to.deep.equal([
+				`${stale.id} ${PUBLIC_URL}`,
+				`${foreign.id} https://example.invalid/hook`,
 			]);
-			expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([foreign.id, result.id]);
 		});
 
-		it('removes stale endpoints also when the current URL is already registered', async () => {
+		it('with several outdated endpoints of this installation: the stored one is moved, the others are removed', async () => {
+			const stale1 = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: NAME });
+			const stored = mock.addWebhookEndpoint({
+				endpoint: 'http://172.17.0.2:8095/unifi-access-webhook',
+				name: NAME,
+			});
+
+			const result = await ensureRegistration({ ...options, storedId: stored.id, storedSecret: stored.secret });
+
+			expect(calls()).to.deep.equal([
+				`GET ${ENDPOINTS}`,
+				`PUT ${ENDPOINTS}/${stored.id}`,
+				`DELETE ${ENDPOINTS}/${stale1.id}`,
+			]);
+			expect(result.id).to.equal(stored.id);
+			expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([stored.id]);
+		});
+
+		it('removes outdated endpoints of this installation also when the current URL is already registered', async () => {
 			const stale = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: NAME });
 			const current = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME });
 			const result = await ensureRegistration(options);
@@ -128,8 +198,57 @@ describe('webhook registration (against the mock controller)', () => {
 			expect(mock.webhookEndpoints).to.deep.equal([current]);
 		});
 
+		describe('two installations at the same controller (R-18b)', () => {
+			it('never touches the endpoint of another ioBroker host', async () => {
+				const other = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: OTHER_HOST_NAME });
+				const result = await ensureRegistration(options);
+				expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`, `POST ${ENDPOINTS}`]);
+				expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([other.id, result.id]);
+				expect(mock.webhookEndpoints[0]).to.deep.equal(other);
+			});
+
+			it('never touches an endpoint with the name scheme of earlier versions unless it is the stored one', async () => {
+				// could belong to this installation or to a second one — the name alone does not tell
+				const legacy = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: LEGACY_NAME });
+				const result = await ensureRegistration(options);
+				expect(mock.findRequests({ method: 'DELETE' })).to.deep.equal([]);
+				expect(mock.findRequests({ method: 'PUT' })).to.deep.equal([]);
+				expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([legacy.id, result.id]);
+			});
+
+			it('takes over the endpoint with the old name scheme when its id is the stored one (moved and renamed, secret kept)', async () => {
+				const legacy = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: LEGACY_NAME });
+				const result = await ensureRegistration({
+					...options,
+					storedId: legacy.id,
+					storedSecret: legacy.secret,
+				});
+				expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`, `PUT ${ENDPOINTS}/${legacy.id}`]);
+				expect(result).to.deep.equal({ id: legacy.id, secret: legacy.secret, endpoint: PUBLIC_URL });
+				expect(mock.webhookEndpoints[0]).to.include({ name: NAME, endpoint: PUBLIC_URL });
+			});
+
+			it('both installations keep their own endpoint across repeated starts', async () => {
+				const prod = { ...options };
+				const dev = { ...options, name: OTHER_HOST_NAME, publicUrl: OLD_URL };
+				const first = { prod: await ensureRegistration(prod), dev: await ensureRegistration(dev) };
+				for (let start = 0; start < 3; start++) {
+					expect(
+						await ensureRegistration({ ...prod, storedId: first.prod.id, storedSecret: first.prod.secret }),
+					).to.deep.equal(first.prod);
+					expect(
+						await ensureRegistration({ ...dev, storedId: first.dev.id, storedSecret: first.dev.secret }),
+					).to.deep.equal(first.dev);
+				}
+				expect(mock.webhookEndpoints).to.have.length(2);
+				expect(mock.findRequests({ method: 'DELETE' })).to.deep.equal([]);
+				expect(mock.findRequests({ method: 'POST' })).to.have.length(2);
+			});
+		});
+
 		it('continues when a stale endpoint cannot be removed (warning)', async () => {
 			const stale = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: NAME });
+			mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME });
 			mock.failNext({ method: 'DELETE', status: 500 });
 			const result = await ensureRegistration(options);
 			expect(result.endpoint).to.equal(PUBLIC_URL);
@@ -138,7 +257,52 @@ describe('webhook registration (against the mock controller)', () => {
 			expect(mock.webhookEndpoints).to.have.length(2);
 		});
 
-		it('recreates the endpoint when the list does not return its secret', async () => {
+		it('registers a new endpoint when the outdated one cannot be moved (warning)', async () => {
+			const stale = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: NAME });
+			mock.failNext({ method: 'PUT', status: 500 });
+			const result = await ensureRegistration(options);
+			expect(calls()).to.deep.equal([
+				`GET ${ENDPOINTS}`,
+				`PUT ${ENDPOINTS}/${stale.id}`,
+				`DELETE ${ENDPOINTS}/${stale.id}`,
+				`POST ${ENDPOINTS}`,
+			]);
+			expect(result.id).to.not.equal(stale.id);
+			expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([result.id]);
+			expect(logger.of('warn')[0]).to.contain(`Could not update webhook endpoint ${stale.id}`);
+		});
+
+		describe('list without secrets (R-18a: no recreate on every start, no restart loop)', () => {
+			it('uses the stored secret when the endpoint is the stored one — no write request', async () => {
+				const existing = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME });
+				mock.omitSecretInList = true;
+				for (let start = 0; start < 3; start++) {
+					const result = await ensureRegistration({
+						...options,
+						storedId: existing.id,
+						storedSecret: existing.secret,
+					});
+					expect(result).to.deep.equal({ id: existing.id, secret: existing.secret, endpoint: PUBLIC_URL });
+				}
+				expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`, `GET ${ENDPOINTS}`, `GET ${ENDPOINTS}`]);
+			});
+
+			it('recreates once when nothing is stored, and is stable afterwards', async () => {
+				mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME });
+				mock.omitSecretInList = true;
+				const first = await ensureRegistration(options);
+				const writes = mock.requests.filter(r => r.method !== 'GET').length;
+				for (let start = 0; start < 3; start++) {
+					expect(
+						await ensureRegistration({ ...options, storedId: first.id, storedSecret: first.secret }),
+					).to.deep.equal(first);
+				}
+				expect(mock.requests.filter(r => r.method !== 'GET')).to.have.length(writes);
+				expect(mock.webhookEndpoints).to.have.length(1);
+			});
+		});
+
+		it('recreates the endpoint when the list does not return its secret and none is stored', async () => {
 			const existing = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME });
 			mock.omitSecretInList = true;
 
@@ -223,18 +387,39 @@ describe('webhook registration (against the mock controller)', () => {
 			expect(logger.of('info')).to.deep.equal([`Deleted webhook endpoint ${old.id}.`]);
 		});
 
-		it('deletes by stored id (outdated URL) and by URL, but leaves unrelated endpoints alone', async () => {
-			const byId = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: NAME });
+		it('deletes by stored id, by URL and by the name of this installation, but leaves everything else alone', async () => {
+			const byId = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: LEGACY_NAME });
 			const byUrl = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: 'someone else' });
-			const foreign = mock.addWebhookEndpoint({ endpoint: 'https://example.invalid/hook', name: NAME });
+			const byName = mock.addWebhookEndpoint({
+				endpoint: 'http://172.17.0.2:8095/unifi-access-webhook',
+				name: NAME,
+			});
+			const otherHost = mock.addWebhookEndpoint({
+				endpoint: 'http://192.0.2.50:8095/unifi-access-webhook',
+				name: OTHER_HOST_NAME,
+			});
+			const legacyOfSomeoneElse = mock.addWebhookEndpoint({
+				endpoint: 'http://192.0.2.51:8095/unifi-access-webhook',
+				name: LEGACY_NAME,
+			});
+			const foreign = mock.addWebhookEndpoint({
+				endpoint: 'https://example.invalid/hook',
+				name: 'other integration',
+			});
 
 			const result = await reregister(options, byId.id);
 
 			expect(mock.findRequests({ method: 'DELETE' }).map(r => r.path)).to.have.members([
 				`${ENDPOINTS}/${byId.id}`,
 				`${ENDPOINTS}/${byUrl.id}`,
+				`${ENDPOINTS}/${byName.id}`,
 			]);
-			expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([foreign.id, result.id]);
+			expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([
+				otherHost.id,
+				legacyOfSomeoneElse.id,
+				foreign.id,
+				result.id,
+			]);
 		});
 
 		it('simply registers when nothing is stored and nothing exists', async () => {

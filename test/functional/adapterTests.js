@@ -227,7 +227,8 @@ function defineAdapterTests({ suite, describe, it }) {
 			it('registers its webhook endpoint with all documented events and stores the credentials', async () => {
 				expect(mock.webhookEndpoints).to.have.length(1);
 				expect(endpoint().endpoint).to.equal(webhookUrl);
-				expect(endpoint().name).to.equal('ioBroker.unifi-access (unifi-access.0)');
+				// instance and ioBroker host: two installations at one controller never share an endpoint name
+				expect(endpoint().name).to.match(/^ioBroker\.unifi-access \(unifi-access\.0@[^)]+\)$/);
 				expect([...endpoint().events].sort()).to.deep.equal([...fixtures.WEBHOOK_EVENTS].sort());
 				expect(mock.findRequests({ method: 'POST', path: '/webhooks/endpoints' })).to.have.length(1);
 
