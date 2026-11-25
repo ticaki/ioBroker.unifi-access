@@ -187,6 +187,8 @@ class UnifiAccess extends utils.Adapter {
 	private lockRuleSupported = true;
 	/** The doorbell call currently published in doorbell.active*. */
 	private activeDoorbellCall: { requestId?: string; fromWebhook: boolean } | null = null;
+	/** Emergency flags as last confirmed by the controller (what a failed command is put back to). */
+	private readonly lastEmergency: { lockdown?: boolean; evacuation?: boolean } = {};
 	/** Serialises emergency commands (read-modify-write of two flags). */
 	private emergencyQueue: Promise<void> = Promise.resolve();
 	/** One check per door at the end of a timed unlock — survives the short checks after later events. */
@@ -1663,6 +1665,11 @@ class UnifiAccess extends utils.Adapter {
 
 		if (localId === 'doors.emergency.lockdown' || localId === 'doors.emergency.evacuation') {
 			const field = localId === 'doors.emergency.lockdown' ? 'lockdown' : 'evacuation';
+			const blocked = this.commandBlocker();
+			if (blocked) {
+				this.refuseCommand(localId, blocked, this.lastEmergency[field] ?? null);
+				return;
+			}
 			this.runCommand(localId, this.handleEmergencyChange(field, val));
 			return;
 		}
@@ -1677,9 +1684,17 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		const [, doorId, control] = match;
+		// what the state is put back to when the command is not carried out
+		const neutral: ioBroker.StateValue =
+			control === 'unlock' ? false : (this.lastAckedControlValues.get(localId) ?? 0);
+		const blocked = this.commandBlocker();
+		if (blocked) {
+			// never queued: a door must not open minutes later, when the connection is back
+			this.refuseCommand(localId, blocked, neutral);
+			return;
+		}
 		if (!this.doorNameCache.has(doorId)) {
-			// not a door of the controller (no objects): nothing to do and nothing to reset
-			this.log.debug(`[${control}] ignoring write for unknown door id: ${doorId}`);
+			this.runCommand(localId, this.refuseUnknownDoor(localId, doorId, neutral));
 			return;
 		}
 
@@ -1722,6 +1737,58 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		this.runCommand(localId, this.handleDoorLockRule(doorId, val as number, ruleType));
+	}
+
+	/**
+	 * Why a switching command cannot be carried out right now, or `null` when it can. Commands are
+	 * refused — not queued — while the controller state has not been loaded (the door list is unknown,
+	 * e.g. the controller was not reachable at start) and while the connection to the controller is lost.
+	 */
+	private commandBlocker(): string | null {
+		if (!this.http) {
+			return 'no controller is configured';
+		}
+		if (!this.bootstrapSucceededOnce) {
+			return 'the controller has not been reachable since the adapter start (doors not loaded yet)';
+		}
+		if (!this.connectedToController) {
+			return 'the connection to the controller is lost';
+		}
+		return null;
+	}
+
+	/**
+	 * Refuse a switching command: warn and put the state back (acknowledged). Nothing is sent and
+	 * nothing is remembered for later.
+	 *
+	 * @param localId State id without namespace
+	 * @param reason Why the command is not carried out
+	 * @param restore Value the state is reset to
+	 */
+	private refuseCommand(localId: string, reason: string, restore: ioBroker.StateValue): void {
+		this.log.warn(
+			`Command ${localId} not executed: ${reason}. The state was reset — write it again once the controller is connected.`,
+		);
+		this.setState(localId, { val: restore, ack: true }).catch((err: unknown) => {
+			this.log.debug(`Could not reset ${localId}: ${errorText(err)}`);
+		});
+	}
+
+	/**
+	 * A command for a door id the controller does not report (any more). Door objects are kept when a
+	 * door disappears; a write to such a leftover is refused visibly. A write to an id without objects
+	 * (nothing of this adapter) is only noted at debug level.
+	 *
+	 * @param localId State id without namespace
+	 * @param doorId Door id from the state id
+	 * @param restore Value the state is reset to
+	 */
+	private async refuseUnknownDoor(localId: string, doorId: string, restore: ioBroker.StateValue): Promise<void> {
+		if (!(await this.getObjectAsync(localId))) {
+			this.log.debug(`[${localId}] ignoring write for unknown door id: ${doorId}`);
+			return;
+		}
+		this.refuseCommand(localId, `the controller does not report a door with the id ${doorId} (any more)`, restore);
 	}
 
 	/**
@@ -1790,8 +1857,8 @@ class UnifiAccess extends utils.Adapter {
 			this.log.warn(
 				`Ignoring invalid value ${describeValue(val)} for ${localId}: expected a boolean. Emergency status not changed.`,
 			);
-			// put the state back to what the controller reports
-			await this.refreshEmergencyStatus();
+			// put the state back to what the controller reports (or reported last)
+			await this.restoreEmergencyStates();
 			return;
 		}
 		// Read-modify-write of two flags: commands are processed strictly one after the other. Two writes
@@ -1817,31 +1884,53 @@ class UnifiAccess extends utils.Adapter {
 				this.log.warn(
 					'Set emergency status failed: the controller did not report the current emergency status.',
 				);
+				await this.restoreEmergencyStates();
 				return;
 			}
 			const payload = { lockdown: current.lockdown, evacuation: current.evacuation };
 			payload[field] = val;
 			await this.http.setEmergencyStatus(payload);
+			this.lastEmergency.lockdown = payload.lockdown;
+			this.lastEmergency.evacuation = payload.evacuation;
 			await this.setState(localId, { val, ack: true });
 			const sibling = field === 'lockdown' ? 'evacuation' : 'lockdown';
 			await this.setState(`doors.emergency.${sibling}`, { val: payload[sibling], ack: true });
 			this.log.info(`Emergency status: lockdown=${payload.lockdown}, evacuation=${payload.evacuation}`);
 		} catch (err) {
 			this.log.warn(`Set emergency status failed: ${errorText(err)}`);
+			await this.restoreEmergencyStates();
 		}
 	}
 
-	private async refreshEmergencyStatus(): Promise<void> {
-		if (!this.http) {
+	/**
+	 * After a failed emergency command the states must not keep showing the requested value (a
+	 * "lockdown active" that does not exist): read what the controller reports, or — if that is not
+	 * possible either — put back what it reported last.
+	 */
+	private async restoreEmergencyStates(): Promise<void> {
+		if (await this.refreshEmergencyStatus()) {
 			return;
+		}
+		await this.setState('doors.emergency.lockdown', { val: this.lastEmergency.lockdown ?? null, ack: true });
+		await this.setState('doors.emergency.evacuation', { val: this.lastEmergency.evacuation ?? null, ack: true });
+	}
+
+	/** @returns false when the controller could not be asked */
+	private async refreshEmergencyStatus(): Promise<boolean> {
+		if (!this.http) {
+			return false;
 		}
 		try {
 			const emergency = await this.http.getEmergencyStatus();
+			this.lastEmergency.lockdown = emergency.lockdown;
+			this.lastEmergency.evacuation = emergency.evacuation;
 			await this.setState('doors.emergency.lockdown', { val: emergency.lockdown, ack: true });
 			await this.setState('doors.emergency.evacuation', { val: emergency.evacuation, ack: true });
+			return true;
 		} catch {
 			// Endpoint requires UniFi Access >= 1.24.6 — silently ignore on older firmware.
 			this.log.debug('Emergency status endpoint not available (requires UniFi Access >= 1.24.6).');
+			return false;
 		}
 	}
 

@@ -1118,6 +1118,10 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				description: 'resync door request',
 			});
 			await waitFor(() => instance.log.of('warn').length === 1, { description: 'resync warning' });
+			expect(instance.log.of('warn')[0]).to.contain('without a door list');
+			// the failed resync counts as failed (retry) — it does not turn into "the controller has no doors"
+			await clock.tickAsync(30_000);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'connected after retry' });
 			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
 			await mock.waitForRequest({ method: 'PUT', path: `/doors/${DOOR_3855}/unlock` });
 		});
@@ -1379,6 +1383,137 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				lockdown: true,
 				evacuation: false,
 			});
+		});
+	});
+
+	describe('switching commands without a loaded controller state or connection (K-01)', () => {
+		const putRequests = (): unknown[] => mock.requests.filter(r => r.method === 'PUT');
+
+		it('before the first successful load: not executed, warned, reset — and not executed later either', async () => {
+			mock.failNext({ status: 500, times: Number.POSITIVE_INFINITY });
+			const instance = await start({ enableWebhooks: false });
+			// objects of the door exist from an earlier run
+			instance.objects.set(`${NS}.doors.${DOOR_3855}.unlock`, { _id: `${NS}.doors.${DOOR_3855}.unlock` });
+
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 5);
+			instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, 1);
+			instance.fireStateChange('doors.emergency.lockdown', true);
+			await waitFor(() => instance.states.get(`${NS}.doors.emergency.lockdown`)?.ack === true, {
+				description: 'states reset',
+			});
+			expect(instance.states.get(`${NS}.doors.${DOOR_3855}.unlock`)).to.include({ val: false, ack: true });
+			expect(instance.states.get(`${NS}.doors.${DOOR_3855}.unlock_duration`)).to.include({ val: 0, ack: true });
+			expect(instance.states.get(`${NS}.doors.${DOOR_3855}.lock_rule`)).to.include({ val: 0, ack: true });
+			// never confirmed by the controller: "unknown" rather than a guessed "off"
+			expect(instance.states.get(`${NS}.doors.emergency.lockdown`)).to.include({ val: null, ack: true });
+			const warnings = instance.log.of('warn').filter(m => m.startsWith('Command '));
+			expect(warnings).to.have.length(4);
+			expect(warnings[0]).to.equal(
+				`Command doors.${DOOR_3855}.unlock not executed: the controller has not been reachable since the adapter start (doors not loaded yet). ` +
+					'The state was reset — write it again once the controller is connected.',
+			);
+
+			mock.clearFaults();
+			await clock.tickAsync(30_000);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'connected' });
+			await clock.tickAsync(60_000);
+			await delay(30);
+			expect(putRequests(), 'nothing is executed afterwards').to.deep.equal([]);
+		});
+
+		it('while the connection is lost: not executed, warned, reset to the last acknowledged value', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, 2);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.lock_rule`)?.ack === true, {
+				description: 'lock_rule ack',
+			});
+			const puts = putRequests().length;
+
+			mock.wsAccepting = false;
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+			instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, 1);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.lock_rule`)?.ack === true, {
+				description: 'lock_rule reset',
+			});
+			expect(instance.states.get(`${NS}.doors.${DOOR_3855}.lock_rule`)).to.include({ val: 2, ack: true });
+			expect(instance.states.get(`${NS}.doors.${DOOR_3855}.unlock`)).to.include({ val: false, ack: true });
+			expect(
+				instance.log.of('warn').filter(m => m.includes('the connection to the controller is lost')),
+			).to.have.length(2);
+
+			mock.wsAccepting = true;
+			await clock.tickAsync(200);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'connection back' });
+			await delay(50);
+			expect(putRequests().length, 'nothing is executed after the reconnect').to.equal(puts);
+		});
+
+		it('a door that the controller does not report any more (objects kept): warned and reset, no request', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			instance.objects.set(`${NS}.doors.gone-door.unlock`, { _id: `${NS}.doors.gone-door.unlock` });
+			instance.fireStateChange('doors.gone-door.unlock', true);
+			await waitFor(() => instance.states.get(`${NS}.doors.gone-door.unlock`)?.ack === true, {
+				description: 'reset',
+			});
+			expect(instance.val('doors.gone-door.unlock')).to.equal(false);
+			expect(instance.log.of('warn')).to.deep.equal([
+				'Command doors.gone-door.unlock not executed: the controller does not report a door with the id gone-door (any more). ' +
+					'The state was reset — write it again once the controller is connected.',
+			]);
+			expect(putRequests()).to.deep.equal([]);
+		});
+	});
+
+	describe('failed emergency commands do not leave the requested value standing (K-10)', () => {
+		it('a refused command: the states are read back from the controller', async () => {
+			mock.emergency = { lockdown: false, evacuation: true };
+			const instance = await startConnected({ enableWebhooks: false });
+			mock.failNext({ method: 'PUT', path: '/doors/settings/emergency', status: 403, code: 'CODE_UNAUTHORIZED' });
+			const reads = mock.findRequests({ method: 'GET', path: '/doors/settings/emergency' }).length;
+			instance.fireStateChange('doors.emergency.lockdown', true);
+			await waitFor(() => instance.states.get(`${NS}.doors.emergency.lockdown`)?.ack === true, {
+				description: 'lockdown restored',
+			});
+			expect(instance.states.get(`${NS}.doors.emergency.lockdown`)).to.include({ val: false, ack: true });
+			expect(instance.states.get(`${NS}.doors.emergency.evacuation`)).to.include({ val: true, ack: true });
+			// one read for the read-modify-write, one for putting the states back
+			expect(mock.findRequests({ method: 'GET', path: '/doors/settings/emergency' })).to.have.length(reads + 2);
+		});
+
+		it('controller not readable either: the states fall back to what it reported last', async () => {
+			mock.emergency = { lockdown: true, evacuation: false };
+			const instance = await startConnected({ enableWebhooks: false });
+			mock.failNext({ path: '/doors/settings/emergency', status: 500, times: Number.POSITIVE_INFINITY });
+			instance.fireStateChange('doors.emergency.lockdown', false);
+			instance.fireStateChange('doors.emergency.evacuation', true);
+			await waitFor(
+				() =>
+					instance.states.get(`${NS}.doors.emergency.lockdown`)?.ack === true &&
+					instance.states.get(`${NS}.doors.emergency.evacuation`)?.ack === true,
+				{ description: 'states restored' },
+			);
+			expect(instance.val('doors.emergency.lockdown')).to.equal(true);
+			expect(instance.val('doors.emergency.evacuation')).to.equal(false);
+			expect(mock.emergency).to.deep.equal({ lockdown: true, evacuation: false });
+		});
+
+		it('the current status is not reported: the states are put back as well', async () => {
+			mock.emergency = { lockdown: true, evacuation: false };
+			const instance = await startConnected({ enableWebhooks: false });
+			mock.failNext({
+				method: 'GET',
+				path: '/doors/settings/emergency',
+				status: 200,
+				body: { code: 'SUCCESS', msg: 'success' },
+			});
+			instance.fireStateChange('doors.emergency.evacuation', true);
+			await waitFor(() => instance.states.get(`${NS}.doors.emergency.evacuation`)?.ack === true, {
+				description: 'evacuation restored',
+			});
+			expect(instance.val('doors.emergency.evacuation')).to.equal(false);
 		});
 	});
 
