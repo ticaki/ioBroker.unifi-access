@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { createSelfSignedCert, rejection } from '../../test/mock';
-import { classifyProtectError, ProtectHttp } from './protectHttp';
+import { classifyProtectError, MAX_SNAPSHOT_BYTES, ProtectHttp } from './protectHttp';
 
 interface SeenRequest {
 	method: string;
@@ -375,6 +375,38 @@ describe('ProtectHttp (against a local UniFi OS / Protect stand-in)', () => {
 				expect(stub.requests).to.have.length(before);
 			});
 		}
+
+		it('getClipStream() delivers the clip as a stream', async () => {
+			stub.clip = Buffer.alloc(300_000, 9);
+			const { stream, contentLength } = await protect.getClipStream('video/export?camera=c1');
+			// this stand-in answers chunked, i.e. without announcing a length
+			expect(contentLength).to.equal(undefined);
+			const chunks: Buffer[] = [];
+			for await (const chunk of stream) {
+				chunks.push(chunk as Buffer);
+			}
+			expect(Buffer.concat(chunks).equals(stub.clip)).to.equal(true);
+			expect(stub.requests[2].url).to.equal('/proxy/protect/api/video/export?camera=c1');
+			expect(stub.requests[2].headers.cookie).to.equal('TOKEN=session-1');
+		});
+
+		it('getClipStream() rejects for an HTTP error and for a location outside the Protect API', async () => {
+			stub.nextMediaStatus = 404;
+			expect((await rejection(protect.getClipStream('video/gone.mp4'))).message).to.equal(
+				'Protect clip HTTP 404',
+			);
+			const before = stub.requests.length;
+			expect((await rejection(protect.getClipStream('//evil.example/x.mp4'))).message).to.equal(
+				'Protect clip location rejected',
+			);
+			expect(stub.requests).to.have.length(before);
+		});
+
+		it('getSnapshot() refuses a response larger than the snapshot limit instead of buffering it', async () => {
+			stub.snapshot = Buffer.alloc(MAX_SNAPSHOT_BYTES + 1024, 1);
+			const err = await rejection(protect.getSnapshot('66a1b2c3d4e5f60718293a4b'));
+			expect(String(err.message)).to.match(/maxContentLength/);
+		});
 
 		it('rejects when the clip cannot be fetched', async () => {
 			stub.nextMediaStatus = 404;

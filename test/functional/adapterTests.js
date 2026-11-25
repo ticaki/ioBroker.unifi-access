@@ -22,6 +22,12 @@ const TOKEN = 'integration-test-token';
 const GENERIC_TOKEN = 'generic-webhook-token';
 const WEBHOOK_PATH = '/unifi-access-webhook';
 const FORWARD_TARGET = '0_userdata.0.unifiAccessForwardTest';
+/**
+ * Every webhook event type is forwarded to this state. Forwarding is the last step of the event
+ * processing, so the state tells when a webhook has been processed completely — the receiver
+ * acknowledges a webhook before it processes it.
+ */
+const PROCESSED_TARGET = '0_userdata.0.unifiAccessProcessed';
 /** 50 ms WebSocket reconnect delay keeps the reconnect test fast */
 const WS_RECONNECT_SECONDS = 0.05;
 
@@ -71,6 +77,30 @@ function defineAdapterTests({ suite, describe, it }) {
 			mock.findRequests({ path: new RegExp(`^/doors/${DOORS[key]}/`) }).filter(r => r.method !== 'GET');
 		const endpoint = () => mock.webhookEndpoints[0];
 
+		/**
+		 * Deliver a webhook and — when it was accepted — wait until the adapter has processed it completely.
+		 *
+		 * @param {object} event Event envelope
+		 * @param {object} [options] Options of mock.deliverWebhook()
+		 */
+		async function deliver(event, options) {
+			const results = await mock.deliverWebhook(event, options);
+			if (results[0] && results[0].status === 200) {
+				await waitFor(
+					async () => {
+						const processed = await tools.getState(harness, PROCESSED_TARGET);
+						try {
+							return JSON.parse(processed.val).raw.event_object_id === event.event_object_id;
+						} catch {
+							return false;
+						}
+					},
+					{ timeoutMs: 3000, description: `webhook ${event.event} processed` },
+				);
+			}
+			return results;
+		}
+
 		before(async function () {
 			this.timeout(60_000);
 			harness = getHarness();
@@ -79,11 +109,13 @@ function defineAdapterTests({ suite, describe, it }) {
 			baseUrl = `http://127.0.0.1:${listenPort}`;
 			webhookUrl = `${baseUrl}${WEBHOOK_PATH}`;
 
-			await tools.setObject(harness, FORWARD_TARGET, {
-				type: 'state',
-				common: { name: 'forward target', type: 'string', role: 'json', read: true, write: true },
-				native: {},
-			});
+			for (const target of [FORWARD_TARGET, PROCESSED_TARGET]) {
+				await tools.setObject(harness, target, {
+					type: 'state',
+					common: { name: 'forward target', type: 'string', role: 'json', read: true, write: true },
+					native: {},
+				});
+			}
 			await tools.configureAdapter(harness, {
 				controllerHost: '127.0.0.1',
 				controllerPort: mock.port,
@@ -99,7 +131,10 @@ function defineAdapterTests({ suite, describe, it }) {
 				genericWebhookPath: '/webhook',
 				genericWebhookAuth: 'bearer',
 				genericWebhookToken: GENERIC_TOKEN,
-				forwardEvents: [{ event: 'access.door.unlock', targetState: FORWARD_TARGET }],
+				forwardEvents: [
+					{ event: 'access.door.unlock', targetState: FORWARD_TARGET },
+					...fixtures.WEBHOOK_EVENTS.map(event => ({ event, targetState: PROCESSED_TARGET })),
+				],
 			});
 			await harness.startAdapterAndWait(true);
 			await tools.waitForState(harness, 'info.webhookRegistered', s => s.val === true, 10_000);
@@ -464,12 +499,12 @@ function defineAdapterTests({ suite, describe, it }) {
 				});
 				const thumbnailPath = event.data.location.extras.door_thumbnail;
 
-				const results = await mock.deliverWebhook(event);
+				const results = await deliver(event);
 				expect(results).to.have.length(1);
 				expect(results[0].status).to.equal(200);
 				expect(results[0].body).to.equal('OK');
 
-				// the receiver answers after processing, so the states are final here
+				// deliver() waited until the event was processed completely, so the states are final here
 				expect(await state(`doors.${DOORS.hook}.locked`)).to.equal(false);
 				expect(await state(`devices.${DEVICE_HUB}.firmware`)).to.equal('v4.6.1.0');
 				expect(await state(`devices.${DEVICE_HUB}.online`)).to.equal(true);
@@ -538,7 +573,7 @@ function defineAdapterTests({ suite, describe, it }) {
 
 			it('access.device.dps_status is logged and refreshes the reporting device', async () => {
 				const event = fixtures.webhookEvents.dpsStatus({ door: door('hook'), device: hub(), status: 'open' });
-				const [result] = await mock.deliverWebhook(event);
+				const [result] = await deliver(event);
 				expect(result.status).to.equal(200);
 				const logged = (await tools.eventLog(harness))[0];
 				expect(logged).to.include({
@@ -554,12 +589,12 @@ function defineAdapterTests({ suite, describe, it }) {
 			// state in data.object.status ("open" | "close").
 			it('access.device.dps_status updates doors.<id>.position from data.object.status', async () => {
 				const open = fixtures.webhookEvents.dpsStatus({ door: door('hook'), device: hub(), status: 'open' });
-				expect((await mock.deliverWebhook(open))[0].status).to.equal(200);
+				expect((await deliver(open))[0].status).to.equal(200);
 				expect(await state(`doors.${DOORS.hook}.position`)).to.equal('open');
 				expect((await tools.eventLog(harness))[0].subtype).to.equal('open');
 
 				const close = fixtures.webhookEvents.dpsStatus({ door: door('hook'), device: hub(), status: 'close' });
-				expect((await mock.deliverWebhook(close))[0].status).to.equal(200);
+				expect((await deliver(close))[0].status).to.equal(200);
 				expect(await state(`doors.${DOORS.hook}.position`)).to.equal('close');
 			});
 
@@ -569,7 +604,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					device: reader(),
 					thumbnailTime: 1_722_999_999,
 				});
-				const [result] = await mock.deliverWebhook(event);
+				const [result] = await deliver(event);
 				expect(result.status).to.equal(200);
 
 				expect(await state(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`)).to.equal(
@@ -590,7 +625,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					door: door('hook'),
 					readerId: DEVICE_ULTRA,
 				});
-				const [result] = await mock.deliverWebhook(event);
+				const [result] = await deliver(event);
 				expect(result.status).to.equal(200);
 				expect(await state(`devices.${DEVICE_ULTRA}.lastThumbnailPath`)).to.equal(
 					event.data.location.extras.door_thumbnail,
@@ -607,7 +642,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					device: reader(),
 					reasonCode: 400,
 				});
-				const [result] = await mock.deliverWebhook(event);
+				const [result] = await deliver(event);
 				expect(result.status).to.equal(200);
 				const logged = (await tools.eventLog(harness))[0];
 				expect(logged).to.include({ source: 'webhook', type: 'access.doorbell.completed', doorId: DOORS.hook });
@@ -622,7 +657,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					mode: 'evacuation',
 					value: true,
 				});
-				const [result] = await mock.deliverWebhook(event);
+				const [result] = await deliver(event);
 				expect(result.status).to.equal(200);
 
 				await mock.waitForRequest({ method: 'GET', path: '/doors/settings/emergency' }, { fromIndex: before });
@@ -640,7 +675,7 @@ function defineAdapterTests({ suite, describe, it }) {
 			]) {
 				it(`${name} is accepted and logged`, async () => {
 					const event = fixtures.webhookEvents.generic(name, { door: door('hook'), device: hub() });
-					const [result] = await mock.deliverWebhook(event);
+					const [result] = await deliver(event);
 					expect(result.status).to.equal(200);
 					const logged = (await tools.eventLog(harness))[0];
 					expect(logged).to.include({ source: 'webhook', type: name, doorId: DOORS.hook });
@@ -654,7 +689,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					const lastSeenBefore = await state(`devices.${DEVICE_HUB}.lastSeenAt`);
 					const event = fixtures.webhookEvents.doorUnlock({ door: door('untouched'), device: hub() });
 
-					const [result] = await mock.deliverWebhook(event, { signature });
+					const [result] = await deliver(event, { signature });
 
 					expect(result.status).to.equal(401);
 					expect(await state(`doors.${DOORS.untouched}.locked`)).to.equal(true);
@@ -779,6 +814,18 @@ function defineAdapterTests({ suite, describe, it }) {
 					{ id: fixtures.DEFAULT_USERS[0].id, name: 'Hong Lu' },
 					{ id: fixtures.DEFAULT_USERS[1].id, name: 'Ttttt Tttt' },
 				]);
+			});
+
+			it('getServerInfo reports the actual state of the built-in HTTP server', async () => {
+				expect(await tools.sendTo(harness, 'getServerInfo')).to.deep.equal({
+					running: true,
+					scheme: 'http',
+					port: listenPort,
+					baseUrl,
+					tlsEnabled: false,
+					tlsActive: false,
+					tlsError: null,
+				});
 			});
 
 			it('getNetworkInterfaces returns a list of IPv4 addresses', async () => {
@@ -947,11 +994,6 @@ function defineAdapterTests({ suite, describe, it }) {
 			});
 			await harness.startAdapterAndWait(true);
 			await mock.waitForWsClients(1, 5000);
-			// the shared HTTP server is started after the bootstrap
-			await waitFor(async () => !(await tools.isPortFree(listenPort)), {
-				description: 'shared HTTP server',
-				timeoutMs: 5000,
-			});
 		});
 
 		after(async function () {
@@ -1010,32 +1052,29 @@ function defineAdapterTests({ suite, describe, it }) {
 				expect((await tools.sendTo(harness, 'getConnectionStatus')).webhookRegistered).to.equal(false);
 			});
 
-			it('answers 404 on the webhook, thumbnail and generic webhook paths', async () => {
-				const event = fixtures.webhookEvents.doorUnlock({
-					door: mock.findDoor(DOORS.hook),
-					device: mock.findDevice(DEVICE_HUB),
+			it('does not open the HTTP port at all when no receiver is enabled', async () => {
+				expect(await tools.isPortFree(listenPort)).to.equal(true);
+				expect(await tools.sendTo(harness, 'getServerInfo')).to.deep.equal({
+					running: false,
+					scheme: null,
+					port: listenPort,
+					baseUrl: null,
+					tlsEnabled: false,
+					tlsActive: false,
+					tlsError: null,
 				});
-				const webhook = await sendWebhook({
-					url: `${baseUrl}${WEBHOOK_PATH}`,
-					secret: 'anything',
-					body: event,
-				});
-				expect(webhook.status).to.equal(404);
-				expect(
-					(await httpRequest({ url: `${baseUrl}/unifi-access/0/thumbnail/${DEVICE_G2_PRO}.jpg` })).status,
-				).to.equal(404);
-				expect((await httpRequest({ url: `${baseUrl}/webhook`, method: 'POST', body: '{}' })).status).to.equal(
-					404,
+				const refused = await httpRequest({ url: `${baseUrl}${WEBHOOK_PATH}`, method: 'POST', body: '{}' }).then(
+					() => false,
+					() => true,
 				);
+				expect(refused).to.equal(true);
 				expect(await state(`doors.${DOORS.hook}.locked`)).to.equal(true);
 			});
 
-			it('reregisterWebhook still registers on demand', async () => {
+			it('reregisterWebhook refuses to register an endpoint nothing listens for', async () => {
 				const answer = await tools.sendTo(harness, 'reregisterWebhook');
-				expect(answer.ok).to.equal(true);
-				expect(mock.webhookEndpoints).to.have.length(1);
-				expect(mock.webhookEndpoints[0].id).to.equal(answer.id);
-				expect(mock.webhookEndpoints[0].endpoint).to.equal(`${baseUrl}${WEBHOOK_PATH}`);
+				expect(answer).to.deep.equal({ ok: false, error: 'webhooks-disabled' });
+				expect(mock.webhookEndpoints).to.deep.equal([]);
 			});
 		});
 	});

@@ -9,11 +9,14 @@
  */
 
 import { expect } from 'chai';
+import { createServer } from 'node:http';
+import { connect } from 'node:net';
 import { join } from 'node:path';
 import sinon from 'sinon';
 
 import {
 	createAdapterWithFakeCore,
+	createSelfSignedCert,
 	delay,
 	fixtures,
 	getFreePort,
@@ -2278,6 +2281,340 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			};
 			mock.emitRemoteView();
 			await waitFor(() => instance.states.has('0_userdata.0.fine'), { description: 'second rule' });
+		});
+	});
+
+	describe('built-in HTTP server: TLS (R-07)', () => {
+		const tlsConfig = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+			enableTls: true,
+			certPublic: 'defaultPublic',
+			certPrivate: 'defaultPrivate',
+			certChained: '',
+			enableThumbnailServer: true,
+			...overrides,
+		});
+
+		/**
+		 * Start an instance with the given certificate store.
+		 *
+		 * @param certificates Certificate store of the fake adapter: name → PEM
+		 * @param overrides Config overrides
+		 */
+		async function startWithCertificates(
+			certificates: Record<string, string>,
+			overrides: Record<string, unknown> = {},
+		): Promise<FakeAdapter> {
+			adapter = createAdapterWithFakeCore(MAIN, {
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				wsReconnectDelay: 0.05,
+				listenPort,
+				listenIp: '127.0.0.1',
+				enableWebhooks: true,
+				forwardEvents: [],
+				...tlsConfig(overrides),
+			});
+			adapter.certificates = certificates;
+			await adapter.fireReady();
+			await mock.waitForWsClients(1);
+			return adapter;
+		}
+
+		it('serves HTTPS with the certificate from the ioBroker certificate store and registers an https webhook URL', async () => {
+			const pair = createSelfSignedCert();
+			const instance = await startWithCertificates({ defaultPublic: pair.cert, defaultPrivate: pair.key });
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+
+			// the certificate presented is the one from the store (verified against it as CA)
+			const response = await httpRequest({ url: `https://127.0.0.1:${listenPort}/nothing-here`, ca: pair.cert });
+			expect(response.status).to.equal(404);
+			// plain HTTP is not spoken on that port any more
+			const plain = await httpRequest({
+				url: `http://127.0.0.1:${listenPort}/nothing-here`,
+				timeoutMs: 2000,
+			}).then(
+				r => `answered ${r.status}`,
+				() => 'refused',
+			);
+			expect(plain).to.not.equal('answered 404');
+
+			expect(mock.webhookEndpoints.map(e => e.endpoint)).to.deep.equal([
+				`https://127.0.0.1:${listenPort}/unifi-access-webhook`,
+			]);
+			expect(await instance.request('getServerInfo')).to.deep.equal({
+				running: true,
+				scheme: 'https',
+				port: listenPort,
+				baseUrl: `https://127.0.0.1:${listenPort}`,
+				tlsEnabled: true,
+				tlsActive: true,
+				tlsError: null,
+			});
+			expect(instance.log.of('error')).to.deep.equal([]);
+			expect(instance.log.of('warn')).to.deep.equal([]);
+
+			// webhooks arrive over TLS and the thumbnail URL handed out is https as well
+			const event = fixtures.webhookEvents.doorUnlock({
+				door: door(DOOR_3855),
+				device: hub(),
+				readerId: DEVICE_G2_PRO,
+			});
+			const [result] = await mock.deliverWebhook(event);
+			expect(result.status).to.equal(200);
+			await waitFor(() => instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`), {
+				description: 'thumbnail url',
+			});
+			const url = instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`) as string;
+			expect(url.startsWith(`https://127.0.0.1:${listenPort}/unifi-access/0/thumbnail/`)).to.equal(true);
+			mock.addStaticResource(event.data.location.extras.door_thumbnail);
+			expect((await httpRequest({ url, ca: pair.cert })).status).to.equal(200);
+		});
+
+		it('presents the chained certificate when one is configured', async () => {
+			const pair = createSelfSignedCert();
+			const chain = createSelfSignedCert({ commonName: 'intermediate' });
+			await startWithCertificates(
+				{ defaultPublic: pair.cert, defaultPrivate: pair.key, chained: chain.cert },
+				{ certChained: 'chained' },
+			);
+			expect((await httpRequest({ url: `https://127.0.0.1:${listenPort}/x`, ca: pair.cert })).status).to.equal(
+				404,
+			);
+		});
+
+		for (const [name, certificates, reason] of [
+			['the certificates are not in the store', {}, /Could not find certificate "defaultPublic"/],
+			['the certificate is empty', { defaultPublic: '', defaultPrivate: '' }, /Could not find|empty/],
+			[
+				'the certificate is not PEM',
+				{ defaultPublic: 'not a certificate', defaultPrivate: 'not a key' },
+				/not in PEM format/,
+			],
+			[
+				'the private key does not belong to the certificate',
+				{ defaultPublic: createSelfSignedCert().cert, defaultPrivate: createSelfSignedCert().key },
+				/key values mismatch|mismatch/i,
+			],
+		] as [string, Record<string, string>, RegExp][]) {
+			it(`TLS enabled but ${name}: clear error, server runs on http and no https URL is registered or handed out`, async () => {
+				const instance = await startWithCertificates(certificates);
+				await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+
+				const errors = instance.log.of('error');
+				expect(errors).to.have.length(1);
+				expect(errors[0]).to.contain('TLS is enabled for the built-in HTTP server, but the certificates');
+				expect(errors[0]).to.match(reason);
+				expect(errors[0]).to.contain('WITHOUT TLS');
+
+				expect((await httpRequest({ url: `http://127.0.0.1:${listenPort}/nothing-here` })).status).to.equal(
+					404,
+				);
+				expect(mock.webhookEndpoints.map(e => e.endpoint)).to.deep.equal([
+					`http://127.0.0.1:${listenPort}/unifi-access-webhook`,
+				]);
+				const info = await instance.request('getServerInfo');
+				expect(info).to.include({
+					running: true,
+					scheme: 'http',
+					baseUrl: `http://127.0.0.1:${listenPort}`,
+					tlsEnabled: true,
+					tlsActive: false,
+				});
+				expect(info.tlsError).to.match(reason);
+
+				const event = fixtures.webhookEvents.doorUnlock({
+					door: door(DOOR_3855),
+					device: hub(),
+					readerId: DEVICE_G2_PRO,
+				});
+				await mock.deliverWebhook(event);
+				await waitFor(() => instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`), {
+					description: 'thumbnail url',
+				});
+				expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`)).to.match(/^http:\/\//);
+				expect(JSON.stringify([...instance.states.values()])).to.not.contain('https://127.0.0.1');
+			});
+		}
+
+		it('without TLS: plain http, no certificate lookup', async () => {
+			const instance = await startConnected({ enableThumbnailServer: true });
+			expect(await instance.request('getServerInfo')).to.deep.equal({
+				running: true,
+				scheme: 'http',
+				port: listenPort,
+				baseUrl: `http://127.0.0.1:${listenPort}`,
+				tlsEnabled: false,
+				tlsActive: false,
+				tlsError: null,
+			});
+		});
+	});
+
+	describe('built-in HTTP server: started only when needed (R-17)', () => {
+		it('does not open the port when no receiver is enabled', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			expect(await isPortFree(listenPort)).to.equal(true);
+			expect(await instance.request('getServerInfo')).to.include({ running: false, scheme: null, baseUrl: null });
+			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+
+		it('refuses to (re)register a webhook nothing would listen for', async () => {
+			const instance = await startConnected({ enableWebhooks: false, enableThumbnailServer: true });
+			expect(await instance.request('reregisterWebhook')).to.deep.equal({
+				ok: false,
+				error: 'webhooks-disabled',
+			});
+			expect(mock.webhookEndpoints).to.deep.equal([]);
+			expect(mock.findRequests({ path: /^\/webhooks/ })).to.deep.equal([]);
+		});
+
+		it('a port that is already in use is reported; the adapter keeps running without receivers and hands out no URLs', async () => {
+			const blocker = createServer();
+			await new Promise<void>(resolve => blocker.listen(listenPort, '127.0.0.1', resolve));
+			try {
+				const instance = await startConnected({ enableThumbnailServer: true });
+				expect(
+					instance.log.of('warn').filter(m => m.startsWith('Shared HTTP server failed to start')),
+				).to.have.length(1);
+				expect(instance.val('info.connection')).to.equal(true);
+				expect(mock.webhookEndpoints, 'no endpoint registered for a receiver that does not run').to.deep.equal(
+					[],
+				);
+				expect(await instance.request('reregisterWebhook')).to.deep.equal({
+					ok: false,
+					error: 'receiver-not-running',
+				});
+				mock.emitRemoteView({
+					data: { door_thumbnail: `/preview/reader_${DEVICE_G2_PRO}_x_1.jpg` },
+				});
+				await waitFor(() => instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`), {
+					description: 'thumbnail path',
+				});
+				expect(instance.stateWrites.filter(w => w.id.endsWith('lastThumbnailUrl'))).to.deep.equal([]);
+			} finally {
+				await new Promise(resolve => blocker.close(resolve));
+			}
+		});
+
+		it('unload does not wait for a client that keeps its connection open', async () => {
+			const instance = await startConnected({ enableThumbnailServer: true });
+			const idle = connect(listenPort, '127.0.0.1');
+			await new Promise(resolve => idle.once('connect', resolve));
+			idle.write('GET /unifi-access/0/thumbnail/x.jpg HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n');
+			await new Promise(resolve => idle.once('data', resolve));
+			const started = Date.now();
+			await instance.fireUnload();
+			expect(Date.now() - started).to.be.lessThan(1500);
+			expect(await isPortFree(listenPort)).to.equal(true);
+			idle.destroy();
+		});
+	});
+
+	describe('generic alarm webhook: authentication and logging (R-14)', () => {
+		const post = (
+			headers: Record<string, string> = {},
+			body = '{"alarm_id":"secret-alarm-body"}',
+		): Promise<{ status: number }> =>
+			httpRequest({ url: `http://127.0.0.1:${listenPort}/webhook`, method: 'POST', headers, body });
+
+		it('"basic" without configured credentials: warns at start and rejects everything, also empty credentials', async () => {
+			const instance = await startConnected({
+				enableWebhooks: false,
+				enableGenericWebhook: true,
+				genericWebhookAuth: 'basic',
+				genericWebhookUsername: '',
+				genericWebhookPassword: '',
+			});
+			expect(instance.log.of('warn')).to.deep.equal([
+				'Generic webhook: authentication "basic" is selected but no user name and password are configured — every request will be rejected.',
+			]);
+			for (const headers of [
+				{},
+				{ Authorization: 'Basic Og==' },
+				{ Authorization: `Basic ${Buffer.from(':').toString('base64')}` },
+			] as Record<string, string>[]) {
+				expect((await post(headers)).status).to.equal(401);
+			}
+			expect(instance.stateWrites.filter(w => w.id.includes('.notifications.'))).to.deep.equal([]);
+		});
+
+		it('"bearer" without configured token: warns at start and rejects everything', async () => {
+			const instance = await startConnected({
+				enableWebhooks: false,
+				enableGenericWebhook: true,
+				genericWebhookAuth: 'bearer',
+				genericWebhookToken: '',
+			});
+			expect(instance.log.of('warn')).to.have.length(1);
+			expect(instance.log.of('warn')[0]).to.contain('no token is configured');
+			expect((await post({ Authorization: 'Bearer ' })).status).to.equal(401);
+			expect((await post({ Authorization: 'Bearer undefined' })).status).to.equal(401);
+		});
+
+		it('logs the body of an accepted request once, at debug level only', async () => {
+			const instance = await startConnected({
+				enableWebhooks: false,
+				enableGenericWebhook: true,
+				genericWebhookAuth: 'bearer',
+				genericWebhookToken: 'generic-token',
+			});
+			expect((await post({ Authorization: 'Bearer generic-token' })).status).to.equal(200);
+			const withBody = instance.log.messages.filter(m => m.message.includes('secret-alarm-body'));
+			expect(withBody.map(m => m.level)).to.deep.equal(['debug']);
+			expect(instance.log.messages.filter(m => m.message.includes('generic-token'))).to.deep.equal([]);
+			expect(instance.val('notifications.lastAlarmId')).to.equal('secret-alarm-body');
+		});
+	});
+
+	describe('Protect clips are streamed (R-15)', () => {
+		let protect: ProtectStub;
+
+		beforeEach(async () => {
+			protect = new ProtectStub();
+			await protect.start();
+		});
+
+		afterEach(async () => {
+			await adapter?.fireUnload();
+			adapter = undefined;
+			await protect.stop();
+		});
+
+		it('passes a clip through the media endpoint without buffering it in the adapter', async () => {
+			protect.clip = Buffer.alloc(3 * 1024 * 1024, 5);
+			protect.events.evt_9 = { id: 'evt_9', clipUrl: 'video/export?camera=c1' };
+			const instance = await startConnected({
+				enableWebhooks: false,
+				enableProtect: true,
+				protectUsername: 'viewer',
+				protectPassword: 'protect-secret',
+				protectPort: protect.port,
+			});
+			expect(instance.val('info.protectConnected')).to.equal(true);
+			const response = await httpRequest({
+				url: `http://127.0.0.1:${listenPort}/unifi-access/0/protect-video/evt_9.mp4`,
+				timeoutMs: 5000,
+			});
+			expect(response.status).to.equal(200);
+			expect(response.headers['content-type']).to.equal('video/mp4');
+			expect(response.headers['content-length']).to.equal(String(protect.clip.length));
+			expect(response.body.equals(protect.clip)).to.equal(true);
+		});
+
+		it('answers 502 while Protect is not connected instead of failing the request handler', async () => {
+			const instance = await startConnected({
+				enableWebhooks: false,
+				enableProtect: true,
+				protectUsername: 'viewer',
+				protectPassword: 'wrong',
+				protectPort: protect.port,
+			});
+			expect(instance.val('info.protectConnected')).to.equal(false);
+			for (const path of ['protect-video/evt_9.mp4', 'protect-snapshot/66a1b2c3d4e5f60718293a4b/1.jpg']) {
+				const response = await httpRequest({ url: `http://127.0.0.1:${listenPort}/unifi-access/0/${path}` });
+				expect(response.status, path).to.equal(502);
+			}
 		});
 	});
 

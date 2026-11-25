@@ -1,5 +1,6 @@
 import axios, { type AxiosInstance, AxiosError } from 'axios';
 import https from 'node:https';
+import type { Readable } from 'node:stream';
 import { isSafeProtectId, sanitizeProtectClipPath } from './pathSafety';
 import { tlsCertificateErrorCode } from './tlsErrors';
 
@@ -14,6 +15,18 @@ export interface ProtectHttpOptions {
 	verifyTLS?: boolean;
 	/** PEM certificate (chain) to trust in addition to the system CAs. */
 	caCert?: string;
+}
+
+/** Upper bound for a camera snapshot held in memory (a JPEG still is far smaller). */
+export const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
+/** Upper bound for a clip that is buffered instead of streamed. */
+export const MAX_BUFFERED_CLIP_BYTES = 64 * 1024 * 1024;
+
+export interface ProtectClipStream {
+	/** The clip bytes as they arrive from Protect — nothing is buffered. */
+	stream: Readable;
+	/** Size announced by Protect, if any. */
+	contentLength?: number;
 }
 
 export type ProtectLoginFailure = 'credentials' | 'rate-limited' | 'http' | 'no-session';
@@ -112,7 +125,12 @@ export class ProtectHttp {
 		return this.withRetry(async retry => {
 			const r = await this.client.get<ArrayBuffer>(
 				`/proxy/protect/api/cameras/${encodeURIComponent(cameraId)}/snapshot`,
-				{ headers: this.authHeaders(), responseType: 'arraybuffer', validateStatus: s => s < 500 },
+				{
+					headers: this.authHeaders(),
+					responseType: 'arraybuffer',
+					maxContentLength: MAX_SNAPSHOT_BYTES,
+					validateStatus: s => s < 500,
+				},
 			);
 			this.extractSession(r.headers);
 			if ((r.status === 401 || r.status === 403) && !retry) {
@@ -156,16 +174,17 @@ export class ProtectHttp {
 		}
 	}
 
+	/**
+	 * Fetch a clip into memory. Limited to {@link MAX_BUFFERED_CLIP_BYTES}; prefer
+	 * {@link getClipStream} for serving clips.
+	 *
+	 * @param clipPath Clip location reported by Protect
+	 */
 	async getClipBuffer(clipPath: string): Promise<Buffer> {
-		// The location is taken from a Protect response and requested with the session cookie attached:
-		// it must stay a path below /proxy/protect/api/ on this host.
-		const path = sanitizeProtectClipPath(clipPath);
-		if (path === null) {
-			throw new Error('Protect clip location rejected');
-		}
-		const r = await this.client.get<ArrayBuffer>(path, {
+		const r = await this.client.get<ArrayBuffer>(this.clipRequestPath(clipPath), {
 			headers: this.authHeaders(),
 			responseType: 'arraybuffer',
+			maxContentLength: MAX_BUFFERED_CLIP_BYTES,
 			validateStatus: s => s < 500,
 		});
 		this.extractSession(r.headers);
@@ -173,6 +192,41 @@ export class ProtectHttp {
 			throw new Error(`Protect clip HTTP ${r.status}`);
 		}
 		return Buffer.from(r.data);
+	}
+
+	/**
+	 * Open a clip as a stream: the bytes are passed on as they arrive instead of holding a whole
+	 * video in memory.
+	 *
+	 * @param clipPath Clip location reported by Protect
+	 */
+	async getClipStream(clipPath: string): Promise<ProtectClipStream> {
+		const r = await this.client.get<Readable>(this.clipRequestPath(clipPath), {
+			headers: this.authHeaders(),
+			responseType: 'stream',
+			validateStatus: s => s < 500,
+		});
+		this.extractSession(r.headers);
+		if (r.status !== 200) {
+			r.data.destroy();
+			throw new Error(`Protect clip HTTP ${r.status}`);
+		}
+		const length = Number(r.headers['content-length']);
+		return { stream: r.data, contentLength: Number.isFinite(length) && length >= 0 ? length : undefined };
+	}
+
+	/**
+	 * The clip location is taken from a Protect response and requested with the session cookie
+	 * attached: it must stay a path below /proxy/protect/api/ on this host.
+	 *
+	 * @param clipPath Clip location reported by Protect
+	 */
+	private clipRequestPath(clipPath: string): string {
+		const path = sanitizeProtectClipPath(clipPath);
+		if (path === null) {
+			throw new Error('Protect clip location rejected');
+		}
+		return path;
 	}
 
 	private authHeaders(): Record<string, string> {

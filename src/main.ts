@@ -7,7 +7,7 @@
 import * as utils from '@iobroker/adapter-core';
 
 import { classifyError, UnifiHttp } from './lib/unifiHttp';
-import { classifyProtectError, ProtectHttp } from './lib/protectHttp';
+import { classifyProtectError, ProtectHttp, type ProtectClipStream } from './lib/protectHttp';
 import { classifyStoredSecret } from './lib/secretMigration';
 import { tlsCertificateErrorCode } from './lib/tlsErrors';
 import { UnifiWebSocket } from './lib/unifiWebSocket';
@@ -35,12 +35,13 @@ import {
 } from './lib/controlValues';
 import type { LastError, NormalizedEvent, UnifiDeviceRaw, UnifiDoorRaw, UnifiLockRuleType } from './lib/types';
 import { networkInterfaces } from 'node:os';
+import { createSecureContext } from 'node:tls';
 import { WebhookHandler } from './webhooks/server';
 import { DEFAULT_WEBHOOK_EVENTS, ensureRegistration, reregister } from './webhooks/registration';
 import { ThumbnailHandler } from './webserver/snapshotEndpoint';
 import { ProtectMediaHandler } from './webserver/protectSnapshotEndpoint';
 import { GenericWebhookHandler } from './webhooks/genericWebhookServer';
-import { SharedHttpServer } from './webserver/sharedHttpServer';
+import { SharedHttpServer, type SharedHttpServerTls } from './webserver/sharedHttpServer';
 
 const WEBHOOK_PATH = '/unifi-access-webhook';
 
@@ -137,6 +138,10 @@ class UnifiAccess extends utils.Adapter {
 	private readonly protectSnapshotCache = new Map<string, Buffer>();
 	private readonly protectSnapshotCacheOrder: string[] = [];
 	private static readonly PROTECT_CACHE_MAX = 50;
+	private static readonly PROTECT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+	private protectSnapshotCacheBytes = 0;
+	/** Why TLS could not be activated although it is enabled (null: no problem). */
+	private tlsError: string | null = null;
 
 	// Dedup: access.data.device.remote_unlock (WS) + access.door.unlock (webhook) describe the same action.
 	// remote_unlock (no door/user data) is delayed 4 s; if door.unlock arrives in that window,
@@ -217,8 +222,10 @@ class UnifiAccess extends utils.Adapter {
 			// not valid JSON: the panel falls back to its defaults, an invalid write is reset to "{}"
 		}
 
-		await this.bootstrapAndConnect();
+		// The receivers listen before the controller is contacted: the webhook endpoint is registered
+		// at the end of a successful bootstrap and events may arrive right away.
 		await this.startSharedHttpServer();
+		await this.bootstrapAndConnect();
 	}
 
 	/**
@@ -346,21 +353,61 @@ class UnifiAccess extends utils.Adapter {
 		return this.protectHttp;
 	}
 
-	private buildTlsOptions(): { key: string; cert: string; ca?: string } | undefined {
+	/**
+	 * Load key and certificate for the built-in HTTP server from the ioBroker certificate store.
+	 *
+	 * @returns The TLS options, or `undefined` when TLS is off or the certificates are not usable. In
+	 * the latter case the reason is logged as error and kept in `tlsError`; the server then runs
+	 * without TLS and every URL the adapter hands out says `http`.
+	 */
+	private async loadTlsOptions(): Promise<SharedHttpServerTls | undefined> {
 		const cfg = this.config;
+		this.tlsError = null;
 		if (cfg.enableTls !== true) {
 			return undefined;
 		}
-		this.log.warn(
-			'TLS is enabled but the adapter does not yet load certificates from the ioBroker certificate store — please configure a reverse proxy or extend loadCertificates().',
-		);
-		return undefined;
+		try {
+			const [certificates] = await this.getCertificatesAsync(cfg.certPublic, cfg.certPrivate, cfg.certChained);
+			const key = asString(certificates?.key);
+			let cert = asString(certificates?.cert);
+			const chain = asString(certificates?.ca);
+			if (!key || !cert) {
+				throw new Error('certificate or private key is empty');
+			}
+			if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(key) || !cert.includes('-----BEGIN CERTIFICATE-----')) {
+				throw new Error('certificate or private key is not in PEM format');
+			}
+			if (chain && chain.includes('-----BEGIN CERTIFICATE-----') && !cert.includes(chain.trim())) {
+				// the server has to present the intermediate certificates along with its own
+				cert = `${cert.trim()}\n${chain.trim()}\n`;
+			}
+			// fails for a key that does not belong to the certificate or for unreadable PEM data
+			createSecureContext({ key, cert });
+			return { key, cert };
+		} catch (err) {
+			this.tlsError = errorText(err);
+			this.log.error(
+				`TLS is enabled for the built-in HTTP server, but the certificates (public "${cfg.certPublic ?? ''}", private "${cfg.certPrivate ?? ''}") ` +
+					`could not be loaded: ${this.tlsError}. The server runs WITHOUT TLS (plain http) and all webhook/media URLs use http. ` +
+					`Select valid certificates in the instance settings or disable TLS.`,
+			);
+			return undefined;
+		}
 	}
 
+	/**
+	 * Base URL of the built-in HTTP server as clients and the controller reach it. The scheme is taken
+	 * from the running server — never from the configuration — and there is no URL while the server
+	 * is not listening.
+	 */
 	private buildServerBaseUrl(): string | null {
+		const server = this.httpServer;
+		if (!server?.listening) {
+			return null;
+		}
 		const cfg = this.config;
-		const port = cfg.listenPort || 8095;
-		const scheme = cfg.enableTls === true ? 'https' : 'http';
+		const port = normalizePort(cfg.listenPort, 8095);
+		const scheme = server.scheme;
 		if (cfg.listenIp && cfg.listenIp !== '0.0.0.0') {
 			return `${scheme}://${cfg.listenIp}:${port}`;
 		}
@@ -382,9 +429,9 @@ class UnifiAccess extends utils.Adapter {
 
 	private async startSharedHttpServer(): Promise<void> {
 		const cfg = this.config;
-		const port = cfg.listenPort || 8095;
+		const port = normalizePort(cfg.listenPort, 8095);
 		const ip = cfg.listenIp && cfg.listenIp !== '0.0.0.0' ? cfg.listenIp : undefined;
-		const tls = this.buildTlsOptions();
+		const tls = await this.loadTlsOptions();
 
 		const logger = {
 			debug: (m: string) => this.log.debug(m),
@@ -431,7 +478,8 @@ class UnifiAccess extends utils.Adapter {
 				getSnapshot: (cameraId: string): Promise<Buffer> => this.requireProtect().getSnapshot(cameraId),
 				getEventMeta: (eventId: string): Promise<{ clipUrl?: string } | null> =>
 					this.requireProtect().getEventMeta(eventId),
-				getClipBuffer: (clipPath: string): Promise<Buffer> => this.requireProtect().getClipBuffer(clipPath),
+				getClipStream: (clipPath: string): Promise<ProtectClipStream> =>
+					this.requireProtect().getClipStream(clipPath),
 			};
 			const protectHandler = new ProtectMediaHandler({
 				snapshotPathPrefix: snapshotPrefix,
@@ -439,7 +487,8 @@ class UnifiAccess extends utils.Adapter {
 				getSnapshot: (cameraId, ts) => this.protectSnapshotCache.get(`${cameraId}:${ts}`),
 				fetchSnapshot: cameraId => protect.getSnapshot(cameraId),
 				getEventMeta: eventId => protect.getEventMeta(eventId),
-				fetchClip: clipPath => protect.getClipBuffer(clipPath),
+				// streamed: a clip is passed on chunk by chunk instead of being held in memory
+				fetchClip: clipPath => protect.getClipStream(clipPath),
 				logger,
 			});
 			server.registerHandler('protect-media', protectHandler.matches, protectHandler.handle);
@@ -455,7 +504,8 @@ class UnifiAccess extends utils.Adapter {
 				logger,
 				onRequest: async ({ body, method, url }) => {
 					const raw = body.toString('utf8');
-					this.log.info(`[generic-webhook] ${method} ${url} | body: ${raw.slice(0, 2000)}`);
+					// the one place the body is logged, at debug level only (it may carry personal data)
+					this.log.debug(`[generic-webhook] ${method} ${url} | body: ${raw.slice(0, 2000)}`);
 					let payload: unknown;
 					try {
 						payload = JSON.parse(raw);
@@ -466,7 +516,21 @@ class UnifiAccess extends utils.Adapter {
 					await this.handleGenericAlarm(payload, raw);
 				},
 			});
+			if (!handler.credentialsConfigured) {
+				this.log.warn(
+					`Generic webhook: authentication "${cfg.genericWebhookAuth}" is selected but no ${
+						cfg.genericWebhookAuth === 'basic' ? 'user name and password are' : 'token is'
+					} configured — every request will be rejected.`,
+				);
+			}
 			server.registerHandler('generic-webhook', handler.matches, handler.handle);
+		}
+
+		if (server.handlerCount === 0) {
+			// nothing to serve: do not occupy the port (a second instance could not start otherwise)
+			this.log.debug('No receiver enabled — the built-in HTTP server is not started.');
+			this.httpServer = null;
+			return;
 		}
 
 		try {
@@ -478,8 +542,6 @@ class UnifiAccess extends utils.Adapter {
 			this.httpServer = null;
 			return;
 		}
-
-		await this.ensureWebhookRegistration();
 	}
 
 	/**
@@ -1732,6 +1794,21 @@ class UnifiAccess extends utils.Adapter {
 				}
 			}
 
+			case 'getServerInfo': {
+				// actual state of the built-in HTTP server (the UI must not derive it from the settings)
+				const server = this.httpServer;
+				const running = server?.listening === true;
+				return {
+					running,
+					scheme: running ? server.scheme : null,
+					port: normalizePort(this.config.listenPort, 8095),
+					baseUrl: this.buildServerBaseUrl(),
+					tlsEnabled: this.config.enableTls === true,
+					tlsActive: running && server.scheme === 'https',
+					tlsError: this.tlsError,
+				};
+			}
+
 			case 'getNetworkInterfaces': {
 				const addresses: string[] = [];
 				for (const nets of Object.values(networkInterfaces())) {
@@ -1773,9 +1850,16 @@ class UnifiAccess extends utils.Adapter {
 	private async handleReregisterWebhook(
 		defer: (task: () => Promise<void>) => void,
 	): Promise<Record<string, unknown>> {
-		const publicUrl = this.buildWebhookPublicUrl();
-		if (!this.http || !publicUrl) {
+		if (!this.http) {
 			return { ok: false, error: 'not-configured' };
+		}
+		if (this.config.enableWebhooks !== true) {
+			// registering an endpoint nothing listens on would only make the controller post into the void
+			return { ok: false, error: 'webhooks-disabled' };
+		}
+		const publicUrl = this.webhookReceiverActive ? this.buildWebhookPublicUrl() : null;
+		if (!publicUrl) {
+			return { ok: false, error: 'receiver-not-running' };
 		}
 		try {
 			const result = await reregister(
@@ -1912,16 +1996,13 @@ class UnifiAccess extends utils.Adapter {
 				try {
 					const buf = await protect.getSnapshot(cameraId);
 					const cacheKey = `${cameraId}:${eventTs}`;
-					if (!this.protectSnapshotCache.has(cacheKey)) {
-						if (this.protectSnapshotCacheOrder.length >= UnifiAccess.PROTECT_CACHE_MAX) {
-							const oldest = this.protectSnapshotCacheOrder.shift()!;
-							this.protectSnapshotCache.delete(oldest);
-						}
-						this.protectSnapshotCacheOrder.push(cacheKey);
-						this.protectSnapshotCache.set(cacheKey, buf);
-					}
+					this.cacheProtectSnapshot(cacheKey, buf);
 
-					const base = this.buildServerBaseUrl() ?? '';
+					const base = this.buildServerBaseUrl();
+					if (base === null) {
+						this.log.debug('[protect] built-in HTTP server not running — no media URLs for this event');
+						continue;
+					}
 					const snapshotUrl = `${base}/unifi-access/${this.instance}/protect-snapshot/${encodeURIComponent(cameraId)}/${eventTs}.jpg`;
 					const videoUrl = eventId
 						? `${base}/unifi-access/${this.instance}/protect-video/${encodeURIComponent(eventId)}.mp4`
@@ -1940,6 +2021,33 @@ class UnifiAccess extends utils.Adapter {
 			}
 		}
 		return found;
+	}
+
+	/**
+	 * Keep a camera snapshot for the media endpoint. The cache is bounded by entries and by bytes;
+	 * the oldest snapshots are dropped first.
+	 *
+	 * @param cacheKey `<cameraId>:<event timestamp>`
+	 * @param buf JPEG bytes
+	 */
+	private cacheProtectSnapshot(cacheKey: string, buf: Buffer): void {
+		if (this.protectSnapshotCache.has(cacheKey) || buf.length > UnifiAccess.PROTECT_CACHE_MAX_BYTES) {
+			return;
+		}
+		this.protectSnapshotCacheOrder.push(cacheKey);
+		this.protectSnapshotCache.set(cacheKey, buf);
+		this.protectSnapshotCacheBytes += buf.length;
+		while (
+			this.protectSnapshotCacheOrder.length > UnifiAccess.PROTECT_CACHE_MAX ||
+			this.protectSnapshotCacheBytes > UnifiAccess.PROTECT_CACHE_MAX_BYTES
+		) {
+			const oldest = this.protectSnapshotCacheOrder.shift();
+			if (oldest === undefined) {
+				break;
+			}
+			this.protectSnapshotCacheBytes -= this.protectSnapshotCache.get(oldest)?.length ?? 0;
+			this.protectSnapshotCache.delete(oldest);
+		}
 	}
 
 	private async onUnload(callback: () => void): Promise<void> {

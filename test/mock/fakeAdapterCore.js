@@ -58,6 +58,8 @@ class FakeAdapter {
 		this.timers = new Set();
 		/** @type {Set<any>} handles created via adapter.setInterval that have not been cleared */
 		this.intervals = new Set();
+		/** @type {Record<string, string>} certificate store: name → PEM (see getCertificatesAsync) */
+		this.certificates = {};
 		this.unloaded = false;
 		FakeAdapter.instances.push(this);
 	}
@@ -194,6 +196,24 @@ class FakeAdapter {
 
 	sendTo(to, command, message, callback) {
 		this.sentMessages.push({ to, command, message, callback });
+	}
+
+	/**
+	 * Like adapter.getCertificatesAsync: resolves `[{ key, cert, ca }]` from the certificate store
+	 * (`this.certificates`, name → PEM) and rejects for a name that is not in the store.
+	 */
+	async getCertificatesAsync(publicName, privateName, chainedName) {
+		const lookup = name => {
+			if (!name || !(name in this.certificates)) {
+				throw new Error(`Could not find certificate "${name}"`);
+			}
+			return this.certificates[name];
+		};
+		const certificates = { cert: lookup(publicName), key: lookup(privateName) };
+		if (chainedName) {
+			certificates.ca = lookup(chainedName);
+		}
+		return [certificates];
 	}
 
 	encrypt(value) {

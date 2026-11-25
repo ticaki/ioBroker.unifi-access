@@ -287,6 +287,8 @@ export class FakeAdapter {
 	stateWrites: { id: string; val: any; ack: boolean }[];
 	subscriptions: string[];
 	sentMessages: { to: string; command: string; message: any; callback: unknown }[];
+	/** Certificate store behind getCertificatesAsync: name → PEM */
+	certificates: Record<string, string>;
 	/** Replaceable stand-in for adapter.encrypt (default: `encrypted(<value>)`) */
 	encrypt: (value: string) => string;
 	/** Pending timers created through adapter.setTimeout */

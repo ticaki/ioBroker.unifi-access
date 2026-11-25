@@ -1,5 +1,6 @@
 import { expect } from 'chai';
-import { Agent, get as httpGet, type IncomingMessage } from 'node:http';
+import { connect } from 'node:net';
+import { Agent, get as httpGet, type IncomingMessage, type Server } from 'node:http';
 
 import {
 	createSelfSignedCert,
@@ -177,6 +178,57 @@ describe('SharedHttpServer', () => {
 		} finally {
 			agent.destroy();
 		}
+	});
+
+	it('stop() does not wait for a request that is still being answered', async () => {
+		server!.registerHandler('slow', pathIs('/slow'), () => new Promise<boolean>(() => undefined));
+		await server!.start();
+		const pending = httpRequest({ url: `${baseUrl}/slow`, timeoutMs: 5000 }).catch((err: Error) => err);
+		await new Promise(resolve => setTimeout(resolve, 50));
+		const started = Date.now();
+		await server!.stop();
+		expect(Date.now() - started).to.be.lessThan(1000);
+		expect(await pending).to.be.instanceOf(Error);
+	});
+
+	it('reports the number of handlers and whether it is listening', async () => {
+		expect(server!.handlerCount).to.equal(0);
+		expect(server!.listening).to.equal(false);
+		server!.registerHandler('ok', pathIs('/ok'), (_req, res) => {
+			res.end('ok');
+			return true;
+		});
+		expect(server!.handlerCount).to.equal(1);
+		await server!.start();
+		expect(server!.listening).to.equal(true);
+		await server!.stop();
+		expect(server!.listening).to.equal(false);
+	});
+
+	it('keeps an error listener for its whole lifetime: a late server error is logged, not thrown', async () => {
+		await server!.start();
+		const internal = (server as unknown as { server: Server }).server;
+		expect(internal.listenerCount('error')).to.be.greaterThan(0);
+		internal.emit('error', new Error('EMFILE: too many open files'));
+		expect(logger.of('warn')).to.deep.equal(['Shared http server error: EMFILE: too many open files']);
+	});
+
+	it('answers a malformed request with 400 and keeps serving', async () => {
+		server!.registerHandler('ok', pathIs('/ok'), (_req, res) => {
+			res.end('ok');
+			return true;
+		});
+		await server!.start();
+		const answer = await new Promise<string>((resolve, reject) => {
+			const socket = connect(port, '127.0.0.1', () => socket.write('NOT HTTP AT ALL\r\n\r\n'));
+			let data = '';
+			socket.on('data', chunk => (data += chunk.toString()));
+			socket.on('close', () => resolve(data));
+			socket.on('error', reject);
+		});
+		expect(answer).to.match(/^HTTP\/1\.1 400 /);
+		expect((await httpRequest({ url: `${baseUrl}/ok` })).status).to.equal(200);
+		expect(logger.of('warn')).to.deep.equal([]);
 	});
 
 	it('serves HTTPS when key and certificate are given', async () => {
