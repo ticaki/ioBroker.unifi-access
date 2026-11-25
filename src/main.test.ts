@@ -405,6 +405,62 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(true);
 		});
 
+		// E2E finding E-01: a controller that came back without the endpoint (restored backup, reset, endpoint
+		// deleted in the UniFi UI) stayed without webhooks until the adapter was restarted by hand, while
+		// info.webhookRegistered kept saying "true".
+		it('registers its endpoint again when the controller lost it while the connection was down', async () => {
+			const instance = await startConnected();
+			expect(mock.webhookEndpoints).to.have.length(1);
+			const firstId = mock.webhookEndpoints[0].id;
+			expect(instance.val('info.webhookRegistered')).to.equal(true);
+
+			mock.webhookEndpoints.length = 0;
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			await clock.tickAsync(200);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'reconnected' });
+
+			await waitFor(() => mock.webhookEndpoints.length === 1, { description: 'endpoint registered again' });
+			const second = mock.webhookEndpoints[0];
+			expect(second.id).to.not.equal(firstId);
+			expect(second.name).to.equal(ENDPOINT_NAME);
+			await waitFor(() => instance.objects.get(INSTANCE_OBJECT)?.native.webhookEndpointId === second.id, {
+				description: 'new credentials stored',
+			});
+			expect(instance.val('info.webhookRegistered')).to.equal(true);
+			expect(instance.val('info.webhookEndpointId')).to.equal(second.id);
+			// the new secret is in use at once
+			const [result] = await mock.deliverWebhook(
+				fixtures.webhookEvents.doorbellCompleted({ door: door(DOOR_A2), device: hub() }),
+			);
+			expect(result.status).to.equal(200);
+		});
+
+		it('checks the registration after a reconnect without changing an endpoint that is still there', async () => {
+			const instance = await startConnected();
+			const { id, secret } = mock.webhookEndpoints[0];
+			await waitFor(() => instance.objects.get(INSTANCE_OBJECT)?.native.webhookEndpointId === id, {
+				description: 'credentials stored',
+			});
+			const stored = JSON.stringify(instance.objects.get(INSTANCE_OBJECT)?.native);
+			const lists = (): number => mock.findRequests({ method: 'GET', path: '/webhooks/endpoints' }).length;
+			expect(lists()).to.equal(1);
+
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			await clock.tickAsync(200);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'reconnected' });
+			await waitFor(() => lists() === 2, { description: 'registration checked again' });
+			await delay(50);
+
+			expect(webhookWrites()).to.deep.equal(['POST /webhooks/endpoints']);
+			expect(mock.webhookEndpoints.map(e => [e.id, e.secret])).to.deep.equal([[id, secret]]);
+			expect(JSON.stringify(instance.objects.get(INSTANCE_OBJECT)?.native)).to.equal(stored);
+			expect(instance.val('info.webhookRegistered')).to.equal(true);
+			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(true);
+			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+
 		it('brings an existing endpoint with fewer events in line via PUT: same secret, nothing stored, no restart (D-23)', async () => {
 			const existing = mock.addWebhookEndpoint({
 				endpoint: webhookUrl(),

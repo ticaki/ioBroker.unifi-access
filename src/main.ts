@@ -921,6 +921,10 @@ class UnifiAccess extends utils.Adapter {
 			if (this.wsNeedsResync) {
 				// Events were missed while the connection was down: reload devices and doors.
 				this.wsNeedsResync = false;
+				// The controller may have come back without our webhook endpoint (restored backup, reset,
+				// endpoint deleted by hand): check the registration again instead of trusting what was
+				// true before the outage. An endpoint that is still there costs one GET and changes nothing.
+				this.webhookRegistered = false;
 				this.log.info('UniFi Access WebSocket reconnected — refreshing devices and doors.');
 				this.runDetached('resync after reconnect', this.bootstrapAndConnect());
 			} else {
