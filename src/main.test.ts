@@ -1252,7 +1252,7 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			// timers: only the adapter's own (none for rule ends)
 			const doorChecks = (): number => mock.findRequests({ method: 'GET', path: /^\/doors\/[^/]+$/ }).length;
 			const before = doorChecks();
-			await clock.tickAsync(24 * 3600_000);
+			await clock.tickAsync(24 * 3_600_000);
 			await delay(30);
 			expect(doorChecks()).to.equal(before);
 		});
