@@ -18,6 +18,7 @@ import LockOpenIcon from '@mui/icons-material/LockOpen';
 import RssFeedIcon from '@mui/icons-material/RssFeed';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
 import { I18n } from '@iobroker/gui-components';
+import { describeRequestError, requestAdapter } from './adapterRequest';
 
 interface UnifiDeviceEntry {
 	id: string;
@@ -29,6 +30,26 @@ interface UnifiDeviceEntry {
 	lastSeenAt?: string;
 }
 
+function normalizeDevices(raw: unknown[]): UnifiDeviceEntry[] {
+	const devices: UnifiDeviceEntry[] = [];
+	for (const entry of raw) {
+		const device = entry as Partial<UnifiDeviceEntry> | null;
+		if (!device || typeof device.id !== 'string' || !device.id) {
+			continue;
+		}
+		devices.push({
+			...device,
+			id: device.id,
+			name: typeof device.name === 'string' && device.name ? device.name : device.id,
+			model: typeof device.model === 'string' ? device.model : '',
+			capabilities: Array.isArray(device.capabilities)
+				? device.capabilities.filter(c => typeof c === 'string')
+				: [],
+		});
+	}
+	return devices;
+}
+
 interface DeviceManagementState extends ConfigGenericState {
 	loaded: boolean;
 	loading: boolean;
@@ -38,6 +59,9 @@ interface DeviceManagementState extends ConfigGenericState {
 }
 
 class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagementState> {
+	private unmounted = false;
+	private requestCounter = 0;
+
 	constructor(props: ConfigGenericProps) {
 		super(props);
 		Object.assign(this.state, {
@@ -54,31 +78,48 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 		await this.loadDevices();
 	}
 
+	componentDidUpdate(prevProps: ConfigGenericProps): void {
+		// The instance was started while the settings are open: fetch what could not be loaded before.
+		if (!prevProps.alive && this.props.alive && !this.state.loading && this.state.error) {
+			void this.loadDevices();
+		}
+	}
+
+	componentWillUnmount(): void {
+		this.unmounted = true;
+		super.componentWillUnmount();
+	}
+
 	private async loadDevices(): Promise<void> {
+		const requestId = ++this.requestCounter;
 		this.setState({ loading: true, error: null });
 		try {
-			const raw: unknown = await this.props.oContext.socket.sendTo(
-				`unifi-access.${this.props.oContext.instance}`,
+			const r = await requestAdapter<{ devices?: unknown; error?: string } | undefined>(
+				this.props,
 				'listDevices',
-				{},
 			);
-			const r = raw as { devices?: UnifiDeviceEntry[]; error?: string } | undefined;
-			if (r?.devices) {
+			if (this.unmounted || requestId !== this.requestCounter) {
+				return;
+			}
+			if (Array.isArray(r?.devices)) {
 				this.setState({
-					devices: r.devices,
+					devices: normalizeDevices(r.devices),
 					loaded: true,
 					loading: false,
 				});
 			} else {
 				this.setState({
-					error: r?.error ?? I18n.t('devices_error_load'),
+					error: (typeof r?.error === 'string' && r.error) || I18n.t('devices_error_load'),
 					loaded: true,
 					loading: false,
 				});
 			}
 		} catch (err) {
+			if (this.unmounted || requestId !== this.requestCounter) {
+				return;
+			}
 			this.setState({
-				error: (err as Error)?.message ?? I18n.t('devices_error_load'),
+				error: describeRequestError(err, 'devices_error_load'),
 				loaded: true,
 				loading: false,
 			});
@@ -88,7 +129,7 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 	private renderCapabilityChip(capability: string): React.JSX.Element {
 		const map: Record<
 			string,
-			{ label: string; icon: React.JSX.Element; color: 'primary' | 'secondary' | 'default' }
+			{ label: string; icon?: React.JSX.Element; color: 'primary' | 'secondary' | 'default' }
 		> = {
 			'event-thumbnail': {
 				label: I18n.t('devices_cap_event_thumbnail'),
@@ -111,7 +152,9 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 				color: 'default',
 			},
 		};
-		const info = map[capability] ?? { label: capability, icon: <></>, color: 'default' as const };
+		// No icon for a capability this version does not know: MUI clones the icon element to set a
+		// class name, which React rejects for a fragment.
+		const info = map[capability] ?? { label: capability, color: 'default' as const };
 		return (
 			<Chip
 				key={capability}
