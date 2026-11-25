@@ -2011,9 +2011,19 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(mock.emergency).to.deep.equal({ lockdown: false, evacuation: false });
 
 			instance.fireStateChange('doors.emergency.lockdown', true);
-			await waitFor(() => instance.states.get(`${NS}.doors.emergency.lockdown`)?.ack === true, {
-				description: 'lockdown ack',
-			});
+			// Wait for the confirmation of THIS command (lockdown=true): the restore after the failed
+			// evacuation may still be on its way and writes lockdown=false with ack=true as well (R2T-01).
+			await waitFor(
+				() => {
+					const lockdown = instance.states.get(`${NS}.doors.emergency.lockdown`);
+					return lockdown?.ack === true && lockdown.val === true;
+				},
+				{ description: 'lockdown=true confirmed' },
+			);
+			expect(mock.findRequests({ method: 'PUT', path: '/doors/settings/emergency' }).map(r => r.body)).to.deep.equal([
+				{ lockdown: false, evacuation: true },
+				{ lockdown: true, evacuation: false },
+			]);
 			expect(mock.emergency, 'the failed evacuation must not be sent along').to.deep.equal({
 				lockdown: true,
 				evacuation: false,
