@@ -90,6 +90,13 @@ jobs:
       - run: npm run lint --if-present
       - run: npm test
       - run: npm run build
+      # admin/custom and www are committed build output (needed for installs from GitHub and
+      # published as-is by the deploy job). Fail if the committed bundle is stale.
+      - name: Committed bundle is up to date
+        working-directory: .
+        run: |
+          git status --porcelain -- admin/custom www
+          test -z "$(git status --porcelain -- admin/custom www)"
 
   # Deploys the final package to NPM. Requires npm trusted publishing to be set up
   # for the package — see https://docs.npmjs.com/trusted-publishers.
