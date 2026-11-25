@@ -2,7 +2,7 @@ import { expect } from 'chai';
 
 import { createTestLogger, getFreePort, httpRequest, type TestLogger } from '../../test/mock';
 import { SharedHttpServer } from '../webserver/sharedHttpServer';
-import { GenericWebhookHandler, type GenericWebhookHandlerOptions } from './genericWebhookServer';
+import { GenericWebhookHandler, normalizeWebhookPath, type GenericWebhookHandlerOptions } from './genericWebhookServer';
 
 type Captured = Parameters<GenericWebhookHandlerOptions['onRequest']>[0];
 
@@ -261,6 +261,74 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 			fail = false;
 			expect((await post()).status).to.equal(200);
 			expect(logger.of('warn')).to.deep.equal(['Handler generic-webhook threw: callback failed']);
+		});
+	});
+
+	// U-01: the admin page shows "/alarm" for the setting "alarm" — the handler must answer exactly there
+	describe('listen path normalisation (U-01)', () => {
+		for (const [raw, expected] of [
+			['alarm', '/alarm'],
+			['/alarm', '/alarm'],
+			['  /alarm  ', '/alarm'],
+			['', '/webhook'],
+			[undefined, '/webhook'],
+			['/alarm?x=1', '/alarm'],
+			['/alarm#frag', '/alarm'],
+			['//hooks///alarm', '/hooks/alarm'],
+			['hooks/alarm/', '/hooks/alarm/'],
+		] as [unknown, string][]) {
+			it(`${JSON.stringify(raw)} → ${expected}`, () => {
+				expect(normalizeWebhookPath(raw)).to.equal(expected);
+			});
+		}
+
+		it('a path set without leading slash is answered at /<path>', async () => {
+			logger = createTestLogger();
+			captured = [];
+			const port = await getFreePort();
+			server = new SharedHttpServer({ port, ip: '127.0.0.1', logger });
+			const handler = new GenericWebhookHandler({
+				path: 'alarm',
+				auth: 'none',
+				logger,
+				onRequest: data => {
+					captured.push(data);
+				},
+			});
+			server.registerHandler('generic-webhook', handler.matches, handler.handle);
+			await server.start();
+			const response = await httpRequest({
+				url: `http://127.0.0.1:${port}/alarm?src=x`,
+				method: 'POST',
+				body: '{}',
+			});
+			expect(response.status).to.equal(200);
+			expect(captured).to.have.length(1);
+			expect(
+				(await httpRequest({ url: `http://127.0.0.1:${port}/other`, method: 'POST', body: '{}' })).status,
+			).to.equal(404);
+		});
+
+		it('a percent-encoded request path matches the literal setting', async () => {
+			logger = createTestLogger();
+			captured = [];
+			const port = await getFreePort();
+			server = new SharedHttpServer({ port, ip: '127.0.0.1', logger });
+			const handler = new GenericWebhookHandler({
+				path: '/alarm~1',
+				auth: 'none',
+				logger,
+				onRequest: () => undefined,
+			});
+			server.registerHandler('generic-webhook', handler.matches, handler.handle);
+			await server.start();
+			const response = await httpRequest({
+				url: `http://127.0.0.1:${port}`,
+				rawPath: '/alarm%7E1',
+				method: 'POST',
+				body: '{}',
+			});
+			expect(response.status).to.equal(200);
 		});
 	});
 });

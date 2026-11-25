@@ -25,15 +25,57 @@ export interface GenericWebhookHandlerOptions {
 
 const MAX_BODY_BYTES = 1_000_000;
 
+/** Default listen path of the generic webhook. */
+export const DEFAULT_GENERIC_WEBHOOK_PATH = '/webhook';
+
+/**
+ * The listen path as the handler matches it — the same rule the admin page uses for the URL it shows
+ * (`src-admin/src/GenericWebhookUrl.tsx`): empty means {@link DEFAULT_GENERIC_WEBHOOK_PATH}, a missing
+ * leading `/` is added. Additionally blanks around it, a query or fragment and repeated slashes are
+ * dropped (the admin validator does not let those through in the first place).
+ *
+ * @param raw Value of the `genericWebhookPath` setting
+ */
+export function normalizeWebhookPath(raw: unknown): string {
+	let path = typeof raw === 'string' ? raw.trim() : '';
+	path = path.split(/[?#]/)[0];
+	if (path === '') {
+		return DEFAULT_GENERIC_WEBHOOK_PATH;
+	}
+	if (!path.startsWith('/')) {
+		path = `/${path}`;
+	}
+	return path.replace(/\/{2,}/g, '/');
+}
+
+/**
+ * Path of a request URL without query, percent-decoded (a client may encode characters the path
+ * setting contains literally). An undecodable path is compared as it is.
+ *
+ * @param url `req.url`
+ */
+function requestPath(url: string | undefined): string {
+	const raw = (url ?? '/').split('?')[0];
+	try {
+		return decodeURIComponent(raw);
+	} catch {
+		return raw;
+	}
+}
+
 export class GenericWebhookHandler {
 	readonly options: GenericWebhookHandlerOptions;
 
+	/** The normalised listen path (see {@link normalizeWebhookPath}). */
+	readonly path: string;
+
 	constructor(options: GenericWebhookHandlerOptions) {
 		this.options = options;
+		this.path = normalizeWebhookPath(options.path);
 	}
 
 	matches = (req: IncomingMessage): boolean => {
-		return (req.url?.split('?')[0] ?? '/') === this.options.path;
+		return requestPath(req.url) === this.path;
 	};
 
 	handle: RequestHandler = async (req, res) => {
