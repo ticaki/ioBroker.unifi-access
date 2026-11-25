@@ -42,7 +42,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        node-version: [22.x, 24.x]
+        node-version: [22.x, 24.x, 26.x]
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
@@ -76,7 +76,15 @@ jobs:
         with:
           node-version: '22.x'
           cache: npm
-          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            ${{ matrix.project }}/package-lock.json
+      # The frontends reach into the root package: prettier.config.mjs (lint) imports
+      # @iobroker/eslint-config, and tests import shared modules from src/lib whose
+      # tsconfig extends @tsconfig/node22. Both live in the root node_modules.
+      - name: Install root dependencies
+        run: npm ci
+        working-directory: .
       - run: npm ci
       - run: npm run check
       - run: npm run lint --if-present
