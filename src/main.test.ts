@@ -1425,6 +1425,56 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		});
 	});
 
+	// T-04: regressions that so far only the integration tests caught (mutation probe of R2: M01, M03, M07)
+	describe('safety nets in the fast suite (T-04)', () => {
+		it('acknowledged writes to control states never trigger a door action (M01)', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			const before = mock.requests.length;
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true, true);
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 5, true);
+			instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, 1, true);
+			instance.fireStateChange('doors.emergency.lockdown', true, true);
+			// a command that is acted upon proves the four above have been processed
+			instance.fireStateChange(`doors.${DOOR_A2}.lock_rule`, 2);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_A2}.lock_rule`)?.ack === true, {
+				description: 'lock_rule ack',
+			});
+			expect(
+				mock.requests
+					.slice(before)
+					.filter(r => r.method === 'PUT')
+					.map(r => r.path),
+			).to.deep.equal([`/doors/${DOOR_A2}/lock_rule`]);
+		});
+
+		it('reregisterWebhook answers exactly {ok, id} — never the new secret (M03)', async () => {
+			const instance = await startConnected();
+			const answer = await instance.request('reregisterWebhook');
+			expect(answer).to.deep.equal({ ok: true, id: mock.webhookEndpoints[0].id });
+			expect(JSON.stringify(answer)).to.not.contain(mock.webhookEndpoints[0].secret);
+		});
+
+		it('a pulse unlock carries the configured actor with its name; without actor the body is empty (M07)', async () => {
+			const user = mock.users[0] as { id: string; first_name?: string; last_name?: string };
+			const instance = await startConnected({ enableWebhooks: false, unlockActorId: user.id });
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+			const put = await mock.waitForRequest({ method: 'PUT', path: `/doors/${DOOR_3855}/unlock` });
+			expect(put.body).to.deep.equal({
+				actor_id: user.id,
+				actor_name: [user.first_name, user.last_name].filter(Boolean).join(' '),
+			});
+			await instance.fireUnload();
+			adapter = undefined;
+
+			mock.requests.length = 0;
+			const plain = await startConnected({ enableWebhooks: false, unlockActorId: '' });
+			plain.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+			expect(
+				(await mock.waitForRequest({ method: 'PUT', path: `/doors/${DOOR_3855}/unlock` })).body,
+			).to.deep.equal({});
+		});
+	});
+
 	describe('door commands', () => {
 		it('a failed unlock is neither acknowledged nor reflected in "locked" (warning only)', async () => {
 			const instance = await startConnected();
