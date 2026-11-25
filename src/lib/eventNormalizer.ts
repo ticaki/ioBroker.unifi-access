@@ -22,6 +22,16 @@ export const DOORBELL_REASONS: Readonly<Record<number, string>> = {
 /** Keys of the WebRTC session of a doorbell call — credentials, never stored or forwarded. */
 const WEBRTC_CREDENTIAL_KEYS = ['channel', 'token'];
 
+/**
+ * Keys whose value may be a credential of the person at the door — `access.door.unlock` documents
+ * `data.object.authentication_value` next to `authentication_type` NFC / PIN_CODE / CALL, i.e. possibly a
+ * PIN or a card id. The key stays (scripts may test for it), a non-empty value is replaced.
+ */
+const CREDENTIAL_VALUE_KEYS = ['authentication_value'];
+
+/** What a masked credential value reads in the event log and the forward states. */
+export const MASKED_VALUE = '***';
+
 export interface ParsedAccessEvent {
 	event: NormalizedEvent;
 	/** The envelope's `data` object (empty object when missing or not an object). */
@@ -76,21 +86,57 @@ function toReasonCode(value: unknown): number | undefined {
 }
 
 /**
+ * Whether a credential value is present (an empty value stays empty — it tells nothing).
+ *
+ * @param value Any value
+ */
+function isFilled(value: unknown): boolean {
+	return value !== undefined && value !== null && value !== '';
+}
+
+/**
+ * Copy of an object with the non-empty values of {@link CREDENTIAL_VALUE_KEYS} masked, or the object
+ * itself when there is nothing to mask.
+ *
+ * @param record Object to clean
+ */
+function maskCredentialValues(record: Record<string, unknown>): Record<string, unknown> {
+	if (!CREDENTIAL_VALUE_KEYS.some(key => isFilled(record[key]))) {
+		return record;
+	}
+	const masked: Record<string, unknown> = { ...record };
+	for (const key of CREDENTIAL_VALUE_KEYS) {
+		if (isFilled(masked[key])) {
+			masked[key] = MASKED_VALUE;
+		}
+	}
+	return masked;
+}
+
+/**
  * Copy of the envelope for the event log / forward states with the WebRTC credentials of a doorbell
- * call (`data.channel`, `data.token`) removed.
+ * call (`data.channel`, `data.token`) removed and credential values (`authentication_value`, in
+ * `data.object` and `data`) masked. The caller's object is never modified.
  *
  * @param msg The envelope as received
  * @param data Its `data` object
  */
 function redactEnvelope(msg: Record<string, unknown>, data: Record<string, unknown>): Record<string, unknown> {
-	if (!WEBRTC_CREDENTIAL_KEYS.some(key => key in data)) {
-		return msg;
+	let cleaned = maskCredentialValues(data);
+	const object = asRecord(data.object);
+	if (object) {
+		const maskedObject = maskCredentialValues(object);
+		if (maskedObject !== object) {
+			cleaned = { ...cleaned, object: maskedObject };
+		}
 	}
-	const cleaned: Record<string, unknown> = { ...data };
-	for (const key of WEBRTC_CREDENTIAL_KEYS) {
-		delete cleaned[key];
+	if (WEBRTC_CREDENTIAL_KEYS.some(key => key in cleaned)) {
+		cleaned = { ...cleaned };
+		for (const key of WEBRTC_CREDENTIAL_KEYS) {
+			delete cleaned[key];
+		}
 	}
-	return { ...msg, data: cleaned };
+	return cleaned === data ? msg : { ...msg, data: cleaned };
 }
 
 /**
@@ -184,6 +230,8 @@ export function parseAccessEvent(msg: unknown, source: 'ws' | 'webhook', now: nu
 		doorId: firstString(data.door_id, location?.id, location?.unique_id),
 		doorName: firstString(data.door_name, location?.name),
 		userName: firstString(data.user_name, actor?.name),
+		// the result of an access attempt, decided here once — the panel shows "Access denied" for false
+		...(type === 'access.door.unlock' ? { granted: isAccessGranted(result) } : {}),
 		thumbnailPath,
 		raw: redactEnvelope(envelope, data),
 	};

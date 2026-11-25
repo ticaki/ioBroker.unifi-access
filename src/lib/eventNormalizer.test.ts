@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 
 import { fixtures } from '../../test/mock';
-import { asRecord, asString, isAccessGranted, parseAccessEvent } from './eventNormalizer';
+import { asRecord, asString, isAccessGranted, MASKED_VALUE, parseAccessEvent } from './eventNormalizer';
 
 const NOW = 1_764_000_000_000;
 const { DOOR_3855, DEVICE_HUB, DEVICE_G2_PRO } = fixtures.IDS;
@@ -154,6 +154,67 @@ describe('eventNormalizer (parsing of untrusted event envelopes)', () => {
 			// the caller's object is not modified
 			expect(msg.data.token).to.equal(token);
 			expect(parsed.requestId).to.equal(msg.data.request_id);
+		});
+	});
+
+	describe('credential values of the person at the door (RK U-3)', () => {
+		for (const [type, value] of [
+			['PIN_CODE', '123456'],
+			['NFC', '6FC02554'],
+			['NFC', 42],
+		] as [string, unknown][]) {
+			it(`masks data.object.authentication_value (${type}) in the stored envelope, the caller's object stays`, () => {
+				const msg = fixtures.webhookEvents.doorUnlock({
+					door,
+					device: hub,
+					object: { authentication_type: type, authentication_value: value },
+				});
+				const parsed = parseAccessEvent(msg, 'webhook', NOW)!;
+				const raw = parsed.event.raw as typeof msg;
+				expect(raw.data.object.authentication_value).to.equal(MASKED_VALUE);
+				expect(raw.data.object.authentication_type).to.equal(type);
+				expect(raw.data.object.result).to.equal('Access Granted');
+				expect(JSON.stringify(parsed.event)).to.not.contain(String(value));
+				expect(msg.data.object.authentication_value).to.equal(value);
+				// the parsed object the adapter evaluates is the original one
+				expect(parsed.object?.authentication_value).to.equal(value);
+			});
+		}
+
+		it('an empty value stays empty and the envelope is passed on unchanged', () => {
+			const msg = fixtures.webhookEvents.doorUnlock({ door, device: hub });
+			expect(msg.data.object.authentication_value).to.equal('');
+			const parsed = parseAccessEvent(msg, 'webhook', NOW)!;
+			expect(parsed.event.raw).to.equal(msg);
+		});
+
+		it('also masks the key directly in data, and together with the WebRTC credentials', () => {
+			const msg = fixtures.websocketEvents.remoteView({ data: { authentication_value: '9876' } });
+			const parsed = parseAccessEvent(msg, 'ws', NOW)!;
+			const raw = parsed.event.raw as { data: Record<string, unknown> };
+			expect(raw.data.authentication_value).to.equal(MASKED_VALUE);
+			expect(raw.data).to.not.have.property('token');
+			expect(raw.data).to.not.have.property('channel');
+		});
+	});
+
+	describe('result of an access attempt (RF-01)', () => {
+		for (const [result, granted] of [
+			['Access Granted', true],
+			[undefined, true],
+			['BLOCKED', false],
+			['Access Denied', false],
+		] as [string | undefined, boolean][]) {
+			it(`access.door.unlock with result ${String(result)} → granted ${granted}`, () => {
+				const msg = fixtures.webhookEvents.doorUnlock({ door, device: hub, object: { result } });
+				expect(parseAccessEvent(msg, 'webhook', NOW)?.event.granted).to.equal(granted);
+			});
+		}
+
+		it('other event types carry no granted field', () => {
+			const parsed = parseAccessEvent(fixtures.websocketEvents.remoteUnlock(door), 'ws', NOW)!;
+			expect(parsed.event).to.not.have.property('granted');
+			expect(JSON.parse(JSON.stringify(parsed.event))).to.not.have.property('granted');
 		});
 	});
 

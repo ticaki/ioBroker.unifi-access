@@ -19,6 +19,7 @@ import {
 	asString,
 	DOORBELL_REASONS,
 	isAccessGranted,
+	MASKED_VALUE,
 	parseAccessEvent,
 	type ParsedAccessEvent,
 } from './lib/eventNormalizer';
@@ -191,6 +192,12 @@ class UnifiAccess extends utils.Adapter {
 	// the pending remote_unlock is cancelled and door.unlock (richer data) is pushed instead.
 	private readonly unlockPendingTimers = new Map<string, ioBroker.Timeout>();
 	private readonly unlockPendingEvents = new Map<string, NormalizedEvent>();
+	/**
+	 * When a granted door.unlock was logged per door (ms epoch): a remote_unlock that arrives after it
+	 * within the window describes the same action — the order of the two channels is not documented.
+	 */
+	private readonly recentDoorUnlocks = new Map<string, number>();
+	private static readonly UNLOCK_DEDUP_MS = 4000;
 
 	/** Last value the adapter acknowledged per control state — what an invalid write is reset to. */
 	private readonly lastAckedControlValues = new Map<string, number>();
@@ -1209,32 +1216,28 @@ class UnifiAccess extends utils.Adapter {
 		}
 		if (USER_RELEVANT_EVENTS.has(event.type)) {
 			if (event.type === 'access.data.device.remote_unlock' && event.doorId) {
-				// Delay push: door.unlock (webhook) may follow with richer data (door name, user)
 				const doorId = event.doorId;
-				const existing = this.unlockPendingTimers.get(doorId);
-				if (existing) {
-					this.clearTimeout(existing);
-				}
-				this.unlockPendingEvents.set(doorId, event);
-				const t = this.setTimeout(() => {
-					this.unlockPendingTimers.delete(doorId);
-					const pending = this.unlockPendingEvents.get(doorId);
-					if (pending) {
-						this.unlockPendingEvents.delete(doorId);
-						this.runDetached('event log', this.library.pushEvent(pending));
-					}
-				}, 4000);
-				if (t) {
-					this.unlockPendingTimers.set(doorId, t);
+				const loggedAt = this.recentDoorUnlocks.get(doorId);
+				this.recentDoorUnlocks.delete(doorId);
+				if (loggedAt !== undefined && Math.abs(Date.now() - loggedAt) < UnifiAccess.UNLOCK_DEDUP_MS) {
+					// the webhook of the same action came first and is already logged with the richer data
+					this.log.debug(`[event] remote_unlock for doorId=${doorId}: already logged as access.door.unlock`);
+				} else {
+					this.deferRemoteUnlock(doorId, event);
 				}
 			} else if (event.type === 'access.door.unlock' && event.doorId) {
-				// Cancel pending remote_unlock for this door and push door.unlock instead
+				// A granted door.unlock replaces a pending remote_unlock of the same door (same action, richer
+				// data). A refused attempt is a different action and leaves it alone.
 				const doorId = event.doorId;
-				const t = this.unlockPendingTimers.get(doorId);
-				if (t) {
-					this.clearTimeout(t);
-					this.unlockPendingTimers.delete(doorId);
-					this.unlockPendingEvents.delete(doorId);
+				if (event.granted !== false) {
+					const t = this.unlockPendingTimers.get(doorId);
+					if (t) {
+						this.clearTimeout(t);
+						this.unlockPendingTimers.delete(doorId);
+						this.unlockPendingEvents.delete(doorId);
+					} else {
+						this.recentDoorUnlocks.set(doorId, Date.now());
+					}
 				}
 				await this.library.pushEvent(event);
 			} else {
@@ -1244,6 +1247,32 @@ class UnifiAccess extends utils.Adapter {
 		await this.updateDeviceFromEventData(parsed.device, event.ts);
 		await this.dispatchEvent(parsed);
 		await this.applyForwardRules(event);
+	}
+
+	/**
+	 * Log a remote_unlock only after {@link UnifiAccess.UNLOCK_DEDUP_MS}: the door.unlock webhook of the
+	 * same action may follow with richer data (door name, user) and then replaces it.
+	 *
+	 * @param doorId Door of the event
+	 * @param event The remote_unlock event
+	 */
+	private deferRemoteUnlock(doorId: string, event: NormalizedEvent): void {
+		const existing = this.unlockPendingTimers.get(doorId);
+		if (existing) {
+			this.clearTimeout(existing);
+		}
+		this.unlockPendingEvents.set(doorId, event);
+		const t = this.setTimeout(() => {
+			this.unlockPendingTimers.delete(doorId);
+			const pending = this.unlockPendingEvents.get(doorId);
+			if (pending) {
+				this.unlockPendingEvents.delete(doorId);
+				this.runDetached('event log', this.library.pushEvent(pending));
+			}
+		}, UnifiAccess.UNLOCK_DEDUP_MS);
+		if (t) {
+			this.unlockPendingTimers.set(doorId, t);
+		}
 	}
 
 	private async dispatchEvent(parsed: ParsedAccessEvent): Promise<void> {
@@ -2572,7 +2601,14 @@ class UnifiAccess extends utils.Adapter {
 				continue;
 			}
 			if (this.log.level === 'debug' || this.log.level === 'silly') {
-				this.log.debug(`[system-logs:${topic}] ${JSON.stringify(raw)}`);
+				// authentication.issuer is the card id / credential of the person (API reference 9.2 sample)
+				this.log.debug(
+					`[system-logs:${topic}] ${JSON.stringify(raw, (key, value: unknown) =>
+						(key === 'issuer' || key === 'authentication_value') && value !== '' && value !== null
+							? MASKED_VALUE
+							: value,
+					)}`,
+				);
 			}
 			if (await this.processSystemLogForProtect(raw, ts, doorId)) {
 				return;
@@ -2759,6 +2795,7 @@ class UnifiAccess extends utils.Adapter {
 			}
 			this.unlockPendingTimers.clear();
 			this.unlockPendingEvents.clear();
+			this.recentDoorUnlocks.clear();
 			if (this.httpServer) {
 				await this.httpServer.stop();
 				this.httpServer = null;

@@ -2931,6 +2931,70 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		});
 	});
 
+	describe('unlock event de-duplication does not depend on the order of arrival (RK U-1)', () => {
+		it('door.unlock (webhook) first, remote_unlock (WebSocket) right after: logged once', async () => {
+			const instance = await startConnected();
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub(), readerId: DEVICE_G2_PRO }),
+			);
+			await waitFor(() => events().length === 1, { description: 'door.unlock logged' });
+			const writes = instance.stateWrites.length;
+			mock.emitRemoteUnlock(DOOR_3855);
+			await waitFor(
+				() =>
+					instance.stateWrites
+						.slice(writes)
+						.some(w => w.id.endsWith(`doors.${DOOR_3855}.locked`) && w.val === false),
+				{ description: 'remote_unlock processed' },
+			);
+			await clock.tickAsync(10_000);
+			await delay(30);
+			expect(events().map(e => e.type)).to.deep.equal(['access.door.unlock']);
+			expect(instance.log.of('debug')).to.include(
+				`[event] remote_unlock for doorId=${DOOR_3855}: already logged as access.door.unlock`,
+			);
+		});
+
+		it('a remote_unlock long after a door.unlock is a new action and logged', async () => {
+			const instance = await startConnected();
+			await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+			await waitFor(() => events().length === 1, { description: 'door.unlock logged' });
+			// the window is measured in wall-clock time
+			const realNow = Date.now;
+			Date.now = () => realNow() + 5000;
+			try {
+				mock.emitRemoteUnlock(DOOR_3855);
+				await waitFor(() => instance.stateWrites.some(w => w.id.endsWith(`doors.${DOOR_3855}.locked`)), {
+					description: 'remote_unlock processed',
+				});
+				await delay(30);
+				await clock.tickAsync(4000);
+				await waitFor(() => events().length === 2, { description: 'both logged' });
+			} finally {
+				Date.now = realNow;
+			}
+		});
+
+		it('a refused door.unlock of the same door does not swallow the pending remote_unlock', async () => {
+			const instance = await startConnected();
+			mock.emitRemoteUnlock(DOOR_3855);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === false, { description: 'locked=false' });
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorUnlock({
+					door: door(DOOR_3855),
+					device: hub(),
+					object: { result: 'BLOCKED', authentication_type: 'NFC' },
+				}),
+			);
+			await clock.tickAsync(4000);
+			await waitFor(() => events().length === 2, { description: 'both events' });
+			expect(events().map(e => `${e.type} ${String(e.granted)}`)).to.deep.equal([
+				'access.data.device.remote_unlock undefined',
+				'access.door.unlock false',
+			]);
+		});
+	});
+
 	describe('system log lookup after an unlock (R-11, D-07)', () => {
 		it('does not query the system logs at all while the Protect integration is off', async () => {
 			const instance = await startConnected();
@@ -2983,6 +3047,29 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 					protectPort: protect.port,
 					...overrides,
 				});
+
+			it('the debug output of the system log masks the card id of the person (authentication.issuer, RK U-3)', async () => {
+				const instance = await startWithProtect();
+				// the raw system log is only written at log level debug
+				(instance.log as unknown as { level: string }).level = 'debug';
+				mock.systemLogHits = [
+					{
+						_source: {
+							authentication: { credential_provider: 'NFC', issuer: '6FC02554' },
+							target: [{ type: 'door', id: DOOR_3855 }],
+						},
+					},
+				];
+				await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+				await waitFor(() => events().length === 1, { description: 'event logged' });
+				await clock.tickAsync(3000);
+				await waitFor(() => instance.log.of('debug').some(m => m.startsWith('[system-logs:door_openings]')), {
+					description: 'system log debug output',
+				});
+				const output = instance.log.of('debug').filter(m => m.startsWith('[system-logs:'));
+				expect(output.join('\n')).to.not.contain('6FC02554');
+				expect(output[0]).to.contain('"issuer":"***"').and.contain('"credential_provider":"NFC"');
+			});
 
 			it('queries the documented topic door_openings 3 s after access.door.unlock and attaches the camera snapshot', async () => {
 				const instance = await startWithProtect();
@@ -3820,6 +3907,28 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(forwarded.val).to.not.contain(channel).and.not.contain(token);
 			expect(instance.states.has('0_userdata.0.other')).to.equal(false);
 			expect(instance.states.has('0_userdata.0.change')).to.equal(false);
+		});
+
+		it('a PIN or card id in authentication_value reaches neither events.last nor a forward state (RK U-3)', async () => {
+			const instance = await startConnected({
+				forwardEvents: [{ event: 'access.door.unlock', targetState: '0_userdata.0.unlock' }],
+			});
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorUnlock({
+					door: door(DOOR_3855),
+					device: hub(),
+					object: { authentication_type: 'PIN_CODE', authentication_value: '246813' },
+				}),
+			);
+			await waitFor(() => instance.states.has('0_userdata.0.unlock'), { description: 'forwarded state' });
+			const forwarded = String(instance.states.get('0_userdata.0.unlock')!.val);
+			const logged = String(instance.val('events.last'));
+			for (const text of [forwarded, logged]) {
+				expect(text).to.not.contain('246813');
+				expect(text).to.contain('"authentication_value":"***"');
+				expect(text).to.contain('"authentication_type":"PIN_CODE"');
+			}
+			expect(instance.log.messages.filter(m => m.message.includes('246813'))).to.deep.equal([]);
 		});
 
 		it('a rule with device filter does not match events without any device id (R-20)', async () => {

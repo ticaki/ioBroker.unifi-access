@@ -134,6 +134,11 @@ export interface NormalizedEvent {
 	doorId?: string;
 	doorName?: string;
 	userName?: string;
+	/**
+	 * `access.door.unlock` only: whether access was granted (`data.object.result` "Access Granted") or
+	 * refused ("BLOCKED", "Access Denied", …). Absent for every other event type.
+	 */
+	granted?: boolean;
 	thumbnailPath?: string;
 	/** Protect camera ID extracted from the Access system log camera event target. */
 	protectCameraId?: string;
