@@ -24,6 +24,7 @@ import {
 	type ParsedAccessEvent,
 } from './lib/eventNormalizer';
 import { Library } from './lib/library';
+import { SnapshotCache } from './lib/snapshotCache';
 import { detectModel, featuresFor, type DeviceCapability, type UnifiDeviceModel } from './lib/deviceModels';
 import { isSafeProtectId, sanitizeStaticPath } from './lib/pathSafety';
 import {
@@ -181,11 +182,8 @@ class UnifiAccess extends utils.Adapter {
 	private doorNameCache: Map<string, string> = new Map();
 	private forwardRules: ForwardRule[] = [];
 
-	private readonly protectSnapshotCache = new Map<string, Buffer>();
-	private readonly protectSnapshotCacheOrder: string[] = [];
-	private static readonly PROTECT_CACHE_MAX = 50;
-	private static readonly PROTECT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
-	private protectSnapshotCacheBytes = 0;
+	/** Camera snapshots of door events for the media endpoint: at most 50 / 32 MiB, oldest dropped first. */
+	private readonly protectSnapshotCache = new SnapshotCache(50, 32 * 1024 * 1024);
 	/** Why TLS could not be activated although it is enabled (null: no problem). */
 	private tlsError: string | null = null;
 
@@ -2701,7 +2699,7 @@ class UnifiAccess extends utils.Adapter {
 		this.log.debug(`[protect] camera event found: cameraId=${cameraId}, eventId=${eventId ?? 'none'}`);
 		try {
 			const buf = await protect.getSnapshot(cameraId);
-			this.cacheProtectSnapshot(`${cameraId}:${eventTs}`, buf);
+			this.protectSnapshotCache.add(`${cameraId}:${eventTs}`, buf);
 			const base = this.buildServerBaseUrl();
 			if (base === null) {
 				this.log.debug('[protect] built-in HTTP server not running — no media URLs for this event');
@@ -2750,33 +2748,6 @@ class UnifiAccess extends utils.Adapter {
 			return undefined;
 		}
 		return { cameraId, eventId: isSafeProtectId(rawEventId) ? rawEventId : undefined };
-	}
-
-	/**
-	 * Keep a camera snapshot for the media endpoint. The cache is bounded by entries and by bytes;
-	 * the oldest snapshots are dropped first.
-	 *
-	 * @param cacheKey `<cameraId>:<event timestamp>`
-	 * @param buf JPEG bytes
-	 */
-	private cacheProtectSnapshot(cacheKey: string, buf: Buffer): void {
-		if (this.protectSnapshotCache.has(cacheKey) || buf.length > UnifiAccess.PROTECT_CACHE_MAX_BYTES) {
-			return;
-		}
-		this.protectSnapshotCacheOrder.push(cacheKey);
-		this.protectSnapshotCache.set(cacheKey, buf);
-		this.protectSnapshotCacheBytes += buf.length;
-		while (
-			this.protectSnapshotCacheOrder.length > UnifiAccess.PROTECT_CACHE_MAX ||
-			this.protectSnapshotCacheBytes > UnifiAccess.PROTECT_CACHE_MAX_BYTES
-		) {
-			const oldest = this.protectSnapshotCacheOrder.shift();
-			if (oldest === undefined) {
-				break;
-			}
-			this.protectSnapshotCacheBytes -= this.protectSnapshotCache.get(oldest)?.length ?? 0;
-			this.protectSnapshotCache.delete(oldest);
-		}
 	}
 
 	private async onUnload(callback: () => void): Promise<void> {
