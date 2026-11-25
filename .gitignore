@@ -16,3 +16,7 @@ Thumbs.db
 # i18n intermediate files
 admin/i18n/flat.txt
 admin/i18n/*/flat.txt
+# lint cache and intermediate frontend build output
+.eslintcache
+src-admin/build
+src-www/build
