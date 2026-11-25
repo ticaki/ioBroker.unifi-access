@@ -125,6 +125,25 @@ describe('admin/jsonConfig.json', () => {
 		});
 	});
 
+	it('has a text for every error code the adapter answers to "Re-register webhook"', () => {
+		const main = readFileSync(resolve(here, '../../src/main.ts'), 'utf8');
+		const handler = main.slice(
+			main.indexOf('private async handleReregisterWebhook('),
+			main.indexOf('private recoverProtectSession('),
+		);
+		const codes = [...handler.matchAll(/error: '([a-z-]+)'/g)].map(match => match[1]);
+		// guards the extraction itself: these are the codes of the adapter at the time of writing
+		expect(codes).toEqual(['not-configured', 'webhooks-disabled', 'receiver-not-running']);
+
+		const texts = items.find(([key]) => key === '_reregisterWebhook')?.[1].error as Record<string, string>;
+		for (const code of [...codes, 'unknown-command']) {
+			expect(typeof texts[code], code).toBe('string');
+			expect(adminTexts.en[texts[code]], code).toBeTruthy();
+		}
+		// each code has a text of its own
+		expect(new Set(Object.values(texts)).size).toBe(Object.keys(texts).length);
+	});
+
 	it('masks every secret', () => {
 		const secrets = ['apiToken', 'genericWebhookToken', 'genericWebhookPassword', 'protectPassword'];
 

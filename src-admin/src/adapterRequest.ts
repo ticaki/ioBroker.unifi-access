@@ -81,6 +81,30 @@ export async function requestAdapter<T>(
 }
 
 /**
+ * Error codes the adapter answers with (field `error` of an answer) and the text that explains them.
+ * Codes without an entry are shown as they are.
+ */
+const ADAPTER_ERROR_TEXTS: Record<string, string> = {
+	'unknown-command': 'adapter_unknown_command',
+	'not-configured': 'adapter_not_configured',
+	unauthorized: 'auth_test_error_unauthorized',
+	network: 'auth_test_error_network',
+};
+
+/**
+ * Text for an error code of the adapter
+ *
+ * @param code value of the field `error` in the answer of the adapter
+ * @param fallbackKey translation key that is used if the answer carries no usable code
+ */
+export function describeAdapterError(code: unknown, fallbackKey: string): string {
+	if (typeof code !== 'string' || !code) {
+		return I18n.t(fallbackKey);
+	}
+	return Object.prototype.hasOwnProperty.call(ADAPTER_ERROR_TEXTS, code) ? I18n.t(ADAPTER_ERROR_TEXTS[code]) : code;
+}
+
+/**
  * Text for the user if a request failed
  *
  * @param err what `requestAdapter` threw

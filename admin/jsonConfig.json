@@ -291,7 +291,10 @@
 					"command": "reregisterWebhook",
 					"jsonData": "{}",
 					"error": {
-						"not-configured": "reregisterWebhook_error_not_configured"
+						"not-configured": "reregisterWebhook_error_not_configured",
+						"webhooks-disabled": "reregisterWebhook_error_webhooks_disabled",
+						"receiver-not-running": "reregisterWebhook_error_receiver_not_running",
+						"unknown-command": "reregisterWebhook_error_unknown_command"
 					},
 					"variant": "contained",
 					"icon": "refresh",

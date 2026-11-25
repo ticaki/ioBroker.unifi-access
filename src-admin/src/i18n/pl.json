@@ -35,7 +35,11 @@
     "generic_webhook_url_no_addresses": "Nie znaleziono adresów interfejsów sieciowych.",
     "generic_webhook_copy": "Kopiuj do schowka",
     "generic_webhook_copied": "Skopiowano!",
+    "generic_webhook_server_not_running": "Serwer HTTP adaptera obecnie nie działa, więc ten adres URL jeszcze nie odpowiada. Zapisz ustawienia, a jeśli nadal się nie uruchamia, sprawdź log instancji (port zajęty?).",
+    "generic_webhook_tls_inactive": "TLS jest włączony, ale nie udało się wczytać certyfikatów (%s). Do czasu naprawy serwer odpowiada przez nieszyfrowane http.",
 
     "adapter_not_running": "Instancja adaptera nie jest uruchomiona. Uruchom ją i spróbuj ponownie.",
-    "adapter_no_response": "Adapter nie odpowiedział na czas."
+    "adapter_no_response": "Adapter nie odpowiedział na czas.",
+    "adapter_unknown_command": "Działająca instancja adaptera nie zna tego żądania. Adapter i strona ustawień mają najwyraźniej różne wersje — uruchom instancję ponownie.",
+    "adapter_not_configured": "Działająca instancja nie ma jeszcze hosta kontrolera lub tokenu API. Wprowadź oba, zapisz i spróbuj ponownie."
 }

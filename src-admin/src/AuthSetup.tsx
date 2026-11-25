@@ -3,7 +3,7 @@ import { Alert, Box, Button, CircularProgress, Snackbar, Stack, Tooltip } from '
 import WifiTetheringIcon from '@mui/icons-material/WifiTethering';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
 import { I18n } from '@iobroker/gui-components';
-import { describeRequestError, requestAdapter } from './adapterRequest';
+import { describeAdapterError, describeRequestError, requestAdapter } from './adapterRequest';
 
 /** The adapter probes the controller with a 10 s HTTP timeout, so wait a bit longer than that */
 const VERIFY_TIMEOUT_MS = 20_000;
@@ -47,16 +47,10 @@ class AuthSetup extends ConfigGeneric<ConfigGenericProps, AuthSetupState> {
 	}
 
 	private static describeVerifyError(code: string | undefined): string {
-		switch (code) {
-			case 'unauthorized':
-				return I18n.t('auth_test_error_unauthorized');
-			case 'network':
-				return I18n.t('auth_test_error_network');
-			case 'missing-fields':
-				return I18n.t('auth_test_missingFields');
-			default:
-				return code || I18n.t('auth_test_error_unknown');
+		if (code === 'missing-fields') {
+			return I18n.t('auth_test_missingFields');
 		}
+		return describeAdapterError(code, 'auth_test_error_unknown');
 	}
 
 	private async runConnectionTest(): Promise<void> {

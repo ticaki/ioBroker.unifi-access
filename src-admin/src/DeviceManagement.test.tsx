@@ -54,6 +54,43 @@ describe('DeviceManagement', () => {
 		expect((await screen.findByRole('alert')).textContent).toBe('controller unreachable');
 	});
 
+	it('explains the answer of an adapter version that does not know the command', async () => {
+		const { props } = makeHarness({ answers: { listDevices: { ok: false, error: 'unknown-command' } } });
+		render(<DeviceManagement {...props} />);
+
+		expect((await screen.findByRole('alert')).textContent).toContain(
+			'The running adapter instance does not know this request.',
+		);
+	});
+
+	it('shows the models and capabilities of the current adapter (UA Lite, UA Intercom, UA G2 Pro)', async () => {
+		// as `featuresFor()` in src/lib/deviceModels.ts reports them
+		const full = ['event-thumbnail', 'doorbell', 'door-unlock', 'live-events'];
+		const devices = [
+			{
+				id: 'lite',
+				name: 'Side reader',
+				model: 'UA-Lite',
+				online: true,
+				capabilities: ['door-unlock', 'live-events'],
+			},
+			{ id: 'intercom', name: 'Gate intercom', model: 'UA-Intercom', online: true, capabilities: full },
+			{ id: 'g2', name: 'Lobby reader', model: 'UA-G2-Pro', firmware: '2.1.0', online: true, capabilities: full },
+		];
+		const { props } = makeHarness({ answers: { listDevices: { devices } } });
+		render(<DeviceManagement {...props} />);
+
+		expect(await screen.findByText('Side reader')).toBeTruthy();
+		expect(screen.getByText('UA-Lite')).toBeTruthy();
+		expect(screen.getByText('UA-Intercom')).toBeTruthy();
+		expect(screen.getByText('UA-G2-Pro · 2.1.0')).toBeTruthy();
+		// UA Lite has no camera and no doorbell; the reader pro got the doorbell capability
+		expect(screen.getAllByText('doorbell')).toHaveLength(2);
+		expect(screen.getAllByText('event thumbnail')).toHaveLength(2);
+		expect(screen.getAllByText('door-unlock')).toHaveLength(3);
+		expect(screen.getAllByText('live events')).toHaveLength(3);
+	});
+
 	it('shows an error for an answer without devices', async () => {
 		const { props } = makeHarness({ answers: { listDevices: {} } });
 		render(<DeviceManagement {...props} />);

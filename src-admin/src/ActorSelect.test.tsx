@@ -126,6 +126,26 @@ describe('ActorSelect', () => {
 		await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('socket closed'));
 	});
 
+	it.each([
+		[
+			'not-configured',
+			'The running instance has no controller host or API token yet. Enter both, save and try again.',
+		],
+		['unauthorized', 'Token rejected (unauthorized).'],
+		['network', 'Cannot reach the controller (network error).'],
+		[
+			'unknown-command',
+			'The running adapter instance does not know this request. Adapter and settings page seem to have different versions — restart the instance.',
+		],
+		// not a code of the adapter: no raw text, the general hint instead
+		['Request failed with status code 500', 'Could not load users. Is the adapter running?'],
+	])('explains why the adapter could not deliver the users: %s', async (error, text) => {
+		const { props } = makeHarness({ attr: 'unlockActorId', answers: { listUsers: { users: [], error } } });
+		render(<ActorSelect {...props} />);
+
+		expect((await screen.findByRole('alert')).textContent).toBe(text);
+	});
+
 	it('ignores malformed entries of the user list', async () => {
 		const { props } = makeHarness({
 			attr: 'unlockActorId',

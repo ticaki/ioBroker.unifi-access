@@ -43,6 +43,10 @@ describe('AuthSetup', () => {
 	it.each([
 		['unauthorized', 'Token rejected (unauthorized).'],
 		['network', 'Cannot reach the controller (network error).'],
+		[
+			'unknown-command',
+			'The running adapter instance does not know this request. Adapter and settings page seem to have different versions — restart the instance.',
+		],
 		['missing-fields', 'Please enter host and API token first.'],
 		[undefined, 'Connection test failed.'],
 	])('explains the error "%s" of the adapter', async (error, text) => {

@@ -35,7 +35,11 @@
     "generic_webhook_url_no_addresses": "Geen netwerkinterface-adressen gevonden.",
     "generic_webhook_copy": "Naar klembord kopiëren",
     "generic_webhook_copied": "Gekopieerd!",
+    "generic_webhook_server_not_running": "De HTTP-server van de adapter draait op dit moment niet, deze URL antwoordt dus nog niet. Sla de instellingen op en controleer het log van de instantie als hij daarna nog niet start (poort in gebruik?).",
+    "generic_webhook_tls_inactive": "TLS is ingeschakeld, maar de certificaten konden niet worden geladen (%s). De server antwoordt onversleuteld via http totdat dit is opgelost.",
 
     "adapter_not_running": "De adapterinstantie draait niet. Start deze en probeer het opnieuw.",
-    "adapter_no_response": "De adapter heeft niet op tijd gereageerd."
+    "adapter_no_response": "De adapter heeft niet op tijd gereageerd.",
+    "adapter_unknown_command": "De actieve adapterinstantie kent dit verzoek niet. Adapter en instellingenpagina hebben blijkbaar verschillende versies — herstart de instantie.",
+    "adapter_not_configured": "De actieve instantie heeft nog geen controller-host of API-token. Vul beide in, sla op en probeer het opnieuw."
 }

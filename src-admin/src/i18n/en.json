@@ -35,7 +35,11 @@
     "generic_webhook_url_no_addresses": "No network interface addresses found.",
     "generic_webhook_copy": "Copy to clipboard",
     "generic_webhook_copied": "Copied!",
+    "generic_webhook_server_not_running": "The HTTP server of the adapter is not running at the moment, so this URL does not answer yet. Save the settings and check the log of the instance if it still does not start (port in use?).",
+    "generic_webhook_tls_inactive": "TLS is enabled, but the certificates could not be loaded (%s). The server answers via plain http until this is fixed.",
 
     "adapter_not_running": "The adapter instance is not running. Start it and try again.",
-    "adapter_no_response": "The adapter did not respond in time."
+    "adapter_no_response": "The adapter did not respond in time.",
+    "adapter_unknown_command": "The running adapter instance does not know this request. Adapter and settings page seem to have different versions — restart the instance.",
+    "adapter_not_configured": "The running instance has no controller host or API token yet. Enter both, save and try again."
 }

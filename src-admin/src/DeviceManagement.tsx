@@ -18,7 +18,7 @@ import LockOpenIcon from '@mui/icons-material/LockOpen';
 import RssFeedIcon from '@mui/icons-material/RssFeed';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
 import { I18n } from '@iobroker/gui-components';
-import { describeRequestError, requestAdapter } from './adapterRequest';
+import { describeAdapterError, describeRequestError, requestAdapter } from './adapterRequest';
 
 interface UnifiDeviceEntry {
 	id: string;
@@ -109,7 +109,7 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 				});
 			} else {
 				this.setState({
-					error: (typeof r?.error === 'string' && r.error) || I18n.t('devices_error_load'),
+					error: describeAdapterError(r?.error, 'devices_error_load'),
 					loaded: true,
 					loading: false,
 				});

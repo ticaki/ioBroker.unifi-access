@@ -1,5 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { AdapterRequestError, describeRequestError, REQUEST_TIMEOUT_MS, requestAdapter } from './adapterRequest';
+import {
+	AdapterRequestError,
+	describeAdapterError,
+	describeRequestError,
+	REQUEST_TIMEOUT_MS,
+	requestAdapter,
+} from './adapterRequest';
 import { initI18n, makeHarness } from './test/harness';
 
 beforeAll(initI18n);
@@ -88,5 +94,33 @@ describe('describeRequestError', () => {
 		expect(describeRequestError(undefined, 'devices_error_load')).toBe(
 			'Could not load devices. Is the adapter running?',
 		);
+	});
+});
+
+describe('describeAdapterError', () => {
+	it('explains the error codes of the adapter', () => {
+		expect(describeAdapterError('unknown-command', 'devices_error_load')).toBe(
+			'The running adapter instance does not know this request. Adapter and settings page seem to have different versions — restart the instance.',
+		);
+		expect(describeAdapterError('not-configured', 'devices_error_load')).toBe(
+			'The running instance has no controller host or API token yet. Enter both, save and try again.',
+		);
+		expect(describeAdapterError('unauthorized', 'devices_error_load')).toBe('Token rejected (unauthorized).');
+		expect(describeAdapterError('network', 'devices_error_load')).toBe(
+			'Cannot reach the controller (network error).',
+		);
+	});
+
+	it('shows an unknown code as it is and uses the fallback without a code', () => {
+		expect(describeAdapterError('controller says no', 'devices_error_load')).toBe('controller says no');
+		expect(describeAdapterError('', 'devices_error_load')).toBe('Could not load devices. Is the adapter running?');
+		expect(describeAdapterError(undefined, 'devices_error_load')).toBe(
+			'Could not load devices. Is the adapter running?',
+		);
+		expect(describeAdapterError({ code: 1 }, 'devices_error_load')).toBe(
+			'Could not load devices. Is the adapter running?',
+		);
+		// names of Object.prototype are not error codes
+		expect(describeAdapterError('constructor', 'devices_error_load')).toBe('constructor');
 	});
 });

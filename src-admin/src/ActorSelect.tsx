@@ -16,7 +16,7 @@ import {
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
 import { I18n } from '@iobroker/gui-components';
-import { describeRequestError, requestAdapter } from './adapterRequest';
+import { describeAdapterError, describeRequestError, requestAdapter } from './adapterRequest';
 
 interface UnifiUser {
 	id: string;
@@ -88,7 +88,7 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
 			}
 			this.setState({
 				users: normalizeUsers(answer?.users),
-				error: answer?.error ? I18n.t('actor_select_error') : null,
+				error: answer?.error ? ActorSelect.describeListError(answer.error) : null,
 				loaded: true,
 				loading: false,
 			});
@@ -103,6 +103,17 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
 				loading: false,
 			});
 		}
+	}
+
+	/**
+	 * Why the adapter could not deliver the user list. A code without a text of its own (a message of
+	 * the controller, for example) is not shown raw: the general text is more helpful.
+	 *
+	 * @param code value of `error` in the answer to `listUsers`
+	 */
+	private static describeListError(code: unknown): string {
+		const text = describeAdapterError(code, 'actor_select_error');
+		return text === code ? I18n.t('actor_select_error') : text;
 	}
 
 	/** The stored user id: the just selected one or the one from the configuration */
