@@ -5,9 +5,12 @@
     "auth_test_missingFields": "Veuillez d'abord saisir l'hôte et le jeton API.",
     "auth_test_placeholder": "Le champ du jeton API contient encore l'espace réservé masqué. Videz complètement le champ et saisissez à nouveau le jeton complet.",
     "auth_test_success": "Connexion réussie",
-    "auth_test_success_named": "Connexion réussie — contrôleur : %s",
+    "auth_test_success_devices": "Connexion réussie — %s appareils trouvés",
+    "auth_test_success_one_device": "Connexion réussie — 1 appareil trouvé",
+    "auth_test_success_no_devices": "Connexion réussie — aucun appareil trouvé",
     "auth_test_error_unauthorized": "Jeton refusé (non autorisé).",
     "auth_test_error_network": "Impossible de joindre le contrôleur (erreur réseau).",
+    "auth_test_error_tls": "Le certificat du contrôleur n'a pas pu être vérifié (%s). Saisissez le certificat CA ou désactivez « Vérifier le certificat TLS ».",
     "auth_test_error_unknown": "Échec du test de connexion.",
 
     "devices_title": "Appareils UniFi Access détectés",

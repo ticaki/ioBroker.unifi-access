@@ -5,9 +5,12 @@
     "auth_test_missingFields": "请先输入主机和 API 令牌。",
     "auth_test_placeholder": "API 令牌字段仍包含被遮盖的占位符。请完全清空该字段并重新输入完整的令牌。",
     "auth_test_success": "连接成功",
-    "auth_test_success_named": "连接成功 — 控制器:%s",
+    "auth_test_success_devices": "连接成功 — 找到 %s 台设备",
+    "auth_test_success_one_device": "连接成功 — 找到 1 台设备",
+    "auth_test_success_no_devices": "连接成功 — 未找到设备",
     "auth_test_error_unauthorized": "令牌被拒绝(未授权)。",
     "auth_test_error_network": "无法连接控制器(网络错误)。",
+    "auth_test_error_tls": "无法验证控制器的证书(%s)。请填写 CA 证书或关闭“验证 TLS 证书”。",
     "auth_test_error_unknown": "连接测试失败。",
 
     "devices_title": "已发现的 UniFi Access 设备",
