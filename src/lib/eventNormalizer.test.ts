@@ -161,7 +161,7 @@ describe('eventNormalizer (parsing of untrusted event envelopes)', () => {
 		for (const [type, value] of [
 			['PIN_CODE', '123456'],
 			['NFC', '6FC02554'],
-			['NFC', 42],
+			['NFC', 987_654_321_012],
 		] as [string, unknown][]) {
 			it(`masks data.object.authentication_value (${type}) in the stored envelope, the caller's object stays`, () => {
 				const msg = fixtures.webhookEvents.doorUnlock({
