@@ -39,7 +39,8 @@
     "generic_webhook_copy": "Copiar para a área de transferência",
     "generic_webhook_copied": "Copiado!",
     "generic_webhook_server_not_running": "O servidor HTTP do adaptador não está em execução neste momento, pelo que este URL ainda não responde. Guarde as definições e, se continuar sem iniciar, verifique o registo da instância (porta em uso?).",
-    "generic_webhook_tls_inactive": "O TLS está ativado, mas não foi possível carregar os certificados (%s). O servidor responde por http não cifrado até isto ser corrigido.",
+    "generic_webhook_tls_inactive": "O TLS está ativado, mas não foi possível carregar os certificados (%s). O servidor integrado só é iniciado depois de isto ser corrigido.",
+    "generic_webhook_public_base_unsaved": "O URL base público no formulário difere do guardado. O URL apresentado segue o formulário; guarde as definições para o aplicar.",
 
     "adapter_not_running": "A instância do adaptador não está em execução. Inicie-a e tente novamente.",
     "adapter_no_response": "O adaptador não respondeu a tempo.",

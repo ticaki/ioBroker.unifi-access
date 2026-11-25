@@ -4,6 +4,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
 import { I18n, Utils } from '@iobroker/gui-components';
 import { AdapterRequestError, describeRequestError, requestAdapter } from './adapterRequest';
+import { normalizePort, normalizePublicBaseUrl, normalizeWebhookPath } from './serverUrl';
 
 /** Answer of the adapter to `getServerInfo`: the actual state of its built-in HTTP server */
 export interface ServerInfo {
@@ -12,6 +13,8 @@ export interface ServerInfo {
 	tlsEnabled: boolean;
 	tlsActive: boolean;
 	tlsError: string | null;
+	/** The saved public base URL as the adapter normalised it; `null` = not set or not usable */
+	publicBaseUrl: string | null;
 }
 
 interface GenericWebhookUrlState extends ConfigGenericState {
@@ -42,14 +45,25 @@ export function parseServerInfo(answer: unknown): ServerInfo | null {
 		tlsEnabled: info.tlsEnabled === true,
 		tlsActive: info.tlsActive === true,
 		tlsError: typeof info.tlsError === 'string' && info.tlsError ? info.tlsError : null,
+		publicBaseUrl: typeof info.publicBaseUrl === 'string' && info.publicBaseUrl ? info.publicBaseUrl : null,
 	};
 }
 
 /**
- * The scheme of the displayed URL. `enableTls` only says what the user wants: with certificates that
- * cannot be loaded the server answers via plain http. So while the edited TLS setting is the one the
- * instance runs with, the scheme of the running server counts. An unsaved change of the setting - or
- * a server whose state is not known - is shown as configured.
+ * Whether the server does not run because TLS is enabled and its certificates could not be loaded.
+ * The adapter does not fall back to plain http then (fail closed), so there is no URL that answers.
+ *
+ * @param info actual state of the HTTP server, if known
+ */
+export function blockedByTls(info: ServerInfo | null): info is ServerInfo & { tlsError: string } {
+	return !!info && !info.running && info.tlsEnabled && info.tlsError !== null;
+}
+
+/**
+ * The scheme of the displayed URL. While the edited TLS setting is the one the instance runs with,
+ * the scheme of the running server counts (with TLS enabled the adapter only starts the server with
+ * loaded certificates, i.e. as https). An unsaved change of the setting - or a server that does not
+ * run or whose state is not known - is shown as configured.
  *
  * @param data the adapter configuration that is currently edited
  * @param info actual state of the HTTP server, if known
@@ -63,10 +77,11 @@ export function effectiveScheme(data: Record<string, unknown> | undefined, info:
 }
 
 /**
- * Builds the URL the Alarm Manager has to call. The fallbacks mirror the adapter (`startSharedHttpServer`):
- * an empty port or path means the default there, too.
+ * Builds the URL the Alarm Manager has to call, with the rules of the adapter (`startSharedHttpServer`,
+ * `normalizeWebhookPath`): an empty or invalid port or an empty path means the default there, too. A
+ * public base URL in the form replaces scheme, address and port (reverse proxy / port forwarding).
  *
- * @param ip address the shared HTTP server is reachable at
+ * @param ip address the shared HTTP server is reachable at (not used with a public base URL)
  * @param data the adapter configuration that is currently edited
  * @param info actual state of the HTTP server (from `getServerInfo`), if known
  */
@@ -75,10 +90,12 @@ export function buildWebhookUrl(
 	data: Record<string, unknown> | undefined,
 	info: ServerInfo | null = null,
 ): string {
-	const port = Number(data?.listenPort) || 8095;
-	const rawPath = (typeof data?.genericWebhookPath === 'string' && data.genericWebhookPath) || '/webhook';
-	const path = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
-	return `${effectiveScheme(data, info)}://${ip}:${port}${path}`;
+	const path = normalizeWebhookPath(data?.genericWebhookPath);
+	const publicBase = normalizePublicBaseUrl(data?.publicBaseUrl);
+	if (publicBase) {
+		return `${publicBase}${path}`;
+	}
+	return `${effectiveScheme(data, info)}://${ip}:${normalizePort(data?.listenPort)}${path}`;
 }
 
 class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhookUrlState> {
@@ -209,17 +226,33 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 
 		const { addresses, loading, error, copied, serverInfo, serverInfoError } = this.state;
 		const wantsTls = data?.enableTls === true;
-		// Only while the edited TLS setting is the one the instance runs with - see effectiveScheme()
-		const tlsBroken = !!serverInfo?.running && serverInfo.tlsEnabled && wantsTls && !serverInfo.tlsActive;
+
+		// TLS is enabled, but the certificates could not be loaded: the adapter does not start the server
+		// at all. No URL would answer - so none is offered for copying, only the reason. (With TLS switched
+		// off in the form, the URL is previewed below like any unsaved change.)
+		if (blockedByTls(serverInfo) && wantsTls) {
+			return (
+				<Box sx={{ width: '100%', mt: 1 }}>
+					<Alert
+						severity="warning"
+						variant="outlined"
+					>
+						{I18n.t('generic_webhook_tls_inactive', serverInfo.tlsError)}
+					</Alert>
+				</Box>
+			);
+		}
+
 		const notice = serverInfoError
 			? serverInfoError
 			: serverInfo && !serverInfo.running
 				? I18n.t('generic_webhook_server_not_running')
-				: tlsBroken
-					? I18n.t('generic_webhook_tls_inactive', serverInfo.tlsError ?? '?')
-					: null;
+				: null;
+		// With a public base URL the listen addresses do not matter for the URL.
+		const publicBase = normalizePublicBaseUrl(data?.publicBaseUrl);
+		const publicBaseUnsaved = serverInfo !== null && publicBase !== serverInfo.publicBaseUrl;
 
-		if (loading) {
+		if (!publicBase && loading) {
 			return (
 				<Stack
 					direction="row"
@@ -232,7 +265,7 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 			);
 		}
 
-		if (addresses.length === 0) {
+		if (!publicBase && addresses.length === 0) {
 			return (
 				<Typography
 					variant="body2"
@@ -244,6 +277,10 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 			);
 		}
 
+		const urls = publicBase
+			? [buildWebhookUrl('', data, serverInfo)]
+			: Array.from(new Set(addresses.map(ip => buildWebhookUrl(ip, data, serverInfo))));
+
 		return (
 			<Box sx={{ width: '100%', mt: 1 }}>
 				<Typography
@@ -253,12 +290,11 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 					{I18n.t('generic_webhook_urls')}
 				</Typography>
 				<Stack spacing={1}>
-					{addresses.map(ip => {
-						const url = buildWebhookUrl(ip, data, serverInfo);
+					{urls.map(url => {
 						const isCopied = copied === url;
 						return (
 							<Stack
-								key={ip}
+								key={url}
 								direction="row"
 								spacing={1}
 								sx={{ alignItems: 'center' }}
@@ -284,6 +320,15 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 						);
 					})}
 				</Stack>
+				{publicBaseUnsaved ? (
+					<Alert
+						severity="info"
+						variant="outlined"
+						sx={{ mt: 1 }}
+					>
+						{I18n.t('generic_webhook_public_base_unsaved')}
+					</Alert>
+				) : null}
 				{notice ? (
 					<Alert
 						severity="warning"

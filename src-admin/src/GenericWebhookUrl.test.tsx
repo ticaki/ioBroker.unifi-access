@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Utils } from '@iobroker/gui-components';
 import GenericWebhookUrl, {
+	blockedByTls,
 	buildWebhookUrl,
 	effectiveScheme,
 	parseServerInfo,
@@ -29,6 +30,36 @@ describe('buildWebhookUrl', () => {
 		expect(buildWebhookUrl('192.0.2.5', { listenPort: 8095, genericWebhookPath: 'hook' })).toBe(
 			'http://192.0.2.5:8095/hook',
 		);
+	});
+
+	it('normalises the path like the adapter: blanks, query and repeated slashes', () => {
+		expect(buildWebhookUrl('192.0.2.5', { genericWebhookPath: '  /alarm ' })).toBe('http://192.0.2.5:8095/alarm');
+		expect(buildWebhookUrl('192.0.2.5', { genericWebhookPath: ' hook' })).toBe('http://192.0.2.5:8095/hook');
+		expect(buildWebhookUrl('192.0.2.5', { genericWebhookPath: '   ' })).toBe('http://192.0.2.5:8095/webhook');
+		expect(buildWebhookUrl('192.0.2.5', { genericWebhookPath: '//a//b?x=1' })).toBe('http://192.0.2.5:8095/a/b');
+	});
+
+	it('takes the port the adapter listens on', () => {
+		expect(buildWebhookUrl('192.0.2.5', { listenPort: '9001' })).toBe('http://192.0.2.5:9001/webhook');
+		// out of range: the adapter listens on the default port
+		expect(buildWebhookUrl('192.0.2.5', { listenPort: 70000 })).toBe('http://192.0.2.5:8095/webhook');
+		expect(buildWebhookUrl('192.0.2.5', { listenPort: 8095.5 })).toBe('http://192.0.2.5:8095/webhook');
+	});
+
+	it('uses the public base URL of the form instead of address, port and scheme', () => {
+		const data = { listenPort: 9000, enableTls: false, genericWebhookPath: ' alarm ' };
+		expect(buildWebhookUrl('192.0.2.5', { ...data, publicBaseUrl: ' https://proxy.example.com/iob/ ' })).toBe(
+			'https://proxy.example.com/iob/alarm',
+		);
+		expect(buildWebhookUrl('192.0.2.5', { ...data, publicBaseUrl: 'http://203.0.113.4:18095' })).toBe(
+			'http://203.0.113.4:18095/alarm',
+		);
+		// empty or not usable: the adapter builds the URLs from the listen address, so does the page
+		for (const publicBaseUrl of ['', '   ', 'proxy.example.com', 'https://proxy.example.com/?a=1', null]) {
+			expect(buildWebhookUrl('192.0.2.5', { ...data, publicBaseUrl }), String(publicBaseUrl)).toBe(
+				'http://192.0.2.5:9000/alarm',
+			);
+		}
 	});
 
 	it('falls back to the defaults of the adapter for empty values', () => {
@@ -157,21 +188,36 @@ const HTTP_SERVER = {
 	tlsEnabled: false,
 	tlsActive: false,
 	tlsError: null,
+	publicBaseUrl: null,
 };
-const HTTPS_SERVER = { ...HTTP_SERVER, scheme: 'https', tlsEnabled: true, tlsActive: true };
-const TLS_FAILED = { ...HTTP_SERVER, tlsEnabled: true, tlsError: 'certificate or private key is empty' };
+const HTTPS_SERVER = {
+	...HTTP_SERVER,
+	scheme: 'https',
+	baseUrl: 'https://192.0.2.77:8095',
+	tlsEnabled: true,
+	tlsActive: true,
+};
 const NOT_RUNNING = { ...HTTP_SERVER, running: false, scheme: null, baseUrl: null };
+/** TLS enabled, certificates not loadable: the adapter does not start the server (fail closed) */
+const TLS_FAILED = { ...NOT_RUNNING, tlsEnabled: true, tlsError: 'certificate or private key is empty' };
+const BEHIND_PROXY = {
+	...HTTP_SERVER,
+	baseUrl: 'https://proxy.example.com/iob',
+	publicBaseUrl: 'https://proxy.example.com/iob',
+};
 
 describe('parseServerInfo', () => {
 	it('accepts the answer of the adapter', () => {
 		expect(parseServerInfo(TLS_FAILED)).toEqual({
-			running: true,
-			scheme: 'http',
+			running: false,
+			scheme: null,
 			tlsEnabled: true,
 			tlsActive: false,
 			tlsError: 'certificate or private key is empty',
+			publicBaseUrl: null,
 		});
 		expect(parseServerInfo(NOT_RUNNING)).toMatchObject({ running: false, scheme: null });
+		expect(parseServerInfo(BEHIND_PROXY)).toMatchObject({ publicBaseUrl: 'https://proxy.example.com/iob' });
 	});
 
 	it('treats anything else as unknown', () => {
@@ -181,6 +227,19 @@ describe('parseServerInfo', () => {
 		expect(parseServerInfo('timeout')).toBeNull();
 		expect(parseServerInfo({ running: 'yes' })).toBeNull();
 		expect(parseServerInfo({ running: true, scheme: 'ftp' })).toMatchObject({ scheme: null });
+		expect(parseServerInfo({ running: true, publicBaseUrl: 42 })).toMatchObject({ publicBaseUrl: null });
+		expect(parseServerInfo({ running: true, publicBaseUrl: '' })).toMatchObject({ publicBaseUrl: null });
+	});
+});
+
+describe('blockedByTls', () => {
+	it('is true only for a server that does not run because of its certificates', () => {
+		expect(blockedByTls(parseServerInfo(TLS_FAILED))).toBe(true);
+		expect(blockedByTls(parseServerInfo(NOT_RUNNING))).toBe(false);
+		// TLS enabled, server not running for another reason (port in use)
+		expect(blockedByTls(parseServerInfo({ ...NOT_RUNNING, tlsEnabled: true }))).toBe(false);
+		expect(blockedByTls(parseServerInfo(HTTPS_SERVER))).toBe(false);
+		expect(blockedByTls(null)).toBe(false);
 	});
 });
 
@@ -196,9 +255,9 @@ describe('effectiveScheme', () => {
 
 	it('takes the scheme of the running server, not of the setting', () => {
 		expect(effectiveScheme({ enableTls: true }, info(HTTPS_SERVER))).toBe('https');
-		// certificates could not be loaded: the server answers via http although TLS is enabled
-		expect(effectiveScheme({ enableTls: true }, info(TLS_FAILED))).toBe('http');
 		expect(effectiveScheme({ enableTls: false }, info(HTTP_SERVER))).toBe('http');
+		// certificates could not be loaded: there is no running server - no fall-back to http
+		expect(effectiveScheme({ enableTls: true }, info(TLS_FAILED))).toBe('https');
 	});
 
 	it('previews an unsaved change of the TLS setting', () => {
@@ -219,14 +278,35 @@ describe('GenericWebhookUrl and the running HTTP server', () => {
 		expect(screen.queryByRole('alert')).toBeNull();
 	});
 
-	it('shows http and the reason if TLS is enabled but the certificates could not be loaded', async () => {
+	it('shows only the reason, no URL to copy, if the certificates could not be loaded', async () => {
 		const { props } = makeHarness({ data: DATA, answers: { getServerInfo: TLS_FAILED } });
 		render(<GenericWebhookUrl {...props} />);
 
-		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.77:8095/webhook']));
-		expect(screen.getByRole('alert').textContent).toBe(
-			'TLS is enabled, but the certificates could not be loaded (certificate or private key is empty). The server answers via plain http until this is fixed.',
+		expect((await screen.findByRole('alert')).textContent).toBe(
+			'TLS is enabled, but the certificates could not be loaded (certificate or private key is empty). The built-in server is not started until this is fixed.',
 		);
+		expect(screen.queryByRole('textbox')).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Copy to clipboard' })).toBeNull();
+		expect(screen.queryByText('The HTTP server of the adapter is not running', { exact: false })).toBeNull();
+	});
+
+	it('also with a public base URL there is nothing to copy while TLS blocks the server', async () => {
+		const { props } = makeHarness({
+			data: { ...DATA, publicBaseUrl: 'https://proxy.example.com' },
+			answers: { getServerInfo: { ...TLS_FAILED, publicBaseUrl: 'https://proxy.example.com' } },
+		});
+		render(<GenericWebhookUrl {...props} />);
+
+		expect((await screen.findByRole('alert')).textContent).toContain('certificates could not be loaded');
+		expect(screen.queryByRole('textbox')).toBeNull();
+	});
+
+	it('previews the http URL once TLS is switched off in the form (not saved yet)', async () => {
+		const { props } = makeHarness({ data: { ...DATA, enableTls: false }, answers: { getServerInfo: TLS_FAILED } });
+		render(<GenericWebhookUrl {...props} />);
+
+		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.77:8095/webhook']));
+		expect(screen.getByRole('alert').textContent).toContain('The HTTP server of the adapter is not running');
 	});
 
 	it('says so if the HTTP server is not running', async () => {
@@ -274,5 +354,106 @@ describe('GenericWebhookUrl and the running HTTP server', () => {
 
 		await waitFor(() => expect(urls()).toEqual(['https://192.0.2.77:8095/webhook']));
 		await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+	});
+});
+
+describe('GenericWebhookUrl with a public base URL', () => {
+	const DATA = {
+		enableGenericWebhook: true,
+		listenIp: '0.0.0.0',
+		listenPort: 8095,
+		genericWebhookPath: '/alarm',
+		publicBaseUrl: 'https://proxy.example.com/iob',
+	};
+	const ALERTS = (): string[] => screen.queryAllByRole('alert').map(alert => alert.textContent ?? '');
+	const UNSAVED =
+		'The public base URL in the form differs from the saved one. The URL shown follows the form; save the settings to apply it.';
+
+	it('shows the one public URL instead of one per interface', async () => {
+		const { props } = makeHarness({
+			data: DATA,
+			answers: {
+				getNetworkInterfaces: { addresses: ['192.0.2.5', '198.51.100.9'] },
+				getServerInfo: BEHIND_PROXY,
+			},
+		});
+		render(<GenericWebhookUrl {...props} />);
+
+		await waitFor(() => expect(urls()).toEqual(['https://proxy.example.com/iob/alarm']));
+		await waitFor(() => expect(ALERTS()).toEqual([]));
+	});
+
+	it('does not need the network interfaces', async () => {
+		const { props } = makeHarness({
+			data: DATA,
+			answers: { getNetworkInterfaces: { addresses: [] }, getServerInfo: BEHIND_PROXY },
+		});
+		render(<GenericWebhookUrl {...props} />);
+
+		await waitFor(() => expect(urls()).toEqual(['https://proxy.example.com/iob/alarm']));
+		expect(screen.queryByText('No network interface addresses found.')).toBeNull();
+	});
+
+	it('copies the public URL', async () => {
+		const copy = vi.spyOn(Utils, 'copyToClipboard').mockReturnValue(true);
+		const { props } = makeHarness({ data: DATA, answers: { getServerInfo: BEHIND_PROXY } });
+		render(<GenericWebhookUrl {...props} />);
+
+		fireEvent.click(await screen.findByRole('button', { name: 'Copy to clipboard' }));
+		expect(copy).toHaveBeenCalledWith('https://proxy.example.com/iob/alarm');
+	});
+
+	it('takes a form value that normalises to the saved one as saved', async () => {
+		const { props, socket } = makeHarness({
+			data: { ...DATA, publicBaseUrl: '  https://PROXY.example.com:443/iob//  ' },
+			answers: { getServerInfo: BEHIND_PROXY },
+		});
+		render(<GenericWebhookUrl {...props} />);
+
+		await waitFor(() => expect(urls()).toEqual(['https://proxy.example.com/iob/alarm']));
+		await waitFor(() => expect(socket.sendTo).toHaveBeenCalledWith('unifi-access.0', 'getServerInfo', {}));
+		expect(ALERTS()).toEqual([]);
+	});
+
+	it('says that a changed public base URL is not saved yet', async () => {
+		const { props } = makeHarness({
+			data: { ...DATA, publicBaseUrl: 'https://other.example.com' },
+			answers: { getServerInfo: BEHIND_PROXY },
+		});
+		render(<GenericWebhookUrl {...props} />);
+
+		await waitFor(() => expect(ALERTS()).toEqual([UNSAVED]));
+		expect(urls()).toEqual(['https://other.example.com/alarm']);
+	});
+
+	it('says so also for a public base URL that was set in the form but not saved', async () => {
+		const { props } = makeHarness({
+			data: DATA,
+			answers: { getNetworkInterfaces: { addresses: ['192.0.2.5'] }, getServerInfo: HTTP_SERVER },
+		});
+		render(<GenericWebhookUrl {...props} />);
+
+		await waitFor(() => expect(ALERTS()).toEqual([UNSAVED]));
+		expect(urls()).toEqual(['https://proxy.example.com/iob/alarm']);
+	});
+
+	it('and for one that was removed in the form but is still saved', async () => {
+		const { props } = makeHarness({
+			data: { ...DATA, publicBaseUrl: '' },
+			answers: { getNetworkInterfaces: { addresses: ['192.0.2.5'] }, getServerInfo: BEHIND_PROXY },
+		});
+		render(<GenericWebhookUrl {...props} />);
+
+		await waitFor(() => expect(ALERTS()).toEqual([UNSAVED]));
+		expect(urls()).toEqual(['http://192.0.2.5:8095/alarm']);
+	});
+
+	it('has no hint while the saved value is not known (instance stopped)', async () => {
+		const { props } = makeHarness({ data: DATA, alive: false });
+		render(<GenericWebhookUrl {...props} />);
+
+		expect(await screen.findByText('Webhook URL(s)')).toBeTruthy();
+		expect(urls()).toEqual(['https://proxy.example.com/iob/alarm']);
+		expect(ALERTS()).toEqual(['The adapter instance is not running. Start it and try again.']);
 	});
 });
