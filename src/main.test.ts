@@ -1095,6 +1095,33 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			await waitFor(() => instance.val('info.connection') === true, { description: 'connected after retry' });
 		});
 
+		// K-03: some other HTTPS service on host and port (proxy default site, wrong port) answers with 200
+		it('a bootstrap answered without the UniFi Access envelope counts as failed, not as "0 devices"', async () => {
+			mock.failNext({ path: '/devices', status: 200, body: '<html>router login</html>' });
+			const instance = await start({ enableWebhooks: false });
+			expect(instance.val('info.connection')).to.equal(false);
+			expect(instance.log.of('warn')[0]).to.contain(
+				'unexpected response without the UniFi Access response envelope',
+			);
+			expect(instance.log.of('warn')[0]).to.contain('do host and port point to the UniFi Access API?');
+			expect(instance.log.of('info').filter(m => m.startsWith('Connected to UniFi Access'))).to.deep.equal([]);
+			expect(mock.wsHandshakes).to.have.length(0);
+		});
+
+		it('a resync whose door list comes without "data" keeps the known doors working', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			mock.failNext({ path: '/doors', method: 'GET', status: 200, body: { code: 'SUCCESS', msg: 'success' } });
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			await clock.tickAsync(200);
+			await waitFor(() => mock.findRequests({ path: '/doors', method: 'GET' }).length === 2, {
+				description: 'resync door request',
+			});
+			await waitFor(() => instance.log.of('warn').length === 1, { description: 'resync warning' });
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+			await mock.waitForRequest({ method: 'PUT', path: `/doors/${DOOR_3855}/unlock` });
+		});
+
 		it('an authentication error code with HTTP 200 is reported as "unauthorized"', async () => {
 			mock.failNext({ status: 200, code: 'CODE_ACCESS_TOKEN_INVALID', times: Number.POSITIVE_INFINITY });
 			const instance = await start({ enableWebhooks: false });
