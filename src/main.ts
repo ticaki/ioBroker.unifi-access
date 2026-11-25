@@ -54,6 +54,17 @@ const DOOR_CHECK_AFTER_EVENT_MS = 7000;
 /** Upper bound for the JSON the www panel may store in admin.uiSettings. */
 const UI_SETTINGS_MAX_LENGTH = 10_000;
 
+/** How long a sendTo request waits for the start of the adapter to finish before it is answered anyway. */
+const STARTUP_WAIT_MS = 8000;
+/** sendTo commands whose answer depends on what the start of the adapter sets up or loads. */
+const STATE_DEPENDENT_COMMANDS = new Set([
+	'getConnectionStatus',
+	'listDevices',
+	'listUsers',
+	'reregisterWebhook',
+	'getServerInfo',
+]);
+
 const USER_RELEVANT_EVENTS = new Set([
 	'access.remote_view',
 	'access.remote_view.change',
@@ -124,6 +135,8 @@ class UnifiAccess extends utils.Adapter {
 	/** True once the endpoint is known to be registered with the controller in this run. */
 	private webhookRegistered = false;
 	private webhookRegistrationRunning = false;
+	/** The registration was made before a connection outage and has to be checked again. */
+	private webhookRegistrationStale = false;
 	private webhookRegistrationFailureLog = '';
 	/** The shared HTTP server is listening with the webhook receiver mounted. */
 	private webhookReceiverActive = false;
@@ -189,16 +202,30 @@ class UnifiAccess extends utils.Adapter {
 	/** Legacy system secret: plain-text and encrypted Protect passwords cannot be told apart. */
 	private protectPasswordUncertain = false;
 
+	/** Resolved when the first attempt to load the controller state is over (successful or not). */
+	private readonly startup: Promise<void>;
+	private startupFinished = false;
+	private finishStartup: () => void = () => undefined;
+
 	public constructor(options: Partial<utils.AdapterOptions> = {}) {
 		super({
 			...options,
 			name: 'unifi-access',
 		});
+		this.startup = new Promise<void>(resolve => {
+			this.finishStartup = () => {
+				this.startupFinished = true;
+				resolve();
+			};
+		});
 		// a failure during start is logged — it must not end as an unhandled rejection (restart loop)
 		this.on('ready', () =>
-			this.onReady().catch((err: unknown) => {
-				this.log.error(`Adapter start failed: ${errorText(err)}`);
-			}),
+			this.onReady()
+				.catch((err: unknown) => {
+					this.log.error(`Adapter start failed: ${errorText(err)}`);
+				})
+				// whatever happened: messages must not wait for a start that is over
+				.finally(() => this.finishStartup()),
 		);
 		this.on('stateChange', this.onStateChange.bind(this));
 		this.on('message', this.onMessage.bind(this));
@@ -253,6 +280,8 @@ class UnifiAccess extends utils.Adapter {
 		// at the end of a successful bootstrap and events may arrive right away.
 		await this.startSharedHttpServer();
 		await this.bootstrapAndConnect();
+		// sendTo requests that arrived meanwhile are answered now, with what was loaded
+		this.finishStartup();
 		// Last: the Protect login may take long when the console does not answer; door control and
 		// events must not wait for it.
 		await this.initProtect(host, caCert);
@@ -623,7 +652,7 @@ class UnifiAccess extends utils.Adapter {
 			this.config.enableWebhooks !== true ||
 			!this.http ||
 			!this.webhookReceiverActive ||
-			this.webhookRegistered ||
+			(this.webhookRegistered && !this.webhookRegistrationStale) ||
 			this.webhookRegistrationRunning ||
 			this.unloading
 		) {
@@ -657,6 +686,7 @@ class UnifiAccess extends utils.Adapter {
 			this.webhookEndpointId = result.id;
 			this.webhookSecret = result.secret;
 			this.webhookRegistered = true;
+			this.webhookRegistrationStale = false;
 			this.webhookRegistrationFailureLog = '';
 			await this.setState('info.webhookRegistered', { val: true, ack: true });
 			// Only write to native when credentials actually changed — extendForeignObjectAsync
@@ -673,6 +703,7 @@ class UnifiAccess extends utils.Adapter {
 			} else {
 				this.log.debug(text);
 			}
+			this.webhookRegistered = false;
 			await this.setState('info.webhookRegistered', { val: false, ack: true });
 			this.scheduleWebhookRegistrationRetry();
 		} finally {
@@ -924,7 +955,8 @@ class UnifiAccess extends utils.Adapter {
 				// The controller may have come back without our webhook endpoint (restored backup, reset,
 				// endpoint deleted by hand): check the registration again instead of trusting what was
 				// true before the outage. An endpoint that is still there costs one GET and changes nothing.
-				this.webhookRegistered = false;
+				// Until the check says otherwise the endpoint keeps counting as registered.
+				this.webhookRegistrationStale = true;
 				this.log.info('UniFi Access WebSocket reconnected — refreshing devices and doors.');
 				this.runDetached('resync after reconnect', this.bootstrapAndConnect());
 			} else {
@@ -1885,6 +1917,9 @@ class UnifiAccess extends utils.Adapter {
 		msg: ioBroker.Message,
 		defer: (task: () => Promise<void>) => void,
 	): Promise<Record<string, unknown>> {
+		if (STATE_DEPENDENT_COMMANDS.has(msg.command)) {
+			await this.waitForStartup();
+		}
 		switch (msg.command) {
 			case 'getConnectionStatus':
 				return {
@@ -1965,6 +2000,29 @@ class UnifiAccess extends utils.Adapter {
 				this.log.debug(`Unknown message command "${msg.command}".`);
 				return { ok: false, error: 'unknown-command' };
 		}
+	}
+
+	/**
+	 * Wait until the start of the adapter is over. The admin sends its requests as soon as the instance
+	 * is reported alive — before the HTTP client exists and the controller state is loaded. Answering
+	 * right away told the settings page "no devices" and "host or token missing" for a correctly
+	 * configured instance that was merely still starting.
+	 *
+	 * @param maxMs Give up waiting after this time (the controller may not answer at all)
+	 */
+	private async waitForStartup(maxMs = STARTUP_WAIT_MS): Promise<void> {
+		if (this.startupFinished) {
+			return;
+		}
+		await new Promise<void>(resolve => {
+			const timer = this.setTimeout(resolve, maxMs);
+			void this.startup.then(() => {
+				if (timer) {
+					this.clearTimeout(timer);
+				}
+				resolve();
+			});
+		});
 	}
 
 	private async handleVerifyToken(msg: ioBroker.Message): Promise<Record<string, unknown>> {

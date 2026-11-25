@@ -461,6 +461,47 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(instance.log.of('warn')).to.deep.equal([]);
 		});
 
+		it('keeps reporting the endpoint as registered while the check after a reconnect is running', async () => {
+			const instance = await startConnected();
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+			const lists = (): number => mock.findRequests({ method: 'GET', path: '/webhooks/endpoints' }).length;
+
+			// the controller answers the list request of the check late (the mock delays in real time)
+			mock.failNext({ method: 'GET', path: '/webhooks/endpoints', delayMs: 500 });
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			await clock.tickAsync(200);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'reconnected' });
+			// the fault is taken when the list request of the check arrives
+			await waitFor(() => mock.faults.length === 0, { description: 'list request of the check' });
+			await delay(30);
+			expect(lists(), 'the check is still waiting for its answer').to.equal(1);
+			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(true);
+			expect(instance.val('info.webhookRegistered')).to.equal(true);
+
+			await waitFor(() => lists() === 2, { description: 'check finished', timeoutMs: 4000 });
+			await delay(50);
+			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(true);
+		});
+
+		it('reports the endpoint as not registered when the check after a reconnect fails', async () => {
+			const instance = await startConnected();
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+
+			mock.failNext({ method: 'GET', path: '/webhooks/endpoints', status: 500 });
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			await clock.tickAsync(200);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'reconnected' });
+			await waitFor(() => instance.val('info.webhookRegistered') === false, { description: 'not registered' });
+			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(false);
+
+			// the retry (60 s later) finds the endpoint untouched
+			await clock.tickAsync(60_000);
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered again' });
+			expect(mock.webhookEndpoints).to.have.length(1);
+		});
+
 		it('brings an existing endpoint with fewer events in line via PUT: same secret, nothing stored, no restart (D-23)', async () => {
 			const existing = mock.addWebhookEndpoint({
 				endpoint: webhookUrl(),
@@ -2491,6 +2532,136 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'network' });
 			mock.failNext({ path: '/users', status: 200, body: { code: 'CODE_UNAUTHORIZED', msg: 'no' } });
 			expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'unauthorized' });
+		});
+
+		// E2E finding E-02: the admin sends its requests as soon as the instance is reported alive. The
+		// adapter answered them from its still empty state: "no devices", "host or token missing" (for a
+		// correctly configured instance) and "HTTP server not running" - and the settings page kept showing that.
+		describe('requests that arrive while the adapter is still starting', () => {
+			const config = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				verifyTLS: false,
+				wsReconnectDelay: 0.05,
+				listenPort,
+				listenIp: '127.0.0.1',
+				enableWebhooks: true,
+				enableThumbnailServer: true,
+				forwardEvents: [],
+				...overrides,
+			});
+
+			it('are answered with the loaded state once the start is over', async () => {
+				adapter = createAdapterWithFakeCore(MAIN, config());
+				const instance = adapter;
+				const ready = instance.fireReady();
+				// sent before the ready handler got further than its first await
+				const [devices, users, server, status] = await Promise.all([
+					instance.request('listDevices'),
+					instance.request('listUsers'),
+					instance.request('getServerInfo'),
+					instance.request('getConnectionStatus'),
+				]);
+				await ready;
+
+				expect((devices.devices as unknown[]).length).to.equal(4);
+				expect(users).to.deep.equal({
+					users: [
+						{ id: fixtures.DEFAULT_USERS[0].id, name: 'Hong Lu' },
+						{ id: fixtures.DEFAULT_USERS[1].id, name: 'Ttttt Tttt' },
+					],
+				});
+				expect(server).to.include({ running: true, scheme: 'http', port: listenPort });
+				expect(status).to.include({ connected: true, hasToken: true, lastError: null });
+			});
+
+			it('re-registers the webhook instead of answering "not-configured"', async () => {
+				adapter = createAdapterWithFakeCore(MAIN, config());
+				const instance = adapter;
+				const ready = instance.fireReady();
+				const answer = await instance.request('reregisterWebhook');
+				await ready;
+
+				expect(answer.ok).to.equal(true);
+				expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([answer.id]);
+			});
+
+			it('report the failed start instead of an empty state when the controller cannot be reached', async () => {
+				mock.failNext({ hangUp: true, times: Number.POSITIVE_INFINITY });
+				adapter = createAdapterWithFakeCore(MAIN, config());
+				const instance = adapter;
+				const ready = instance.fireReady();
+				const [users, status] = await Promise.all([
+					instance.request('listUsers'),
+					instance.request('getConnectionStatus'),
+				]);
+				await ready;
+
+				expect(users).to.deep.equal({ users: [], error: 'network' });
+				expect(status).to.include({ connected: false, lastError: 'network' });
+			});
+
+			it('are answered at once without controller configuration and when the start failed', async () => {
+				adapter = createAdapterWithFakeCore(MAIN, config({ controllerHost: '' }));
+				const instance = adapter;
+				const ready = instance.fireReady();
+				expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'not-configured' });
+				await ready;
+				expect(instance.timers.size).to.equal(0);
+			});
+
+			it('do not wait longer than 8 s for a start that hangs', async () => {
+				adapter = createAdapterWithFakeCore(MAIN, config());
+				const instance = adapter;
+				// the ready handler never gets past its first step
+				let release: () => void = () => undefined;
+				const setState = instance.setState.bind(instance);
+				let blocked = false;
+				instance.setState = async (...args: Parameters<typeof setState>) => {
+					if (!blocked) {
+						blocked = true;
+						await new Promise<void>(resolve => (release = resolve));
+					}
+					return setState(...args);
+				};
+				const ready = instance.fireReady();
+				let answer: Record<string, unknown> | undefined;
+				void instance.request('listDevices', undefined, 10_000).then(result => (answer = result));
+				await clock.tickAsync(7900);
+				await delay(30);
+				expect(answer, 'no answer before the limit').to.equal(undefined);
+				await clock.tickAsync(200);
+				await waitFor(() => answer !== undefined, { description: 'answer after the limit' });
+				expect(answer).to.deep.equal({ devices: [] });
+
+				release();
+				await ready;
+				// afterwards requests are answered without delay
+				expect(((await instance.request('listDevices')).devices as unknown[]).length).to.equal(4);
+			});
+
+			it('verifyToken and getNetworkInterfaces do not wait for the start', async () => {
+				adapter = createAdapterWithFakeCore(MAIN, config());
+				const instance = adapter;
+				let release: () => void = () => undefined;
+				const setState = instance.setState.bind(instance);
+				let blocked = false;
+				instance.setState = async (...args: Parameters<typeof setState>) => {
+					if (!blocked) {
+						blocked = true;
+						await new Promise<void>(resolve => (release = resolve));
+					}
+					return setState(...args);
+				};
+				const ready = instance.fireReady();
+				expect(
+					await instance.request('verifyToken', { host: '127.0.0.1', port: mock.port, token: TOKEN }),
+				).to.include({ ok: true });
+				expect((await instance.request('getNetworkInterfaces')).addresses).to.be.an('array');
+				release();
+				await ready;
+			});
 		});
 
 		it('listUsers without configured controller answers with error "not-configured"', async () => {

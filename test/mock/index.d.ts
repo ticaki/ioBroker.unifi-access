@@ -174,6 +174,8 @@ export class MockUnifiController extends EventEmitter {
 		filter: RequestFilter,
 		options?: { timeoutMs?: number; fromIndex?: number },
 	): Promise<RecordedRequest>;
+	/** Faults that are still waiting for a matching request */
+	readonly faults: MockFault[];
 	failNext(fault: MockFault): void;
 	clearFaults(): void;
 	addStaticResource(path: string, body?: Buffer, contentType?: string): void;
