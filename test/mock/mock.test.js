@@ -20,6 +20,7 @@ const {
 	computeSignature,
 	httpRequest,
 	waitFor,
+	delay,
 	fixtures,
 	API_PREFIX,
 } = require('./index');
@@ -313,7 +314,39 @@ describe('mock UniFi Access controller (self-test)', () => {
 				omitSecretInList: false,
 				autoEvents: false,
 				serveAnyStatic: false,
+				autoPong: true,
 			});
+		});
+
+		it('POST /__mock/options autoPong:false stops answering pings of an open connection (and true resumes)', async () => {
+			const ws = new WebSocket(mock.wsUrl, {
+				headers: { Authorization: `Bearer ${TOKEN}` },
+				rejectUnauthorized: false,
+			});
+			try {
+				await new Promise((resolve, reject) => ws.once('open', resolve).once('error', reject));
+				let pongs = 0;
+				ws.on('pong', () => (pongs += 1));
+				const pingAndWait = async () => {
+					const before = mock.wsPingCount;
+					ws.ping();
+					await waitFor(() => mock.wsPingCount > before, { timeoutMs: 2000 });
+					await delay(150);
+				};
+
+				await pingAndWait();
+				expect(pongs).to.equal(1);
+
+				expect((await control('POST', '/options', { autoPong: false })).body.autoPong).to.equal(false);
+				await pingAndWait();
+				expect(pongs, 'no pong while autoPong is off').to.equal(1);
+
+				await control('POST', '/options', { autoPong: true });
+				await pingAndWait();
+				expect(pongs).to.equal(2);
+			} finally {
+				ws.terminate();
+			}
 		});
 
 		it('POST /__mock/restart comes back on the same port and keeps its state', async () => {

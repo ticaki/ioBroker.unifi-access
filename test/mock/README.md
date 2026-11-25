@@ -98,6 +98,7 @@ curl -k -X POST $M/data -d '{"devices":[],"users":[{"id":"u1","first_name":"A","
 curl -k -X POST $M/data -d '{"door":{"id":"<door-id>","door_lock_relay_status":"lock"}}'   # einzelne Tür ändern
 curl -k -X POST $M/static -d '{"path":"/preview/reader_x.jpg","base64":"<jpeg>"}'
 curl -k -X POST $M/options -d '{"wsAccepting":false}'                           # WebSocket-Upgrade mit 503 ablehnen
+curl -k -X POST $M/options -d '{"autoPong":false}'                              # Pings offener Verbindungen nicht mehr beantworten (Heartbeat)
 curl -k -X POST $M/restart -d '{"downMs":5000}'                                 # 5 s weg, dann wieder auf demselben Port
 ```
 
@@ -123,6 +124,7 @@ mock.emitRemoteViewChange(108);                            // access.remote_view
 mock.emitRemoteUnlock(fixtures.IDS.DOOR_3855);             // access.data.device.remote_unlock
 mock.dropWsConnections();                                  // Verbindungsabbruch (graceful: true für Close-Frame)
 mock.wsAccepting = false;                                  // Upgrade mit 503 ablehnen (Reconnect-Tests)
+mock.autoPong = false;                                     // Pings nicht beantworten (Heartbeat-Tests), auch zur Laufzeit
 await mock.restart();                                      // Controller-Neustart auf demselben Port
 
 // signierter Webhook an alle registrierten Endpoints (Secret aus der Registrierung)

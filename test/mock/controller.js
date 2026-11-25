@@ -122,7 +122,8 @@ class MockUnifiController extends EventEmitter {
 				res.end();
 			});
 		});
-		const wss = new WebSocketServer({ noServer: true, autoPong: this.autoPong });
+		// pings are answered in handleWsConnection, so that `autoPong` can be switched at runtime
+		const wss = new WebSocketServer({ noServer: true, autoPong: false });
 		server.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
 		wss.on('connection', (ws, req) => this.handleWsConnection(ws, req));
 
@@ -947,8 +948,11 @@ class MockUnifiController extends EventEmitter {
 		this.wsClients.add(ws);
 		this.wsConnectionCount += 1;
 		this.log(`WS client connected (${this.wsClients.size} open)`);
-		ws.on('ping', () => {
+		ws.on('ping', data => {
 			this.wsPingCount += 1;
+			if (this.autoPong) {
+				ws.pong(data, false, () => undefined);
+			}
 			this.emit('ws-ping');
 		});
 		ws.on('error', () => undefined);
@@ -1063,7 +1067,7 @@ class MockUnifiController extends EventEmitter {
 			}
 
 			case 'POST /options':
-				for (const key of ['wsAccepting', 'omitSecretInList', 'autoEvents', 'serveAnyStatic']) {
+				for (const key of ['wsAccepting', 'omitSecretInList', 'autoEvents', 'serveAnyStatic', 'autoPong']) {
 					if (typeof body[key] === 'boolean') {
 						this[key] = body[key];
 					}
@@ -1073,6 +1077,7 @@ class MockUnifiController extends EventEmitter {
 					omitSecretInList: this.omitSecretInList,
 					autoEvents: this.autoEvents,
 					serveAnyStatic: this.serveAnyStatic,
+					autoPong: this.autoPong,
 				});
 				return;
 
@@ -1207,7 +1212,7 @@ const CONTROL_ROUTES = {
 	'POST /__mock/static':
 		'content for GET /system/static/<path>: {"path": "...", "base64"?: "...", "contentType"?: "image/jpeg"}',
 	'POST /__mock/options':
-		'switches: {wsAccepting?, omitSecretInList?, autoEvents?, serveAnyStatic?} (answers the current values)',
+		'switches: {wsAccepting?, omitSecretInList?, autoEvents?, serveAnyStatic?, autoPong?} (answers the current values)',
 	'POST /__mock/restart': 'stop and start again on the same port, state is kept: {"downMs"?: 0}',
 	'POST /__mock/ws/event':
 		'push a WebSocket notification: {"type":"remote_view"|"remote_view_change"|"remote_unlock", reasonCode?, doorId?, data?} or a full envelope {"event":...}',

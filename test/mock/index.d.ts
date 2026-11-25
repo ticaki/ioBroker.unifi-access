@@ -146,6 +146,8 @@ export class MockUnifiController extends EventEmitter {
 	wsAccepting: boolean;
 	autoEvents: boolean;
 	serveAnyStatic: boolean;
+	/** Answer WebSocket pings; can be switched at runtime (also via POST /__mock/options) */
+	autoPong: boolean;
 	duplicateEndpointHttpStatus: number;
 
 	requests: RecordedRequest[];
