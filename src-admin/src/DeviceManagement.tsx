@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import {
 	Alert,
 	Box,
@@ -17,7 +17,7 @@ import DoorbellIcon from '@mui/icons-material/Doorbell';
 import LockOpenIcon from '@mui/icons-material/LockOpen';
 import RssFeedIcon from '@mui/icons-material/RssFeed';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
-import { I18n } from '@iobroker/adapter-react-v5';
+import { I18n } from '@iobroker/gui-components';
 
 interface UnifiDeviceEntry {
 	id: string;
@@ -49,9 +49,9 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 		} satisfies Partial<DeviceManagementState>);
 	}
 
-	componentDidMount(): void {
-		super.componentDidMount();
-		void this.loadDevices();
+	async componentDidMount(): Promise<void> {
+		await super.componentDidMount();
+		await this.loadDevices();
 	}
 
 	private async loadDevices(): Promise<void> {
@@ -139,14 +139,13 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 				<CardContent>
 					<Stack
 						direction="row"
-						justifyContent="space-between"
-						alignItems="center"
 						spacing={1}
+						sx={{ justifyContent: 'space-between', alignItems: 'center' }}
 					>
 						<Stack>
 							<Typography
 								variant="subtitle1"
-								fontWeight="bold"
+								sx={{ fontWeight: 'bold' }}
 							>
 								{device.name}
 							</Typography>
@@ -177,9 +176,7 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 			<Box sx={{ width: '100%' }}>
 				<Stack
 					direction="row"
-					justifyContent="space-between"
-					alignItems="center"
-					sx={{ mb: 2 }}
+					sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2 }}
 				>
 					<Typography variant="h6">{I18n.t('devices_title')}</Typography>
 					<Button
@@ -215,7 +212,7 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 					<Stack
 						direction="row"
 						spacing={1}
-						alignItems="center"
+						sx={{ alignItems: 'center' }}
 					>
 						<CircularProgress size={20} />
 						<Typography variant="body2">{I18n.t('devices_loading')}</Typography>

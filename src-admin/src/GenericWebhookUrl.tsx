@@ -1,8 +1,8 @@
-import React from 'react';
+import type React from 'react';
 import { Box, CircularProgress, IconButton, Stack, TextField, Tooltip, Typography } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
-import { I18n } from '@iobroker/adapter-react-v5';
+import { I18n } from '@iobroker/gui-components';
 
 interface GenericWebhookUrlState extends ConfigGenericState {
 	addresses: string[];
@@ -85,9 +85,8 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 			return (
 				<Stack
 					direction="row"
-					alignItems="center"
 					spacing={1}
-					sx={{ mt: 1 }}
+					sx={{ alignItems: 'center', mt: 1 }}
 				>
 					<CircularProgress size={16} />
 					<Typography variant="body2">{I18n.t('generic_webhook_url_loading')}</Typography>
@@ -123,8 +122,8 @@ class GenericWebhookUrl extends ConfigGeneric<ConfigGenericProps, GenericWebhook
 							<Stack
 								key={ip}
 								direction="row"
-								alignItems="center"
 								spacing={1}
+								sx={{ alignItems: 'center' }}
 							>
 								<TextField
 									value={url}

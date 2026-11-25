@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import {
 	Alert,
 	Box,
@@ -15,7 +15,7 @@ import {
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
-import { I18n } from '@iobroker/adapter-react-v5';
+import { I18n } from '@iobroker/gui-components';
 
 interface UnifiUser {
 	id: string;
@@ -40,9 +40,9 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
 		} satisfies Partial<ActorSelectState>);
 	}
 
-	componentDidMount(): void {
-		super.componentDidMount();
-		void this.loadUsers();
+	async componentDidMount(): Promise<void> {
+		await super.componentDidMount();
+		await this.loadUsers();
 	}
 
 	private async loadUsers(): Promise<void> {
@@ -97,14 +97,14 @@ class ActorSelect extends ConfigGeneric<ConfigGenericProps, ActorSelectState> {
 
 				<Stack
 					direction="row"
-					alignItems="center"
 					spacing={1}
+					sx={{ alignItems: 'center' }}
 				>
 					{!loaded ? (
 						<Stack
 							direction="row"
-							alignItems="center"
 							spacing={1}
+							sx={{ alignItems: 'center' }}
 						>
 							<CircularProgress size={20} />
 							<Typography variant="body2">{I18n.t('actor_select_loading')}</Typography>
