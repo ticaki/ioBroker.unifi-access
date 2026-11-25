@@ -766,6 +766,9 @@ class UnifiAccess extends utils.Adapter {
 			} else {
 				this.log.debug(`Controller state refreshed: ${devices.length} devices, ${doors.length} doors.`);
 			}
+			if (!this.bootstrapSucceededOnce) {
+				await this.refreshThumbnailUrls();
+			}
 			this.bootstrapSucceededOnce = true;
 			this.bootstrapFailures = 0;
 			this.lastBootstrapFailureLog = '';
@@ -1482,12 +1485,50 @@ class UnifiAccess extends utils.Adapter {
 		const safe = this.safeId(deviceId);
 		await this.setState(`devices.${safe}.lastThumbnailPath`, { val: path, ack: true });
 		await this.setState(`devices.${safe}.lastThumbnailAt`, { val: ts, ack: true });
-		const cfg = this.config;
-		if (cfg.enableThumbnailServer === true) {
-			const base = this.buildServerBaseUrl();
-			if (base) {
-				const url = `${base}/unifi-access/${this.instance}/thumbnail/${encodeURIComponent(deviceId)}.jpg?ts=${ts}`;
-				await this.setState(`devices.${safe}.lastThumbnailUrl`, { val: url, ack: true });
+		// An empty URL says "there is an image, but it is not served" (thumbnail server off) — a URL from
+		// an earlier configuration must not stay behind and point to nothing.
+		await this.setState(`devices.${safe}.lastThumbnailUrl`, { val: this.thumbnailUrl(deviceId, ts), ack: true });
+	}
+
+	/**
+	 * URL under which the built-in HTTP server delivers the last thumbnail of a device.
+	 *
+	 * @param deviceId Device id as used by the controller
+	 * @param ts Time of the thumbnail (ms epoch), only there to defeat browser caches
+	 * @returns The URL, or an empty string while the thumbnail server is off or not listening
+	 */
+	private thumbnailUrl(deviceId: string, ts: number): string {
+		const base = this.config.enableThumbnailServer === true ? this.buildServerBaseUrl() : null;
+		return base
+			? `${base}/unifi-access/${this.instance}/thumbnail/${encodeURIComponent(deviceId)}.jpg?ts=${ts}`
+			: '';
+	}
+
+	/**
+	 * Bring `lastThumbnailUrl` of every device in line with how the built-in HTTP server runs now. The
+	 * state survives restarts, the server settings may not: after the thumbnail server was switched
+	 * off, or port, listen address or TLS were changed, the stored URL would lead nowhere until the
+	 * next event with a thumbnail arrives.
+	 */
+	private async refreshThumbnailUrls(): Promise<void> {
+		for (const deviceId of this.devices.keys()) {
+			const safe = this.safeId(deviceId);
+			try {
+				const stored = await this.getStateAsync(`devices.${safe}.lastThumbnailUrl`);
+				if (!stored) {
+					// no thumbnail states for this device (yet)
+					continue;
+				}
+				const path = await this.getStateAsync(`devices.${safe}.lastThumbnailPath`);
+				const at = await this.getStateAsync(`devices.${safe}.lastThumbnailAt`);
+				const hasThumbnail = typeof path?.val === 'string' && sanitizeStaticPath(path.val) !== null;
+				const ts = typeof at?.val === 'number' && at.val > 0 ? at.val : 0;
+				const url = hasThumbnail ? this.thumbnailUrl(deviceId, ts) : '';
+				if ((stored.val ?? '') !== url) {
+					await this.setState(`devices.${safe}.lastThumbnailUrl`, { val: url, ack: true });
+				}
+			} catch (err) {
+				this.log.debug(`Could not refresh the thumbnail URL of ${deviceId}: ${errorText(err)}`);
 			}
 		}
 	}

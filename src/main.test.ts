@@ -1397,6 +1397,104 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		});
 	});
 
+	// E2E finding E-04: lastThumbnailUrl survives restarts, the server settings may not. After the thumbnail
+	// server was switched off (or port / TLS changed) the state kept a URL that leads nowhere and the www
+	// panel showed "could not be loaded" instead of the hint that the server is off.
+	describe('lastThumbnailUrl follows the configuration of the built-in HTTP server', () => {
+		const PATH = `/preview/reader_${DEVICE_G2_PRO}_x_1700000000.jpg`;
+		const OLD_URL = `http://192.0.2.9:8095/unifi-access/0/thumbnail/${DEVICE_G2_PRO}.jpg?ts=1700000000000`;
+
+		async function startWithStoredThumbnail(overrides: Record<string, unknown>): Promise<FakeAdapter> {
+			adapter = createAdapterWithFakeCore(MAIN, {
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				verifyTLS: false,
+				wsReconnectDelay: 0.05,
+				listenPort,
+				listenIp: '127.0.0.1',
+				enableWebhooks: true,
+				forwardEvents: [],
+				...overrides,
+			});
+			// what an earlier run with another server configuration left behind
+			await adapter.setState(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`, { val: PATH, ack: true });
+			await adapter.setState(`devices.${DEVICE_G2_PRO}.lastThumbnailAt`, { val: 1_700_000_000_000, ack: true });
+			await adapter.setState(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`, { val: OLD_URL, ack: true });
+			await adapter.fireReady();
+			return adapter;
+		}
+
+		it('clears the URL while the thumbnail server is off - also for a thumbnail that arrives then', async () => {
+			const instance = await startWithStoredThumbnail({ enableThumbnailServer: false });
+			expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`)).to.equal('');
+			expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`)).to.equal(PATH);
+
+			const event = fixtures.webhookEvents.doorUnlock({
+				door: door(DOOR_3855),
+				device: hub(),
+				readerId: DEVICE_G2_PRO,
+			});
+			await mock.deliverWebhook(event);
+			await waitFor(
+				() =>
+					instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`) ===
+					event.data.location.extras.door_thumbnail,
+				{ description: 'new thumbnail path' },
+			);
+			expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`)).to.equal('');
+			expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailAt`)).to.be.a('number');
+		});
+
+		it('rebuilds the URL for the address, port and scheme the server runs with now', async () => {
+			const instance = await startWithStoredThumbnail({ enableThumbnailServer: true });
+			expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`)).to.equal(
+				`http://127.0.0.1:${listenPort}/unifi-access/0/thumbnail/${DEVICE_G2_PRO}.jpg?ts=1700000000000`,
+			);
+			// and the rebuilt URL works
+			mock.addStaticResource(PATH);
+			const response = await httpRequest({
+				url: String(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`)),
+			});
+			expect(response.status).to.equal(200);
+		});
+
+		it('does not write the URL again when it is already right, and leaves devices without thumbnail alone', async () => {
+			const instance = await startWithStoredThumbnail({ enableThumbnailServer: true });
+			const url = instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`);
+			const writesBefore = instance.stateWrites.filter(w => w.id.endsWith('.lastThumbnailUrl')).length;
+			// a reconnect reloads the controller state: nothing to refresh then
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			await clock.tickAsync(200);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'reconnected' });
+			await delay(100);
+			expect(instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`)).to.equal(url);
+			expect(instance.stateWrites.filter(w => w.id.endsWith('.lastThumbnailUrl')).length).to.equal(writesBefore);
+			// the hub never had a thumbnail: no state appears for it
+			expect(instance.states.has(`${NS}.devices.${fixtures.IDS.DEVICE_HUB}.lastThumbnailUrl`)).to.equal(false);
+		});
+
+		it('clears a URL whose stored path is not a valid thumbnail path', async () => {
+			adapter = createAdapterWithFakeCore(MAIN, {
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				verifyTLS: false,
+				wsReconnectDelay: 0.05,
+				listenPort,
+				listenIp: '127.0.0.1',
+				enableWebhooks: true,
+				enableThumbnailServer: true,
+				forwardEvents: [],
+			});
+			await adapter.setState(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`, { val: '/../../users', ack: true });
+			await adapter.setState(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`, { val: OLD_URL, ack: true });
+			await adapter.fireReady();
+			expect(adapter.val(`devices.${DEVICE_G2_PRO}.lastThumbnailUrl`)).to.equal('');
+		});
+	});
+
 	describe('thumbnail paths from events (R-06)', () => {
 		it('stores the documented door_thumbnail path of an event', async () => {
 			const instance = await startConnected({ enableThumbnailServer: true });
@@ -3056,7 +3154,13 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				await waitFor(() => instance.val(`devices.${DEVICE_G2_PRO}.lastThumbnailPath`), {
 					description: 'thumbnail path',
 				});
-				expect(instance.stateWrites.filter(w => w.id.endsWith('lastThumbnailUrl'))).to.deep.equal([]);
+				// no URL is handed out: the state is written, but empty (E-04: no stale URL is left behind)
+				await waitFor(() => instance.stateWrites.some(w => w.id.endsWith('lastThumbnailUrl')), {
+					description: 'thumbnail url state',
+				});
+				expect(
+					instance.stateWrites.filter(w => w.id.endsWith('lastThumbnailUrl')).map(w => w.val),
+				).to.deep.equal(['']);
 			} finally {
 				await new Promise(resolve => blocker.close(resolve));
 			}
