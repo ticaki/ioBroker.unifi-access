@@ -151,30 +151,62 @@ export function fullId(id: string): string {
     return qualifyStateId(id, ADAPTER_NAMESPACE);
 }
 
-export function useIobState(id: string | null): ioBroker.State | null | undefined {
+/** A state value and how it reached the page */
+export interface IobStateArrival {
+    /** `undefined` while it is being read, `null` if the state does not exist */
+    state: ioBroker.State | null | undefined;
+    /**
+     * `true` for a change reported while the page was open; `false` for the value read when the page
+     * subscribed (opening the page, reconnect) - that value may have been written long ago.
+     */
+    live: boolean;
+}
+
+/**
+ * Like {@link useIobState}, but also tells whether the value is a live change or the value that was read.
+ * The first value after (re)subscribing is the read one - `subscribeState` itself answers with the
+ * current value, and so does `getState`; every later value that differs from it is a live change.
+ *
+ * @param id state id with or without namespace
+ */
+export function useIobStateArrival(id: string | null): IobStateArrival {
     const conn = useConnection();
     // Part of the effect dependencies: after a reconnect the value is read again, because changes that
     // happened while the connection was down are never reported.
     const connected = useConnectionStatus();
-    const [entry, setEntry] = useState<{ id: string; state: ioBroker.State | null } | null>(null);
+    const [entry, setEntry] = useState<{ id: string; state: ioBroker.State | null; live: boolean } | null>(null);
     useEffect(() => {
         if (!conn || !id || !connected) {
             return;
         }
         const sid = fullId(id);
         let active = true;
+        let known: { state: ioBroker.State | null } | null = null;
+        const take = (s: ioBroker.State | null, fromRead: boolean): void => {
+            if (!active) {
+                return;
+            }
+            if (known === null) {
+                known = { state: s };
+                setEntry({ id: sid, state: s, live: false });
+                return;
+            }
+            const before = known.state;
+            if (fromRead || (before && s && before.ts === s.ts && before.val === s.val)) {
+                // the read that answers late, or the same value reported a second time
+                return;
+            }
+            known = { state: s };
+            setEntry({ id: sid, state: s, live: true });
+        };
         const handler: ioBroker.StateChangeHandler = (changedId, s) => {
-            if (changedId === sid && active) {
-                setEntry({ id: sid, state: s ?? null });
+            if (changedId === sid) {
+                take(s ?? null, false);
             }
         };
         conn.subscribeState(sid, handler).catch(logError(`Cannot subscribe to ${sid}`));
         conn.getState(sid)
-            .then(s => {
-                if (active) {
-                    setEntry({ id: sid, state: s ?? null });
-                }
-            })
+            .then(s => take(s ?? null, true))
             .catch(logError(`Cannot read ${sid}`));
         return () => {
             active = false;
@@ -182,7 +214,13 @@ export function useIobState(id: string | null): ioBroker.State | null | undefine
         };
     }, [conn, id, connected]);
     // Never hand out the value of the state that was requested before `id` changed
-    return id && entry && entry.id === fullId(id) ? entry.state : undefined;
+    return id && entry && entry.id === fullId(id)
+        ? { state: entry.state, live: entry.live }
+        : { state: undefined, live: false };
+}
+
+export function useIobState(id: string | null): ioBroker.State | null | undefined {
+    return useIobStateArrival(id).state;
 }
 
 export function useIobStates(pattern: string | null): Record<string, ioBroker.State> {

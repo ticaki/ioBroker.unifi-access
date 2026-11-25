@@ -1,8 +1,13 @@
 /**
  * Stand-in for `src/socket.ts` in component tests: `vi.mock('../socket', () => import('../test/socketMock'))`.
  * The states live in memory and can be replaced with `setStates()` while a component is mounted.
+ *
+ * Like the real socket, `useIobStateArrival` reports the value a component finds when it mounts as read
+ * (`live: false`) and every later change as live. `{ read: true }` delivers a value as read again, as
+ * after a reconnect.
  */
-import { useMemo, useSyncExternalStore } from 'react';
+import { useMemo, useRef, useSyncExternalStore } from 'react';
+import type { IobStateArrival } from '../socket';
 import { vi } from 'vitest';
 import { qualifyStateId } from '../stateId';
 
@@ -12,6 +17,8 @@ export const ADAPTER_NAMESPACE = 'unifi-access.0';
 let states: Record<string, ioBroker.State> = {};
 /** ids whose value has not been read yet (useIobState answers undefined, like before the first getState) */
 let loading = new Set<string>();
+/** ids whose current value was delivered as read (reconnect), see `{ read: true }` */
+let readIds = new Set<string>();
 const listeners = new Set<() => void>();
 
 export function fullId(id: string): string {
@@ -29,6 +36,7 @@ function makeState(val: ioBroker.StateValue, ts: number): ioBroker.State {
  * @param options.ts time stamp of the states as ioBroker writes it (its own clock); default: `Date.now()`
  * @param options.perId further states with their own time stamp, e.g. `system.adapter.unifi-access.0.alive`
  * @param options.loading ids that are still being read: their value is `undefined` until the next setStates
+ * @param options.read deliver the values as read (reconnect), not as live changes
  */
 export function setStates(
     values: Record<string, ioBroker.StateValue>,
@@ -36,6 +44,7 @@ export function setStates(
         ts?: number;
         perId?: Record<string, { val: ioBroker.StateValue; ts: number }>;
         loading?: string[];
+        read?: boolean;
     } = {},
 ): void {
     const ts = options.ts ?? Date.now();
@@ -44,6 +53,7 @@ export function setStates(
     for (const [id, state] of Object.entries(options.perId ?? {})) {
         states[fullId(id)] = makeState(state.val, state.ts);
     }
+    readIds = options.read ? new Set(Object.keys(states)) : new Set();
     notify();
 }
 
@@ -53,9 +63,20 @@ export function setStates(
  * @param id state id (with or without namespace)
  * @param val new value
  * @param ts time stamp as ioBroker writes it; default: `Date.now()`
+ * @param options.read deliver the value as read (reconnect), not as a live change
  */
-export function updateState(id: string, val: ioBroker.StateValue, ts = Date.now()): void {
+export function updateState(
+    id: string,
+    val: ioBroker.StateValue,
+    ts = Date.now(),
+    options: { read?: boolean } = {},
+): void {
     loading.delete(fullId(id));
+    if (options.read) {
+        readIds.add(fullId(id));
+    } else {
+        readIds.delete(fullId(id));
+    }
     states = { ...states, [fullId(id)]: makeState(val, ts) };
     notify();
 }
@@ -81,6 +102,17 @@ export function useIobState(id: string | null): ioBroker.State | null | undefine
         return undefined;
     }
     return all[fullId(id)] ?? null;
+}
+
+export function useIobStateArrival(id: string | null): IobStateArrival {
+    const state = useIobState(id);
+    // the first value this component saw is the read one
+    const first = useRef<{ id: string | null; state: ioBroker.State | null } | null>(null);
+    if (state !== undefined && (first.current === null || first.current.id !== id)) {
+        first.current = { id, state };
+    }
+    const live = state !== undefined && first.current?.state !== state && !(id !== null && readIds.has(fullId(id)));
+    return { state, live };
 }
 
 export function useIobStates(pattern: string | null): Record<string, ioBroker.State> {

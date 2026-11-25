@@ -1,6 +1,6 @@
 import { Box, ButtonBase, Card, CardContent, List, ListItem, ListItemText, Stack, Typography } from '@mui/material';
-import { type JSX, useEffect, useMemo, useState } from 'react';
-import { ADAPTER_NAMESPACE, useIobState } from '../socket';
+import { type JSX, useEffect, useMemo, useRef, useState } from 'react';
+import { ADAPTER_NAMESPACE, useIobState, useIobStateArrival } from '../socket';
 import { useSettings } from '../settings';
 import { EventMediaModal } from './EventMediaModal';
 
@@ -124,6 +124,11 @@ export function timeEvents(events: EventEntry[], stateTs: unknown, receivedAt: n
     }));
 }
 
+/** Identifies an event across lists - the snapshot URL that is added later does not change it */
+function windowKey(event: EventEntry): string {
+    return JSON.stringify([event.ts, event.type, event.doorName ?? '', event.deviceName ?? '', event.userName ?? '']);
+}
+
 function isSnapshotPending({ event, startedAt }: TimedEvent, now: number): boolean {
     return PROTECT_SNAPSHOT_EVENTS.has(event.type) && !event.protectSnapshotUrl && now - startedAt < SNAPSHOT_WAIT_MS;
 }
@@ -166,7 +171,9 @@ const SUBTYPE_LABELS: Record<string, string> = {
 };
 
 export function EventLogCard(): JSX.Element {
-    const last = useIobState('events.last');
+    // Only a list that arrives as a change while the page is open can hold an event whose snapshot is
+    // still on its way. The list read when the page opens or reconnects starts no countdown (R2F-01).
+    const { state: last, live: liveList } = useIobStateArrival('events.last');
     // renewed by the running adapter every 15 s: tells how old a list is that was written long ago
     const alive = useIobState(`system.adapter.${ADAPTER_NAMESPACE}.alive`);
     const aliveKnown = alive !== undefined && alive !== null;
@@ -181,12 +188,25 @@ export function EventLogCard(): JSX.Element {
 
     // a new value of the state (new event, snapshot URL added) is a new arrival
     const receivedAt = useMemo(() => browserClock(), [last]);
-    // Placed again only when the alive time stamp becomes known (both are read at the same time on load),
-    // not on each of its 15-second renewals: those would shorten windows that are already running.
-    const timed = useMemo<TimedEvent[]>(
-        () => timeEvents(parseEvents(last?.val), last?.ts, receivedAt, alive?.ts),
-        [last, receivedAt, aliveKnown],
-    );
+    // Not placed again on each 15-second renewal of the alive state: that would shorten running windows.
+    // Waiting window of each event, kept across lists: an event keeps the window it got when it first
+    // showed up - a list written again (new event in front, snapshot URL added) neither restarts nor
+    // starts it, so an event read as "Not available" stays so.
+    const windows = useRef(new Map<string, number>());
+    const timed = useMemo<TimedEvent[]>(() => {
+        const fresh = liveList
+            ? timeEvents(parseEvents(last?.val), last?.ts, receivedAt, alive?.ts)
+            : parseEvents(last?.val).map(event => ({ event, startedAt: Number.NEGATIVE_INFINITY }));
+        const next = new Map<string, number>();
+        const placed = fresh.map(({ event, startedAt }) => {
+            const key = windowKey(event);
+            const kept = next.get(key) ?? windows.current.get(key) ?? startedAt;
+            next.set(key, kept);
+            return { event, startedAt: kept };
+        });
+        windows.current = next;
+        return placed;
+    }, [last, receivedAt, aliveKnown, liveList]);
 
     useEffect(() => {
         // Tick while any access.door.unlock event is still in its waiting window.

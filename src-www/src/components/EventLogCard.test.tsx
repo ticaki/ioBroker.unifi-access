@@ -36,6 +36,25 @@ function tickers(): { started: number; running: number } {
     return { started: ids.length, running: ids.filter(id => !cleared.has(id)).length };
 }
 
+/**
+ * Mount the card and let the list arrive afterwards, as a change while the page is open: only such a
+ * list can start a countdown (R2F-01). The list read when the card mounts is an empty one.
+ *
+ * @param values states as for `setStates`
+ * @param options options as for `setStates`
+ */
+function arrive(
+    values: Record<string, ioBroker.StateValue>,
+    options: Parameters<typeof setStates>[1] = {},
+): ReturnType<typeof render> {
+    setStates({ ...values, 'events.last': '[]' }, options);
+    const result = render(<EventLogCard />);
+    act(() => {
+        setStates(values, options);
+    });
+    return result;
+}
+
 beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
@@ -164,11 +183,10 @@ describe('EventLogCard', () => {
     });
 
     it('counts down while the snapshot is awaited, then gives up and stops ticking', () => {
-        setStates({
+        arrive({
             'info.protectConnected': true,
             'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock', doorName: 'Front door' }]),
         });
-        render(<EventLogCard />);
 
         expect(screen.getByText('2')).toBeTruthy();
         expect(tickers()).toEqual({ started: 1, running: 1 });
@@ -200,14 +218,13 @@ describe('EventLogCard', () => {
     it('counts down normally on a browser whose clock is minutes behind', () => {
         // wall tablet 5 minutes late; ioBroker wrote the list at NOW, the event happened 1 s before
         vi.setSystemTime(NOW - 300_000);
-        setStates(
+        arrive(
             {
                 'info.protectConnected': true,
                 'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock' }]),
             },
             { ts: NOW },
         );
-        render(<EventLogCard />);
         expect(screen.getByText('2')).toBeTruthy();
 
         act(() => {
@@ -220,14 +237,13 @@ describe('EventLogCard', () => {
 
     it('counts down normally on a browser whose clock is ahead', () => {
         vi.setSystemTime(NOW + 3_600_000);
-        setStates(
+        arrive(
             {
                 'info.protectConnected': true,
                 'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock' }]),
             },
             { ts: NOW },
         );
-        render(<EventLogCard />);
 
         expect(screen.getByText('2')).toBeTruthy();
         expect(screen.queryByText('Not available')).toBeNull();
@@ -235,11 +251,10 @@ describe('EventLogCard', () => {
 
     it('ends the waiting window of an event "from the future" 4 s after it arrived', () => {
         // controller clock one minute ahead of ioBroker
-        setStates({
+        arrive({
             'info.protectConnected': true,
             'events.last': JSON.stringify([{ ts: NOW + 60_000, type: 'access.door.unlock' }]),
         });
-        render(<EventLogCard />);
         expect(screen.getByText('3')).toBeTruthy();
 
         act(() => {
@@ -251,8 +266,7 @@ describe('EventLogCard', () => {
 
     it('keeps the window of an event when the list is written again (new event) instead of restarting it', () => {
         const first = { ts: NOW - 1000, type: 'access.door.unlock', doorName: 'Front door' };
-        setStates({ 'info.protectConnected': true, 'events.last': JSON.stringify([first]) });
-        render(<EventLogCard />);
+        arrive({ 'info.protectConnected': true, 'events.last': JSON.stringify([first]) });
         expect(screen.getByText('2')).toBeTruthy();
 
         act(() => {
@@ -271,11 +285,10 @@ describe('EventLogCard', () => {
     });
 
     it('stops ticking when it is unmounted during the countdown', () => {
-        setStates({
+        const { unmount } = arrive({
             'info.protectConnected': true,
             'events.last': JSON.stringify([{ ts: NOW - 500, type: 'access.door.unlock' }]),
         });
-        const { unmount } = render(<EventLogCard />);
         expect(tickers()).toEqual({ started: 1, running: 1 });
 
         unmount();
@@ -284,8 +297,7 @@ describe('EventLogCard', () => {
 
     it('shows the snapshot, replaces the placeholder when it arrives and opens the media dialog', () => {
         const event = { ts: NOW - 1000, type: 'access.door.unlock', doorName: 'Front door' };
-        setStates({ 'info.protectConnected': true, 'events.last': JSON.stringify([event]) });
-        render(<EventLogCard />);
+        arrive({ 'info.protectConnected': true, 'events.last': JSON.stringify([event]) });
         expect(screen.getByText('2')).toBeTruthy();
 
         act(() => {
@@ -428,13 +440,66 @@ describe('EventLogCard', () => {
             expect(screen.getByText('2')).toBeTruthy();
         });
 
+        it('page opened 10 s after a door opening, alive renewed 12 s ago: no countdown (R2F-01)', () => {
+            const T = NOW - 10_000;
+            setStates(
+                { 'info.protectConnected': true, 'events.last': JSON.stringify([{ ts: T, type: 'access.door.unlock' }]) },
+                { ts: T, perId: { 'system.adapter.unifi-access.0.alive': { val: true, ts: NOW - 12_000 } } },
+            );
+            render(<EventLogCard />);
+            expect(screen.queryByText(/^[123]$/)).toBeNull();
+            expect(screen.getByText('Not available')).toBeTruthy();
+            expect(tickers().started).toBe(0);
+        });
+
+        it('reconnect after 10 minutes: the list read again and a fresh alive afterwards start no countdown (R2F-01)', () => {
+            const ALIVE = 'system.adapter.unifi-access.0.alive';
+            const list = JSON.stringify([{ ts: NOW, type: 'access.door.unlock' }]);
+            arrive({ 'info.protectConnected': true, 'events.last': list }, { ts: NOW, perId: { [ALIVE]: { val: true, ts: NOW - 5000 } } });
+            expect(screen.getByText('3')).toBeTruthy();
+            act(() => {
+                vi.advanceTimersByTime(600_000);
+            });
+            expect(screen.getByText('Not available')).toBeTruthy();
+            // after the reconnect both states are read again, the list first (each answer is a render of its own)
+            act(() => {
+                updateState('events.last', list, NOW, { read: true });
+            });
+            act(() => {
+                updateState(ALIVE, true, NOW + 600_000, { read: true });
+            });
+            expect(screen.queryByText(/^[123]$/)).toBeNull();
+            expect(screen.getByText('Not available')).toBeTruthy();
+        });
+
+        it('the list read when the page opens never counts down, even for an event of a second ago (R2F-01)', () => {
+            setStates({
+                'info.protectConnected': true,
+                'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock' }]),
+            });
+            render(<EventLogCard />);
+            expect(screen.queryByText(/^[123]$/)).toBeNull();
+            expect(screen.getByText('Not available')).toBeTruthy();
+            // the next change of the list does count down for a new event
+            act(() => {
+                setStates({
+                    'info.protectConnected': true,
+                    'events.last': JSON.stringify([
+                        { ts: NOW, type: 'access.door.unlock', doorName: 'Back door' },
+                        { ts: NOW - 1000, type: 'access.door.unlock' },
+                    ]),
+                });
+            });
+            expect(screen.getByText('3')).toBeTruthy();
+            expect(screen.getAllByText('Not available')).toHaveLength(1);
+        });
+
         it('the 15-second renewal of the alive state does not shorten a running countdown', () => {
             const events = JSON.stringify([{ ts: NOW - 500, type: 'access.door.unlock' }]);
             const alive = (ts: number): Record<string, { val: boolean; ts: number }> => ({
                 'system.adapter.unifi-access.0.alive': { val: true, ts },
             });
-            setStates({ 'info.protectConnected': true, 'events.last': events }, { perId: alive(NOW - 14_000) });
-            render(<EventLogCard />);
+            arrive({ 'info.protectConnected': true, 'events.last': events }, { perId: alive(NOW - 14_000) });
             expect(screen.getByText('3')).toBeTruthy();
             act(() => {
                 vi.advanceTimersByTime(1000);

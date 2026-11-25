@@ -245,6 +245,50 @@ describe('useIobState', () => {
     });
 });
 
+describe('useIobStateArrival (R2F-01)', () => {
+    const ID = 'unifi-access.0.events.last';
+
+    it('the value read on subscribing is not live, a later change is; after a reconnect it is read again', async () => {
+        const socket = await loadSocket();
+        const { result } = renderHook(() => socket.useIobStateArrival('events.last'));
+        await waitFor(() => expect(FakeConnection.last).not.toBeNull());
+        const conn = FakeConnection.last as FakeConnection;
+        conn.values[ID] = '[1]';
+        await connect();
+        await waitFor(() => expect(result.current.state?.val).toBe('[1]'));
+        expect(result.current.live).toBe(false);
+
+        // the real socket-client also answers the subscription with the current value: still the read one
+        act(() => conn.emit(ID, '[1]'));
+        expect(result.current.live).toBe(false);
+
+        act(() => conn.emit(ID, '[2,1]'));
+        expect(result.current).toMatchObject({ state: { val: '[2,1]' }, live: true });
+
+        act(() => conn.setConnected(false));
+        conn.values[ID] = '[3,2,1]';
+        act(() => conn.setConnected(true));
+        await waitFor(() => expect(result.current.state?.val).toBe('[3,2,1]'));
+        expect(result.current.live).toBe(false);
+    });
+
+    it('a read that answers after a change does not replace the change', async () => {
+        const socket = await loadSocket();
+        let answerRead: (s: ioBroker.State | null) => void = () => undefined;
+        const { result } = renderHook(() => socket.useIobStateArrival('events.last'));
+        await waitFor(() => expect(FakeConnection.last).not.toBeNull());
+        const conn = FakeConnection.last as FakeConnection;
+        conn.getState.mockImplementationOnce(() => new Promise(resolve => (answerRead = resolve)));
+        conn.values[ID] = '[1]';
+        await connect();
+        await waitFor(() => expect(conn.getState).toHaveBeenCalled());
+        act(() => conn.emit(ID, '[1]'));
+        act(() => conn.emit(ID, '[2,1]'));
+        await act(async () => answerRead({ val: '[1]', ack: true, ts: 1, lc: 1, from: '' }));
+        expect(result.current).toMatchObject({ state: { val: '[2,1]' }, live: true });
+    });
+});
+
 describe('useIobStates', () => {
     it('collects the states of a pattern and follows changes and deletions', async () => {
         const socket = await loadSocket();
