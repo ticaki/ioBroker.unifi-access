@@ -63,3 +63,21 @@ export const setIobState = vi.fn<(id: string, val: ioBroker.StateValue) => Promi
 export function useConnectionStatus(): boolean {
     return true;
 }
+
+let socketLoadError: string | null = null;
+
+/**
+ * Pretend that index.html could not load socket.io.js
+ *
+ * @param tried URLs it tried, null for "loaded"
+ */
+export function setSocketLoadError(tried: string | null): void {
+    socketLoadError = tried;
+    for (const listener of listeners) {
+        listener();
+    }
+}
+
+export function useSocketLoadError(): string | null {
+    return useSyncExternalStore(subscribe, () => socketLoadError);
+}
