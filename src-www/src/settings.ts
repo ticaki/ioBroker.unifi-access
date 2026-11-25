@@ -86,6 +86,10 @@ export function useSettingsProvider(): SettingsCtx {
     const loaded = useRef(false);
     /** Changes made before the stored settings were read: merged into them, not written over them */
     const pending = useRef<{ patch: Partial<AppSettings>; persist: boolean } | null>(null);
+    /** Values written and not echoed yet, oldest first */
+    const inFlight = useRef<string[]>([]);
+    /** Shown but not stored yet (a slider that is being dragged) */
+    const draft = useRef<Partial<AppSettings>>({});
 
     const apply = useCallback((next: AppSettings) => {
         latest.current = next;
@@ -93,7 +97,11 @@ export function useSettingsProvider(): SettingsCtx {
     }, []);
 
     const store = useCallback((next: AppSettings) => {
-        setIobState(SETTINGS_ID, JSON.stringify(next)).catch((err: unknown) => {
+        const json = JSON.stringify(next);
+        inFlight.current.push(json);
+        draft.current = {};
+        setIobState(SETTINGS_ID, json).catch((err: unknown) => {
+            inFlight.current = inFlight.current.filter(value => value !== json);
             // eslint-disable-next-line no-console
             console.error('Cannot store the UI settings:', err);
         });
@@ -104,6 +112,15 @@ export function useSettingsProvider(): SettingsCtx {
             return;
         }
         loaded.current = true;
+        const own = typeof raw?.val === 'string' ? inFlight.current.indexOf(raw.val) : -1;
+        if (own >= 0) {
+            // the echo of an own write: what is on screen already contains it. While later writes are still
+            // on their way, it is older than the screen - taking it over would flip those changes back.
+            inFlight.current = inFlight.current.slice(own + 1);
+            if (inFlight.current.length > 0) {
+                return;
+            }
+        }
         const stored = typeof raw?.val === 'string' && raw.val ? parseSettings(raw.val) : undefined;
         const waiting = pending.current;
         pending.current = null;
@@ -114,7 +131,8 @@ export function useSettingsProvider(): SettingsCtx {
                 store(next);
             }
         } else if (stored) {
-            apply(stored);
+            // a slider that is being dragged keeps its position
+            apply({ ...stored, ...draft.current });
         }
     }, [raw, apply, store]);
 
@@ -122,6 +140,9 @@ export function useSettingsProvider(): SettingsCtx {
         (patch: Partial<AppSettings>, persist = true) => {
             const next = { ...latest.current, ...patch };
             apply(next);
+            if (!persist) {
+                draft.current = { ...draft.current, ...patch };
+            }
             if (!loaded.current) {
                 // Not read yet (slow or missing connection): writing now would replace every stored
                 // setting with the defaults. Keep the change and write it merged once the value is there.
