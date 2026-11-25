@@ -35,6 +35,8 @@ class ProtectStub {
 		/** @type {Record<string, Record<string, unknown>>} event id → event metadata */
 		this.events = {};
 		this.sessions = 0;
+		/** sessions with a number up to this one are no longer accepted (see expireSessions) */
+		this.expiredUpTo = 0;
 		this.port = 0;
 		/** @type {import('node:https').Server | null} */
 		this.server = null;
@@ -86,6 +88,11 @@ class ProtectStub {
 		this.loginFault = { status, times };
 	}
 
+	/** Invalidate every session handed out so far (the console was restarted, the session timed out). */
+	expireSessions() {
+		this.expiredUpTo = this.sessions;
+	}
+
 	handle(req, res, body) {
 		const url = req.url ?? '/';
 		const record = { method: req.method ?? 'GET', url, headers: req.headers, body, status: 0 };
@@ -123,7 +130,8 @@ class ProtectStub {
 			send(200, { ok: true }, { 'set-cookie': [`TOKEN=session-${this.sessions}; Path=/; HttpOnly`], 'x-updated-csrf-token': 'csrf-1' });
 			return;
 		}
-		if (!/TOKEN=session-\d+/.test(req.headers.cookie ?? '')) {
+		const session = /TOKEN=session-(\d+)/.exec(req.headers.cookie ?? '');
+		if (!session || Number(session[1]) <= this.expiredUpTo) {
 			send(401, { error: 'unauthorized' });
 			return;
 		}

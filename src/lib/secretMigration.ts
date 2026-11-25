@@ -15,8 +15,8 @@
 const AES_PREFIX = '$/aes-192-cbc:';
 
 export type StoredSecretState =
-	/** Nothing stored. */
-	| { kind: 'empty'; password: '' }
+	/** Nothing stored: whatever the configuration holds is used as it is. */
+	| { kind: 'empty'; password: string }
 	/** The instance object does not list the attribute as encrypted: the stored value is the password. */
 	| { kind: 'unencrypted-attribute'; password: string }
 	/** Stored encrypted: use what js-controller decrypted. */
@@ -53,7 +53,7 @@ export function classifyStoredSecret(input: StoredSecretInput): StoredSecretStat
 	const { raw } = input;
 	const decrypted = typeof input.decrypted === 'string' ? input.decrypted : '';
 	if (typeof raw !== 'string' || raw === '') {
-		return { kind: 'empty', password: '' };
+		return { kind: 'empty', password: decrypted };
 	}
 	if (!input.isEncryptedAttribute) {
 		return { kind: 'unencrypted-attribute', password: raw };

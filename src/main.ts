@@ -6,7 +6,7 @@
 
 import * as utils from '@iobroker/adapter-core';
 
-import { classifyError, UnifiHttp } from './lib/unifiHttp';
+import { classifyError, UnifiApiError, UnifiHttp } from './lib/unifiHttp';
 import { classifyProtectError, ProtectHttp, type ProtectClipStream } from './lib/protectHttp';
 import { classifyStoredSecret } from './lib/secretMigration';
 import { tlsCertificateErrorCode } from './lib/tlsErrors';
@@ -140,6 +140,7 @@ class UnifiAccess extends utils.Adapter {
 	private wsNeedsResync = false;
 	private wsErrorLogged = false;
 	private protectRetryTimer: ioBroker.Timeout | undefined;
+	private protectLoginRunning = false;
 
 	private devices: Map<string, DeviceCacheEntry> = new Map();
 	private userNameCache: Map<string, string> = new Map();
@@ -172,6 +173,14 @@ class UnifiAccess extends utils.Adapter {
 	private lockRuleSupported = true;
 	/** The doorbell call currently published in doorbell.active*. */
 	private activeDoorbellCall: { requestId?: string; fromWebhook: boolean } | null = null;
+	/** Serialises emergency commands (read-modify-write of two flags). */
+	private emergencyQueue: Promise<void> = Promise.resolve();
+	/** One check per door at the end of a timed unlock — survives the short checks after later events. */
+	private readonly doorRuleEndTimers = new Map<string, ioBroker.Timeout>();
+	private webhookRegistrationRetryTimer: ioBroker.Timeout | undefined;
+	private webhookRegistrationFailures = 0;
+	/** First characters of the ioBroker installation UUID — part of the webhook endpoint name. */
+	private installationId = '';
 	/** Device ids from events that are not in the controller's device list (already looked up once). */
 	private readonly unknownDeviceIds = new Set<string>();
 	private systemLogFailureLogged = false;
@@ -201,6 +210,10 @@ class UnifiAccess extends utils.Adapter {
 		await this.setState('info.connection', false, true);
 		await this.removeObsoleteObjects();
 		await this.library.ensureBaseObjects();
+		// what an earlier run left behind is not true for this one until proven
+		await this.setState('info.webhookRegistered', { val: false, ack: true });
+		await this.setState('info.protectConnected', { val: false, ack: true });
+		await this.loadInstallationId();
 
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
@@ -222,8 +235,6 @@ class UnifiAccess extends utils.Adapter {
 
 		this.http = new UnifiHttp({ host, port, token, verifyTLS, caCert, debugLog: (m: string) => this.log.debug(m) });
 
-		await this.initProtect(host, caCert);
-
 		this.subscribeStates('doors.*.unlock');
 		this.subscribeStates('doors.*.unlock_duration');
 		this.subscribeStates('doors.*.lock_rule');
@@ -242,6 +253,20 @@ class UnifiAccess extends utils.Adapter {
 		// at the end of a successful bootstrap and events may arrive right away.
 		await this.startSharedHttpServer();
 		await this.bootstrapAndConnect();
+		// Last: the Protect login may take long when the console does not answer; door control and
+		// events must not wait for it.
+		await this.initProtect(host, caCert);
+	}
+
+	/** Read the first characters of the installation UUID (part of the webhook endpoint name). */
+	private async loadInstallationId(): Promise<void> {
+		try {
+			const meta = await this.getForeignObjectAsync('system.meta.uuid');
+			const uuid = asString((meta?.native as Record<string, unknown> | undefined)?.uuid);
+			this.installationId = uuid ? uuid.replace(/[^A-Za-z0-9]/g, '').slice(0, 8) : '';
+		} catch {
+			this.installationId = '';
+		}
 	}
 
 	/**
@@ -309,21 +334,29 @@ class UnifiAccess extends utils.Adapter {
 			}
 		} else if (stored.kind === 'ambiguous') {
 			this.protectPasswordUncertain = true;
+		} else if (stored.kind === 'encrypted') {
+			// Without the AES marker the value was classified by heuristics (legacy system secret): a
+			// plain-text password with non-ASCII characters looks the same as an encrypted one.
+			const raw = (instance.native as Record<string, unknown> | undefined)?.protectPassword;
+			this.protectPasswordUncertain = typeof raw === 'string' && !raw.startsWith('$/aes-192-cbc:');
 		}
 		return stored.password;
 	}
 
 	private async tryProtectLogin(attempt: number): Promise<void> {
 		const protect = this.protectHttp;
-		if (!protect) {
+		if (!protect || this.protectLoginRunning) {
 			return;
 		}
+		this.protectLoginRunning = true;
 		try {
 			await protect.login();
 			this.log.info(attempt === 1 ? 'UniFi Protect API client initialized' : 'Protect login retry succeeded.');
+			this.protectLoginRunning = false;
 			await this.setState('info.protectConnected', { val: true, ack: true });
 			return;
 		} catch (err) {
+			this.protectLoginRunning = false;
 			const kind = classifyProtectError(err);
 			if (kind === 'tls') {
 				// A configuration problem: retrying cannot help, so say exactly once what to do.
@@ -566,7 +599,10 @@ class UnifiAccess extends utils.Adapter {
 	 * instance 0) get different names and never clean up each other's endpoint.
 	 */
 	private webhookEndpointName(): string {
-		return `ioBroker.unifi-access (${this.namespace}@${this.host || 'iobroker'})`;
+		// host name plus the start of the installation UUID: two installations with the same host name
+		// and instance number (e.g. two containers called "iobroker") still get different names
+		const installation = this.installationId ? `#${this.installationId}` : '';
+		return `ioBroker.unifi-access (${this.namespace}@${this.host || 'iobroker'}${installation})`;
 	}
 
 	private registrationLogger(): { debug: (m: string) => void; info: (m: string) => void; warn: (m: string) => void } {
@@ -628,6 +664,7 @@ class UnifiAccess extends utils.Adapter {
 			if (result.id !== storedId || result.secret !== storedSecret) {
 				await this.persistWebhookCredentials(result.id, result.secret);
 			}
+			this.webhookRegistrationFailures = 0;
 		} catch (err) {
 			const text = `Webhook registration failed: ${errorText(err)}`;
 			if (text !== this.webhookRegistrationFailureLog) {
@@ -637,9 +674,26 @@ class UnifiAccess extends utils.Adapter {
 				this.log.debug(text);
 			}
 			await this.setState('info.webhookRegistered', { val: false, ack: true });
+			this.scheduleWebhookRegistrationRetry();
 		} finally {
 			this.webhookRegistrationRunning = false;
 		}
+	}
+
+	/**
+	 * Try the webhook registration again later (60 s, 2 min, 4 min, then every 5 min). Without this a
+	 * single failed request would leave the webhooks off until the next reconnect or restart.
+	 */
+	private scheduleWebhookRegistrationRetry(): void {
+		if (this.unloading || this.webhookRegistrationRetryTimer) {
+			return;
+		}
+		this.webhookRegistrationFailures += 1;
+		const delayMs = Math.min(60_000 * 2 ** Math.min(this.webhookRegistrationFailures - 1, 6), 5 * 60_000);
+		this.webhookRegistrationRetryTimer = this.setTimeout(() => {
+			this.webhookRegistrationRetryTimer = undefined;
+			this.runDetached('webhook registration', this.ensureWebhookRegistration());
+		}, delayMs);
 	}
 
 	/**
@@ -1207,6 +1261,36 @@ class UnifiAccess extends utils.Adapter {
 		}
 	}
 
+	/**
+	 * Check the door once more when a timed unlock runs out. Kept separately from the short checks:
+	 * an unlock event for the same door in the meantime (which schedules its own short check) must not
+	 * cancel it — without webhooks nothing else would report that the door locked again.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param delayMs Time until the rule ends
+	 */
+	private scheduleRuleEndCheck(doorId: string, delayMs: number): void {
+		this.cancelRuleEndCheck(doorId);
+		if (this.unloading || !this.http) {
+			return;
+		}
+		const timer = this.setTimeout(() => {
+			this.doorRuleEndTimers.delete(doorId);
+			this.runDetached('door status check', this.refreshDoor(doorId));
+		}, delayMs);
+		if (timer) {
+			this.doorRuleEndTimers.set(doorId, timer);
+		}
+	}
+
+	private cancelRuleEndCheck(doorId: string): void {
+		const timer = this.doorRuleEndTimers.get(doorId);
+		if (timer) {
+			this.clearTimeout(timer);
+			this.doorRuleEndTimers.delete(doorId);
+		}
+	}
+
 	private cancelDoorChecks(doorId: string): void {
 		for (const timer of this.doorCheckTimers.get(doorId) ?? []) {
 			this.clearTimeout(timer);
@@ -1288,7 +1372,11 @@ class UnifiAccess extends utils.Adapter {
 			await this.library.setDoorLockRule(doorId, await this.http.getDoorLockRule(doorId));
 		} catch (err) {
 			const status = (err as { response?: { status?: number } }).response?.status;
-			if (status !== undefined && status >= 400 && status < 500 && ![401, 403, 429].includes(status)) {
+			const clientError =
+				status !== undefined && status >= 400 && status < 500 && ![401, 403, 429].includes(status);
+			// an API error code delivered with HTTP 200 (not an authentication problem) means the same
+			const apiRefusal = err instanceof UnifiApiError && classifyError(err) !== 'unauthorized';
+			if (clientError || apiRefusal) {
 				this.lockRuleSupported = false;
 				this.log.debug(
 					`Lock rule status not available (requires UniFi Access >= 1.24.6): ${errorText(err)} — not asking again until the next reconnect.`,
@@ -1604,12 +1692,32 @@ class UnifiAccess extends utils.Adapter {
 			await this.refreshEmergencyStatus();
 			return;
 		}
+		// Read-modify-write of two flags: commands are processed strictly one after the other. Two writes
+		// in quick succession ("evacuation off", "lockdown off") would otherwise both read the old status
+		// and the second PUT would switch the first flag back on.
+		const run = this.emergencyQueue.then(() => this.applyEmergencyChange(field, val));
+		this.emergencyQueue = run.catch(() => undefined);
+		await run;
+	}
+
+	private async applyEmergencyChange(field: 'lockdown' | 'evacuation', val: boolean): Promise<void> {
+		if (!this.http || this.unloading) {
+			return;
+		}
+		const localId = `doors.emergency.${field}`;
 		try {
 			// The request carries both flags. The other one is read from the controller right now: the
 			// local state may be stale or hold a command that never went through (ack=false), and
 			// sending that along could switch evacuation/lockdown on by accident.
-			const current = await this.http.getEmergencyStatus();
-			const payload = { lockdown: current.lockdown === true, evacuation: current.evacuation === true };
+			const current = await this.http.readEmergencyStatus();
+			if (!current) {
+				// never send a guessed value for the other flag
+				this.log.warn(
+					'Set emergency status failed: the controller did not report the current emergency status.',
+				);
+				return;
+			}
+			const payload = { lockdown: current.lockdown, evacuation: current.evacuation };
 			payload[field] = val;
 			await this.http.setEmergencyStatus(payload);
 			await this.setState(localId, { val, ack: true });
@@ -1656,10 +1764,8 @@ class UnifiAccess extends utils.Adapter {
 			this.log.info(`Door ${doorId} unlocked for ${minutes} min via lock_rule.`);
 			await this.library.setDoorLocked(doorId, false);
 			// verify shortly, and look again when the time is up
-			this.scheduleDoorChecks(doorId, [
-				DOOR_CHECK_AFTER_COMMAND_MS,
-				minutes * 60_000 + DOOR_CHECK_AFTER_COMMAND_MS,
-			]);
+			this.scheduleDoorChecks(doorId, [DOOR_CHECK_AFTER_COMMAND_MS]);
+			this.scheduleRuleEndCheck(doorId, minutes * 60_000 + DOOR_CHECK_AFTER_COMMAND_MS);
 		} else {
 			await this.http.unlockDoor(doorId, this.unlockActor());
 			this.log.info(`Door ${doorId} unlocked (pulse).`);
@@ -1726,7 +1832,8 @@ class UnifiAccess extends utils.Adapter {
 			}
 			// `reset` only clears a temporary rule and `lock_early` ends an unlock schedule early: what the
 			// door does then depends on its schedule, so nothing is assumed. In every case the status is
-			// read back, which also replaces checks still pending from an earlier timed unlock.
+			// read back; the new rule replaces an earlier timed unlock, so its end-of-time check is dropped.
+			this.cancelRuleEndCheck(safeDoorId);
 			this.scheduleDoorChecks(safeDoorId, [DOOR_CHECK_AFTER_COMMAND_MS]);
 		} catch (err) {
 			this.log.warn(`Set lock_rule for door ${safeDoorId} failed: ${errorText(err)}`);
@@ -1910,7 +2017,33 @@ class UnifiAccess extends utils.Adapter {
 			defer(() => this.persistWebhookCredentials(result.id, result.secret));
 			return { ok: true, id: result.id };
 		} catch (err) {
+			// The old endpoint may already be deleted: do not keep claiming it is registered, and make
+			// up for it with the regular registration.
+			this.webhookRegistered = false;
+			await this.setState('info.webhookRegistered', { val: false, ack: true });
+			defer(() => {
+				this.scheduleWebhookRegistrationRetry();
+				return Promise.resolve();
+			});
 			return { ok: false, error: errorText(err) };
+		}
+	}
+
+	/**
+	 * The Protect client lost its session (a re-login after 401 failed, e.g. rate limit or timeout) and
+	 * no retry is pending: start the login retry, otherwise the integration would stay off until restart.
+	 */
+	private recoverProtectSession(): void {
+		if (
+			this.config.enableProtect === true &&
+			this.protectHttp &&
+			!this.protectHttp.isLoggedIn() &&
+			!this.protectRetryTimer &&
+			!this.protectLoginRunning &&
+			!this.unloading
+		) {
+			this.log.debug('[protect] session lost — logging in again');
+			this.runDetached('protect login', this.tryProtectLogin(2));
 		}
 	}
 
@@ -1928,6 +2061,7 @@ class UnifiAccess extends utils.Adapter {
 	 */
 	private logSystemLogs(ts: number): void {
 		if (!this.http || !this.protectReady()) {
+			this.recoverProtectSession();
 			return;
 		}
 		const http = this.http;
@@ -2098,6 +2232,13 @@ class UnifiAccess extends utils.Adapter {
 			}
 			for (const doorId of [...this.doorCheckTimers.keys()]) {
 				this.cancelDoorChecks(doorId);
+			}
+			for (const doorId of [...this.doorRuleEndTimers.keys()]) {
+				this.cancelRuleEndCheck(doorId);
+			}
+			if (this.webhookRegistrationRetryTimer) {
+				this.clearTimeout(this.webhookRegistrationRetryTimer);
+				this.webhookRegistrationRetryTimer = undefined;
 			}
 			for (const timer of this.unlockPendingTimers.values()) {
 				this.clearTimeout(timer);

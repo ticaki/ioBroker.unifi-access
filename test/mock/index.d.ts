@@ -356,6 +356,8 @@ export class ProtectStub {
 
 	start(): Promise<this>;
 	stop(): Promise<void>;
+	/** Invalidate every session handed out so far */
+	expireSessions(): void;
 	/** Answer the next `times` login attempts (default 1) with the given HTTP status */
 	failLogins(status: number, times?: number): void;
 }

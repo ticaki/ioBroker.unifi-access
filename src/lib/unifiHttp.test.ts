@@ -378,6 +378,22 @@ describe('UnifiHttp (against the mock controller)', () => {
 			expect(await http.getEmergencyStatus()).to.deep.equal({ lockdown: false, evacuation: false });
 		});
 
+		it('readEmergencyStatus returns both flags, or null when the response does not carry them as booleans', async () => {
+			mock.emergency = { lockdown: false, evacuation: true };
+			expect(await http.readEmergencyStatus()).to.deep.equal({ lockdown: false, evacuation: true });
+			for (const data of [
+				undefined,
+				null,
+				{},
+				{ lockdown: true },
+				{ lockdown: 'true', evacuation: false },
+				'text',
+			]) {
+				mock.failNext({ status: 200, body: { code: 'SUCCESS', msg: 'success', data } });
+				expect(await http.readEmergencyStatus(), JSON.stringify(data)).to.equal(null);
+			}
+		});
+
 		it('setEmergencyStatus sends PUT /doors/settings/emergency with the payload', async () => {
 			await http.setEmergencyStatus({ lockdown: false, evacuation: true });
 			expect(mock.requests[0].method).to.equal('PUT');

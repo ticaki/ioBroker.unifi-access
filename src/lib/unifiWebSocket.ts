@@ -35,7 +35,7 @@ const DEFAULT_HEARTBEAT_MS = 30_000;
  * Other access.* events are delivered via the webhook channel, not this socket.
  *
  * Reconnects on close with exponential back-off (capped at reconnectDelaySeconds).
- * Heartbeat: a ping every 30 s; when the pong for the previous ping has not arrived by the
+ * Heartbeat: a ping every 30 s; when neither the pong nor any other frame has arrived by the
  * next tick the connection is considered dead (half-open TCP connection) and terminated,
  * which triggers the normal reconnect.
  *
@@ -135,6 +135,9 @@ export class UnifiWebSocket extends EventEmitter {
 			if (!isCurrent()) {
 				return;
 			}
+			// Any frame proves the peer is alive — a controller that keeps the connection up with its own
+			// keep-alive frames but does not answer pings must not be dropped every minute.
+			this.awaitingPong = false;
 			let parsed: unknown;
 			try {
 				parsed = JSON.parse(rawDataToString(data));

@@ -298,6 +298,92 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			);
 		});
 
+		it('retries a failed registration by itself (60 s, then 2 min) without waiting for a reconnect', async () => {
+			mock.failNext({ path: '/webhooks/endpoints', status: 500, times: 2 });
+			const instance = await startConnected();
+			expect(instance.val('info.webhookRegistered')).to.equal(false);
+			const attempts = (): number => mock.findRequests({ method: 'GET', path: '/webhooks/endpoints' }).length;
+			expect(attempts()).to.equal(1);
+
+			await clock.tickAsync(59_999);
+			await delay(30);
+			expect(attempts()).to.equal(1);
+			await clock.tickAsync(1);
+			await waitFor(() => attempts() === 2, { description: 'second attempt after 60 s' });
+			await waitFor(() => instance.timers.size >= 1, { description: 'next retry scheduled' });
+			expect(instance.val('info.webhookRegistered')).to.equal(false);
+
+			await clock.tickAsync(120_000);
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+			expect(mock.webhookEndpoints).to.have.length(1);
+			expect(instance.log.of('warn').filter(m => m.startsWith('Webhook registration failed'))).to.have.length(1);
+		});
+
+		it('a failed reregisterWebhook does not keep claiming the endpoint is registered and repairs itself', async () => {
+			const instance = await startConnected();
+			expect(instance.val('info.webhookRegistered')).to.equal(true);
+			// the old endpoint gets deleted, creating the new one fails
+			mock.failNext({ method: 'POST', path: '/webhooks/endpoints', status: 500 });
+			const answer = await instance.request('reregisterWebhook');
+			expect(answer.ok).to.equal(false);
+			expect(mock.webhookEndpoints).to.deep.equal([]);
+			expect(instance.val('info.webhookRegistered')).to.equal(false);
+			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(false);
+
+			await clock.tickAsync(60_000);
+			await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered again' });
+			expect(mock.webhookEndpoints).to.have.length(1);
+			const [result] = await mock.deliverWebhook(
+				fixtures.webhookEvents.doorbellCompleted({ door: door(DOOR_A2), device: hub() }),
+			);
+			expect(result.status).to.equal(200);
+		});
+
+		it('adds the start of the installation UUID to the endpoint name (two hosts with the same name and instance)', async () => {
+			adapter = createAdapterWithFakeCore(MAIN, {
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				listenPort,
+				listenIp: '127.0.0.1',
+				enableWebhooks: true,
+			});
+			adapter.objects.set('system.meta.uuid', {
+				_id: 'system.meta.uuid',
+				type: 'meta',
+				native: { uuid: '1a2b3c4d-5e6f-7a8b-9c0d-112233445566' },
+			});
+			// the endpoint of another installation that happens to use the same host name and instance number
+			const twin = mock.addWebhookEndpoint({
+				endpoint: 'http://192.0.2.99:8095/unifi-access-webhook',
+				name: `ioBroker.unifi-access (${NS}@test-host#ffffffff)`,
+			});
+			await adapter.fireReady();
+			await waitFor(() => adapter!.val('info.webhookRegistered') === true, { description: 'registered' });
+			expect(mock.webhookEndpoints.map(e => e.name)).to.deep.equal([
+				`ioBroker.unifi-access (${NS}@test-host#ffffffff)`,
+				`ioBroker.unifi-access (${NS}@test-host#1a2b3c4d)`,
+			]);
+			expect(mock.webhookEndpoints[0]).to.deep.equal(twin);
+		});
+
+		it('info.webhookRegistered and info.protectConnected left over from an earlier run are reset at start', async () => {
+			adapter = createAdapterWithFakeCore(MAIN, {
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				listenPort,
+				listenIp: '127.0.0.1',
+				enableWebhooks: false,
+				enableProtect: false,
+			});
+			await adapter.setState('info.webhookRegistered', { val: true, ack: true });
+			await adapter.setState('info.protectConnected', { val: true, ack: true });
+			await adapter.fireReady();
+			expect(adapter.val('info.webhookRegistered')).to.equal(false);
+			expect(adapter.val('info.protectConnected')).to.equal(false);
+		});
+
 		it('makes up for a failed registration at the next reconnect and does not repeat the warning', async () => {
 			mock.failNext({ path: '/webhooks/endpoints', status: 500, times: 2 });
 			const instance = await startConnected();
@@ -449,6 +535,37 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			await clock.tickAsync(2001);
 			await waitFor(() => lockedOf(DOOR_3855) === true, { description: 'locked=true after expiry' });
 			expect(doorReads(DOOR_3855)).to.equal(2);
+		});
+
+		it('an unlock event during a timed unlock does not cancel the check at the end of the time', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			instance.fireStateChange(`doors.${DOOR_3855}.unlock_duration`, 1);
+			await waitFor(() => lockedOf(DOOR_3855) === false, { description: 'locked=false' });
+			await clock.tickAsync(2000);
+			await waitFor(() => doorReads(DOOR_3855) === 1, { description: 'verification of the command' });
+
+			// somebody uses the door: the controller reports the unlock, the adapter checks 7 s later
+			const unlockedWrites = (): number =>
+				instance.stateWrites.filter(w => w.id.endsWith(`doors.${DOOR_3855}.locked`) && w.val === false).length;
+			const before = unlockedWrites();
+			mock.emitRemoteUnlock(DOOR_3855);
+			await waitFor(() => unlockedWrites() === before + 1, { description: 'unlock event processed' });
+			await clock.tickAsync(7000);
+			await waitFor(() => doorReads(DOOR_3855) === 2, { description: 'check after the event' });
+			await delay(30);
+			expect(lockedOf(DOOR_3855)).to.equal(false);
+
+			// the minute is over and the controller locks the door — without webhooks only the check at the
+			// end of the time tells (small steps: the WebSocket heartbeat needs real time for its pongs)
+			setRelay(DOOR_3855, 'lock');
+			for (const step of [22_000, 29_000]) {
+				await clock.tickAsync(step);
+				await delay(40);
+			}
+			expect(doorReads(DOOR_3855), 'no polling in between').to.equal(2);
+			await clock.tickAsync(2100);
+			await waitFor(() => lockedOf(DOOR_3855) === true, { description: 'locked=true at the end of the time' });
+			expect(doorReads(DOOR_3855)).to.equal(3);
 		});
 
 		it('a later lock rule cancels the pending check of an earlier timed unlock (no blind re-lock)', async () => {
@@ -800,6 +917,21 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(endsAt).to.equal(mock.lockRules.get(DOOR_3855)!.ended_time * 1000);
 		});
 
+		it('stops asking as well when the refusal comes as an API error code with HTTP 200', async () => {
+			mock.failNext({
+				method: 'GET',
+				path: /\/lock_rule$/,
+				status: 200,
+				code: 'CODE_OPERATION_FORBIDDEN',
+				times: Number.POSITIVE_INFINITY,
+			});
+			const instance = await startConnected();
+			await waitFor(() => instance.log.of('debug').some(m => m.includes('Lock rule status not available')), {
+				description: 'debug note',
+			});
+			expect(mock.findRequests({ method: 'GET', path: /\/lock_rule$/ })).to.have.length(1);
+		});
+
 		it('stops asking when the controller does not support the endpoint (older firmware) and keeps working', async () => {
 			mock.failNext({ method: 'GET', path: /\/lock_rule$/, status: 404, times: Number.POSITIVE_INFINITY });
 			const instance = await startConnected();
@@ -1051,6 +1183,59 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				});
 			}
 		}
+
+		it('emergency: two commands in quick succession do not undo each other (read-modify-write is serialised)', async () => {
+			mock.emergency = { lockdown: false, evacuation: true };
+			const instance = await startConnected();
+			// "everything back to normal", written without waiting in between
+			instance.fireStateChange('doors.emergency.evacuation', false);
+			instance.fireStateChange('doors.emergency.lockdown', false);
+			await waitFor(() => mock.findRequests({ method: 'PUT', path: '/doors/settings/emergency' }).length === 2, {
+				description: 'both commands sent',
+			});
+			await waitFor(() => instance.states.get(`${NS}.doors.emergency.lockdown`)?.ack === true, {
+				description: 'ack',
+			});
+			expect(
+				mock.findRequests({ method: 'PUT', path: '/doors/settings/emergency' }).map(r => r.body),
+			).to.deep.equal([
+				{ lockdown: false, evacuation: false },
+				{ lockdown: false, evacuation: false },
+			]);
+			expect(mock.emergency, 'the evacuation must not be switched on again by the second command').to.deep.equal({
+				lockdown: false,
+				evacuation: false,
+			});
+
+			mock.emergency = { lockdown: true, evacuation: false };
+			instance.fireStateChange('doors.emergency.lockdown', false);
+			instance.fireStateChange('doors.emergency.evacuation', true);
+			await waitFor(() => mock.emergency.evacuation === true, { description: 'evacuation on' });
+			expect(mock.emergency).to.deep.equal({ lockdown: false, evacuation: true });
+		});
+
+		it('emergency: nothing is sent when the controller does not report the current status', async () => {
+			mock.emergency = { lockdown: true, evacuation: false };
+			const instance = await startConnected();
+			mock.failNext({
+				method: 'GET',
+				path: '/doors/settings/emergency',
+				status: 200,
+				body: { code: 'SUCCESS', msg: 'success' },
+			});
+			instance.fireStateChange('doors.emergency.evacuation', true);
+			await waitFor(
+				() => instance.log.of('warn').some(m => m.includes('did not report the current emergency status')),
+				{
+					description: 'warning',
+				},
+			);
+			expect(mock.findRequests({ method: 'PUT', path: '/doors/settings/emergency' })).to.deep.equal([]);
+			expect(mock.emergency, 'the lockdown must not be cleared by a guessed value').to.deep.equal({
+				lockdown: true,
+				evacuation: false,
+			});
+		});
 
 		it('emergency: the other flag is taken from the controller, never from a stale or unacknowledged state', async () => {
 			const instance = await startConnected();
@@ -1469,6 +1654,18 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 					[...plain].map(c => String.fromCharCode(c.charCodeAt(0) ^ '5'.charCodeAt(0))).join('');
 				const instance = await startWithStoredPassword('abcabc', xor('abcabc'), { encrypt: xor });
 				expect(storedPassword()).to.equal('abcabc');
+				expect(protect.logins.map(l => l.status)).to.deep.equal([401]);
+				expect(instance.log.of('warn')).to.have.length(1);
+				expect(instance.log.of('warn')[0]).to.contain('re-enter the Protect password and save');
+			});
+
+			it('old non-AES system secret, non-ASCII plain text (not detectable): a rejected login hints at re-entering the password', async () => {
+				const xor = (plain: string): string =>
+					[...plain]
+						.map((c, i) => String.fromCharCode(c.charCodeAt(0) ^ 'Zgfr56gFe87jJOM'.charCodeAt(i % 15)))
+						.join('');
+				const instance = await startWithStoredPassword('pässwörd', xor('pässwörd'), { encrypt: xor });
+				expect(storedPassword(), 'nothing is written').to.equal('pässwörd');
 				expect(protect.logins.map(l => l.status)).to.deep.equal([401]);
 				expect(instance.log.of('warn')).to.have.length(1);
 				expect(instance.log.of('warn')[0]).to.contain('re-enter the Protect password and save');
@@ -1974,6 +2171,33 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				const warnings = instance.log.of('warn');
 				expect(warnings).to.have.length(1);
 				expect(warnings[0]).to.contain('view:system_log');
+			});
+
+			it('logs in again after the Protect session was lost and the automatic re-login failed', async () => {
+				const instance = await startWithProtect();
+				mock.systemLogHits = [cameraHit()];
+				// the console forgets the session and rate-limits the immediate re-login
+				protect.expireSessions();
+				protect.failLogins(429);
+				await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+				await waitFor(() => events().length === 1, { description: 'event 1' });
+				await clock.tickAsync(3000);
+				await waitFor(() => instance.log.of('warn').some(m => m.includes('snapshot fetch for camera')), {
+					description: 'snapshot failed',
+				});
+				expect(protect.logins.map(l => l.status)).to.deep.equal([200, 429]);
+
+				// the next door event notices the missing session and starts the login again
+				await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+				await waitFor(() => protect.logins.length === 3, { description: 'new login' });
+				expect(protect.logins[2].status).to.equal(200);
+
+				await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+				await waitFor(() => events().length === 3, { description: 'event 3' });
+				await clock.tickAsync(3000);
+				await waitFor(() => events()[0].protectSnapshotUrl !== undefined, {
+					description: 'snapshots work again',
+				});
 			});
 
 			it('does not query the system logs after the Protect login was rejected', async () => {

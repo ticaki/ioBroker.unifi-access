@@ -409,6 +409,22 @@ export class UnifiHttp {
 		return r.data?.data ?? { lockdown: false, evacuation: false };
 	}
 
+	/**
+	 * Read the emergency status for a read-modify-write: unlike {@link getEmergencyStatus} there is no
+	 * default — when the response does not carry both flags as booleans the result is `null`, so the
+	 * caller cannot send a guessed value back to the controller.
+	 */
+	async readEmergencyStatus(): Promise<UnifiEmergencyStatus | null> {
+		const r = await this.client.get<{ data?: Partial<UnifiEmergencyStatus> }>(
+			'/api/v1/developer/doors/settings/emergency',
+		);
+		const data = r.data?.data;
+		if (!data || typeof data.lockdown !== 'boolean' || typeof data.evacuation !== 'boolean') {
+			return null;
+		}
+		return { lockdown: data.lockdown, evacuation: data.evacuation };
+	}
+
 	async setEmergencyStatus(payload: UnifiEmergencyStatusPayload): Promise<void> {
 		await this.client.put('/api/v1/developer/doors/settings/emergency', payload);
 	}

@@ -288,6 +288,33 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			expect(logger.of('info')).to.deep.equal([]);
 		});
 
+		it('keeps a connection that sends frames although it never answers pings', async () => {
+			const deaf = new MockUnifiController({ token: TOKEN, autoPong: false });
+			await deaf.start();
+			try {
+				clock = sinon.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+				const { counts, events } = await startAndWaitOpen({ port: deaf.port, reconnectDelaySeconds: 1 });
+				for (let i = 1; i <= 4; i++) {
+					await clock.tickAsync(30_000);
+					await waitFor(() => deaf.wsPingCount === i, { description: `ping ${i}` });
+					// the controller's own traffic (an event or a plain keep-alive text) proves it is alive
+					if (i % 2) {
+						deaf.emitRemoteViewChange(105);
+					} else {
+						deaf.sendRaw('keep-alive');
+					}
+					await delay(30);
+				}
+				expect(counts).to.deep.equal({ open: 1, close: 0 });
+				expect(events).to.have.length(2);
+			} finally {
+				for (const harness of harnesses.splice(0)) {
+					harness.socket.stop();
+				}
+				await deaf.stop();
+			}
+		});
+
 		// A dead (half-open) connection answers no ping and surfaces no "close" event by itself.
 		it('drops and re-establishes a connection whose pings stay unanswered', async () => {
 			const deaf = new MockUnifiController({ token: TOKEN, autoPong: false });
