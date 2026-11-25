@@ -5,9 +5,12 @@
     "auth_test_missingFields": "Introduce primero el host y el token de API.",
     "auth_test_placeholder": "El campo del token de API todavía contiene el marcador oculto. Vacía el campo por completo e introduce de nuevo el token completo.",
     "auth_test_success": "Conexión correcta",
-    "auth_test_success_named": "Conexión correcta — controlador: %s",
+    "auth_test_success_devices": "Conexión correcta — %s dispositivos encontrados",
+    "auth_test_success_one_device": "Conexión correcta — 1 dispositivo encontrado",
+    "auth_test_success_no_devices": "Conexión correcta — no se encontraron dispositivos",
     "auth_test_error_unauthorized": "Token rechazado (no autorizado).",
     "auth_test_error_network": "No se puede contactar con el controlador (error de red).",
+    "auth_test_error_tls": "No se pudo verificar el certificado del controlador (%s). Introduzca el certificado CA o desactive «Verificar certificado TLS».",
     "auth_test_error_unknown": "Error en la prueba de conexión.",
 
     "devices_title": "Dispositivos UniFi Access detectados",

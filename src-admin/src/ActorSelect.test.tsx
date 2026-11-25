@@ -30,7 +30,14 @@ describe('ActorSelect', () => {
 		render(<ActorSelect {...props} />);
 
 		const select = await screen.findByRole('combobox', { name: LABEL });
-		expect(select.textContent).not.toContain('Example');
+		// the users are loaded, none of them is selected - "none" is
+		fireEvent.mouseDown(select);
+		const options = within(await screen.findByRole('listbox')).getAllByRole('option');
+		expect(options.map(o => [o.textContent, o.getAttribute('aria-selected')])).toEqual([
+			['None (use API token name)', 'true'],
+			['Alice Example', 'false'],
+			['Bob Example', 'false'],
+		]);
 	});
 
 	it('writes the selected user to the key unlockActorId', async () => {

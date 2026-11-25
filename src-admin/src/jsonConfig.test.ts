@@ -207,4 +207,13 @@ describe('translations of the custom components', () => {
 		// The admin merges both dictionaries: a key in both would show whichever text was loaded last.
 		expect(Object.keys(componentTexts.en).filter(key => key in adminTexts.en)).toEqual([]);
 	});
+
+	it('are all used by a component', () => {
+		const sources = readdirSync(here)
+			.filter(file => /\.tsx?$/.test(file) && !/\.test\.tsx?$/.test(file))
+			.map(file => readFileSync(resolve(here, file), 'utf8'))
+			.join('\n');
+
+		expect(Object.keys(componentTexts.en).filter(key => !sources.includes(`'${key}'`))).toEqual([]);
+	});
 });

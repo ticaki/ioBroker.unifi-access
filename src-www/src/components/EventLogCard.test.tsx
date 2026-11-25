@@ -2,12 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { EventLogCard, parseEvents } from './EventLogCard';
 import { setStates } from '../test/socketMock';
+import { SettingsContext, useSettingsProvider } from '../settings';
+import type { JSX, ReactNode } from 'react';
 
 vi.mock('../socket', () => import('../test/socketMock'));
 
 const NOW = 1_800_000_000_000;
 const SNAPSHOT = 'http://192.0.2.5:8095/unifi-access/0/protect-snapshot/cam1/1799999990000.jpg';
 const VIDEO = 'http://192.0.2.5:8095/unifi-access/0/protect-video/evt1.mp4';
+
+/** Provides the settings of the panel from `admin.uiSettings`, as App does */
+function SettingsHost({ children }: { children: ReactNode }): JSX.Element {
+    return <SettingsContext.Provider value={useSettingsProvider()}>{children}</SettingsContext.Provider>;
+}
 
 /** The 250 ms tickers the card started and whether each of them was stopped again */
 function tickers(): { started: number; running: number } {
@@ -178,6 +185,91 @@ describe('EventLogCard', () => {
         expect(tickers().started).toBe(0);
     });
 
+    it('counts down normally on a browser whose clock is minutes behind', () => {
+        // wall tablet 5 minutes late; ioBroker wrote the list at NOW, the event happened 1 s before
+        vi.setSystemTime(NOW - 300_000);
+        setStates(
+            {
+                'info.protectConnected': true,
+                'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock' }]),
+            },
+            { ts: NOW },
+        );
+        render(<EventLogCard />);
+        expect(screen.getByText('2')).toBeTruthy();
+
+        act(() => {
+            vi.advanceTimersByTime(3500);
+        });
+        expect(screen.getByText('Not available')).toBeTruthy();
+        expect(screen.queryByText(/^[123]$/)).toBeNull();
+        expect(tickers()).toEqual({ started: 1, running: 0 });
+    });
+
+    it('counts down normally on a browser whose clock is ahead', () => {
+        vi.setSystemTime(NOW + 3_600_000);
+        setStates(
+            {
+                'info.protectConnected': true,
+                'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock' }]),
+            },
+            { ts: NOW },
+        );
+        render(<EventLogCard />);
+
+        expect(screen.getByText('2')).toBeTruthy();
+        expect(screen.queryByText('Not available')).toBeNull();
+    });
+
+    it('ends the waiting window of an event "from the future" 4 s after it arrived', () => {
+        // controller clock one minute ahead of ioBroker
+        setStates({
+            'info.protectConnected': true,
+            'events.last': JSON.stringify([{ ts: NOW + 60_000, type: 'access.door.unlock' }]),
+        });
+        render(<EventLogCard />);
+        expect(screen.getByText('3')).toBeTruthy();
+
+        act(() => {
+            vi.advanceTimersByTime(4000);
+        });
+        expect(screen.getByText('Not available')).toBeTruthy();
+        expect(tickers()).toEqual({ started: 1, running: 0 });
+    });
+
+    it('keeps the window of an event when the list is written again (new event) instead of restarting it', () => {
+        const first = { ts: NOW - 1000, type: 'access.door.unlock', doorName: 'Front door' };
+        setStates({ 'info.protectConnected': true, 'events.last': JSON.stringify([first]) });
+        render(<EventLogCard />);
+        expect(screen.getByText('2')).toBeTruthy();
+
+        act(() => {
+            vi.advanceTimersByTime(2000);
+            // ioBroker writes the list again 2 s later with a newer event in front
+            setStates({
+                'info.protectConnected': true,
+                'events.last': JSON.stringify([{ ts: NOW + 2000, type: 'access.device.dps_status' }, first]),
+            });
+        });
+        act(() => {
+            vi.advanceTimersByTime(1100);
+        });
+        expect(screen.getByText('Not available')).toBeTruthy();
+        expect(tickers().running).toBe(0);
+    });
+
+    it('stops ticking when it is unmounted during the countdown', () => {
+        setStates({
+            'info.protectConnected': true,
+            'events.last': JSON.stringify([{ ts: NOW - 500, type: 'access.door.unlock' }]),
+        });
+        const { unmount } = render(<EventLogCard />);
+        expect(tickers()).toEqual({ started: 1, running: 1 });
+
+        unmount();
+        expect(tickers()).toEqual({ started: 1, running: 0 });
+    });
+
     it('shows the snapshot, replaces the placeholder when it arrives and opens the media dialog', () => {
         const event = { ts: NOW - 1000, type: 'access.door.unlock', doorName: 'Front door' };
         setStates({ 'info.protectConnected': true, 'events.last': JSON.stringify([event]) });
@@ -202,6 +294,44 @@ describe('EventLogCard', () => {
         fireEvent.error(video as HTMLVideoElement);
         expect(document.querySelector('video')).toBeNull();
         expect(screen.getByRole('dialog').querySelector('img')?.getAttribute('src')).toBe(SNAPSHOT);
+    });
+
+    it('shows neither images nor placeholders while the thumbnails are switched off (width 0)', () => {
+        setStates({
+            'info.protectConnected': true,
+            'admin.uiSettings': JSON.stringify({ thumbWidth: 0 }),
+            'events.last': JSON.stringify([
+                { ts: NOW - 500, type: 'access.door.unlock', doorName: 'Front door' },
+                { ts: NOW - 60_000, type: 'access.door.unlock', protectSnapshotUrl: SNAPSHOT },
+                { ts: NOW - 3_600_000, type: 'access.temporary_unlock.start' },
+            ]),
+        });
+        render(
+            <SettingsHost>
+                <EventLogCard />
+            </SettingsHost>,
+        );
+
+        expect(screen.getAllByText('Door unlocked')).toHaveLength(2);
+        expect(screen.queryByAltText('camera')).toBeNull();
+        expect(screen.queryByText(/^[123]$/)).toBeNull();
+        expect(screen.queryByText('Not available')).toBeNull();
+        // the first render still has the default width; once the stored settings are there, nothing ticks
+        expect(tickers().running).toBe(0);
+    });
+
+    it('draws the thumbnails with the configured width', () => {
+        setStates({
+            'admin.uiSettings': JSON.stringify({ thumbWidth: 160 }),
+            'events.last': JSON.stringify([{ ts: NOW - 60_000, type: 'access.door.unlock', protectSnapshotUrl: SNAPSHOT }]),
+        });
+        render(
+            <SettingsHost>
+                <EventLogCard />
+            </SettingsHost>,
+        );
+
+        expect(getComputedStyle(screen.getByAltText('camera')).width).toBe('160px');
     });
 
     it('shows "Not available" if the snapshot cannot be loaded', () => {

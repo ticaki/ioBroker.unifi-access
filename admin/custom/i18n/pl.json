@@ -5,9 +5,12 @@
     "auth_test_missingFields": "Najpierw wprowadź host i token API.",
     "auth_test_placeholder": "Pole tokena API nadal zawiera zamaskowany symbol zastępczy. Wyczyść pole całkowicie i wprowadź ponownie cały token.",
     "auth_test_success": "Połączenie udane",
-    "auth_test_success_named": "Połączenie udane — kontroler: %s",
+    "auth_test_success_devices": "Połączenie udane — znalezione urządzenia: %s",
+    "auth_test_success_one_device": "Połączenie udane — znaleziono 1 urządzenie",
+    "auth_test_success_no_devices": "Połączenie udane — nie znaleziono urządzeń",
     "auth_test_error_unauthorized": "Token odrzucony (brak autoryzacji).",
     "auth_test_error_network": "Nie można skontaktować się z kontrolerem (błąd sieci).",
+    "auth_test_error_tls": "Nie można zweryfikować certyfikatu kontrolera (%s). Wprowadź certyfikat CA lub wyłącz „Weryfikuj certyfikat TLS”.",
     "auth_test_error_unknown": "Test połączenia nie powiódł się.",
 
     "devices_title": "Wykryte urządzenia UniFi Access",

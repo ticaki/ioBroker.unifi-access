@@ -80,8 +80,40 @@ export function parseEvents(raw: unknown): EventEntry[] {
     return events;
 }
 
-function isSnapshotPending(e: EventEntry, now: number): boolean {
-    return PROTECT_SNAPSHOT_EVENTS.has(e.type) && !e.protectSnapshotUrl && now - e.ts < SNAPSHOT_WAIT_MS;
+/** Monotonic clock of the browser: only differences of it are used, never its absolute value */
+function browserClock(): number {
+    return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
+}
+
+/** An event together with the moment its waiting window started, on the clock of {@link browserClock} */
+interface TimedEvent {
+    event: EventEntry;
+    startedAt: number;
+}
+
+/**
+ * Places the events on the clock of the browser without trusting its date and time: a wall tablet whose
+ * clock is minutes off must not count down for minutes or skip the countdown.
+ *
+ * How old an event was when the list arrived is taken from the adapter side: `ts` of the state
+ * `events.last` (written by ioBroker) minus `ts` of the event. Never negative, so an event of a
+ * controller whose clock is ahead starts its window when it arrives - every window ends at the latest
+ * {@link SNAPSHOT_WAIT_MS} after the list arrived in the browser.
+ *
+ * @param events events of the list
+ * @param stateTs `ts` of the state `events.last`
+ * @param receivedAt when the list arrived, see {@link browserClock}
+ */
+export function timeEvents(events: EventEntry[], stateTs: unknown, receivedAt: number): TimedEvent[] {
+    const serverNow = typeof stateTs === 'number' && Number.isFinite(stateTs) && stateTs > 0 ? stateTs : undefined;
+    return events.map(event => ({
+        event,
+        startedAt: receivedAt - (serverNow === undefined ? 0 : Math.max(0, serverNow - event.ts)),
+    }));
+}
+
+function isSnapshotPending({ event, startedAt }: TimedEvent, now: number): boolean {
+    return PROTECT_SNAPSHOT_EVENTS.has(event.type) && !event.protectSnapshotUrl && now - startedAt < SNAPSHOT_WAIT_MS;
 }
 
 /** Label lookup that does not fall for keys like `constructor` */
@@ -124,33 +156,37 @@ export function EventLogCard(): JSX.Element {
     // placeholder is shown - it would count down and end in "Not available" for every door opening.
     const protectConnected = useIobState('info.protectConnected')?.val === true;
     const { settings } = useSettings();
+    const showThumbs = settings.thumbWidth > 0;
     const [modalEvent, setModalEvent] = useState<EventEntry | null>(null);
-    const [now, setNow] = useState<number>(() => Date.now());
+    const [now, setNow] = useState<number>(browserClock);
     const [brokenImages, setBrokenImages] = useState<ReadonlySet<string>>(() => new Set());
 
-    const events = useMemo<EventEntry[]>(() => parseEvents(last?.val), [last]);
+    // a new value of the state (new event, snapshot URL added) is a new arrival
+    const timed = useMemo<TimedEvent[]>(() => timeEvents(parseEvents(last?.val), last?.ts, browserClock()), [last]);
 
     useEffect(() => {
         // Tick while any access.door.unlock event is still in its waiting window.
         // Stop only once every pending event has either resolved (URL) or fully timed out —
         // otherwise the JSX never flips from countdown to "Not available" because `now` is stale.
-        const tickNow = Date.now();
+        const tickNow = browserClock();
         // Always render once with a fresh `now`, so old events (loaded already past their timeout)
         // settle on showNoSnapshot reliably.
         setNow(tickNow);
-        if (!protectConnected || !events.some(e => isSnapshotPending(e, tickNow))) {
+        // no countdown is shown while the thumbnails are switched off: nothing to tick for
+        if (!protectConnected || !showThumbs || !timed.some(t => isSnapshotPending(t, tickNow))) {
             return;
         }
+        // ends on its own: every window is over SNAPSHOT_WAIT_MS after the list arrived (timeEvents)
         const id = setInterval(() => {
-            const current = Date.now();
+            const current = browserClock();
             setNow(current);
-            if (!events.some(e => isSnapshotPending(e, current))) {
+            if (!timed.some(t => isSnapshotPending(t, current))) {
                 // Every waiting window is over: this was the last render that was needed.
                 clearInterval(id);
             }
         }, 250);
         return () => clearInterval(id);
-    }, [events, protectConnected]);
+    }, [timed, protectConnected, showThumbs]);
 
     return (
         <>
@@ -162,7 +198,7 @@ export function EventLogCard(): JSX.Element {
                     >
                         Recent events
                     </Typography>
-                    {events.length === 0 ? (
+                    {timed.length === 0 ? (
                         <Typography
                             variant="body2"
                             color="text.secondary"
@@ -174,11 +210,11 @@ export function EventLogCard(): JSX.Element {
                             dense
                             disablePadding
                         >
-                            {events.map((e, i) => {
+                            {timed.map(({ event: e, startedAt }, i) => {
                                 const label = labelOf(EVENT_LABELS, e.type);
                                 const subtypeLabel = e.subtype ? labelOf(SUBTYPE_LABELS, e.subtype) : undefined;
                                 const context = [e.doorName, e.userName].filter(Boolean).join(' · ');
-                                const elapsed = Math.max(0, now - e.ts);
+                                const elapsed = Math.max(0, now - startedAt);
                                 const snapshotUrl =
                                     e.protectSnapshotUrl && !brokenImages.has(e.protectSnapshotUrl)
                                         ? e.protectSnapshotUrl

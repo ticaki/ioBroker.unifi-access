@@ -2,6 +2,7 @@ import { type JSX, useState } from 'react';
 import { Button, Card, CardActions, CardContent, Chip, Stack, Typography } from '@mui/material';
 import LockIcon from '@mui/icons-material/Lock';
 import LockOpenIcon from '@mui/icons-material/LockOpen';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
 import { setIobState } from '../socket';
 
 interface DoorCardProps {
@@ -65,7 +66,8 @@ export function DoorCard({ doorId, name, locked, lockRuleType, lockRuleEndsAt }:
                     <Typography variant="subtitle1">{name}</Typography>
                     <Chip
                         size="small"
-                        icon={isLocked ? <LockIcon /> : <LockOpenIcon />}
+                        // an unknown state must not look like an open lock
+                        icon={!lockedKnown ? <HelpOutlineIcon /> : isLocked ? <LockIcon /> : <LockOpenIcon />}
                         color={!lockedKnown ? 'default' : isLocked ? 'success' : 'warning'}
                         label={!lockedKnown ? 'unknown' : isLocked ? 'locked' : 'unlocked'}
                     />

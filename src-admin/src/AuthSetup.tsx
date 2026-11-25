@@ -14,10 +14,15 @@ const VERIFY_TIMEOUT_MS = 20_000;
  */
 const PASSWORD_PLACEHOLDER = '____ppp____';
 
+/** Answer of the adapter to `verifyToken` */
 interface VerifyTokenAnswer {
 	ok?: boolean;
+	/** `unauthorized`, `network`, `tls`, `missing-fields`, `not-configured`, `unknown-command` */
 	error?: string;
-	controllerName?: string | null;
+	/** OpenSSL code of a TLS error, e.g. `DEPTH_ZERO_SELF_SIGNED_CERT` */
+	detail?: string;
+	/** Number of devices the controller reported; missing in answers of older adapter versions */
+	deviceCount?: number;
 }
 
 interface AuthSetupState extends ConfigGenericState {
@@ -46,11 +51,30 @@ class AuthSetup extends ConfigGeneric<ConfigGenericProps, AuthSetupState> {
 		super.componentWillUnmount();
 	}
 
-	private static describeVerifyError(code: string | undefined): string {
+	private static describeVerifyError(answer: VerifyTokenAnswer | undefined): string {
+		const code = answer?.error;
 		if (code === 'missing-fields') {
 			return I18n.t('auth_test_missingFields');
 		}
+		if (code === 'tls') {
+			const detail = typeof answer?.detail === 'string' && answer.detail.trim() ? answer.detail.trim() : 'TLS';
+			return I18n.t('auth_test_error_tls', detail);
+		}
 		return describeAdapterError(code, 'auth_test_error_unknown');
+	}
+
+	private static describeSuccess(answer: VerifyTokenAnswer): string {
+		const count = answer.deviceCount;
+		if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+			return I18n.t('auth_test_success');
+		}
+		if (count === 0) {
+			return I18n.t('auth_test_success_no_devices');
+		}
+		if (count === 1) {
+			return I18n.t('auth_test_success_one_device');
+		}
+		return I18n.t('auth_test_success_devices', String(count));
 	}
 
 	private async runConnectionTest(): Promise<void> {
@@ -59,6 +83,8 @@ class AuthSetup extends ConfigGeneric<ConfigGenericProps, AuthSetupState> {
 		const port = Number(data?.controllerPort) || 12_445;
 		const token = typeof data?.apiToken === 'string' ? data.apiToken : '';
 		const verifyTLS = data?.verifyTLS === true;
+		// the CA of the form, not the saved one: the test promises to use the values entered above
+		const caCert = typeof data?.caCert === 'string' ? data.caCert : '';
 
 		if (!host || !token) {
 			this.setState({
@@ -85,7 +111,7 @@ class AuthSetup extends ConfigGeneric<ConfigGenericProps, AuthSetupState> {
 			const r = await requestAdapter<VerifyTokenAnswer | undefined>(
 				this.props,
 				'verifyToken',
-				{ host, port, token, verifyTLS },
+				{ host, port, token, verifyTLS, caCert },
 				VERIFY_TIMEOUT_MS,
 			);
 			if (this.unmounted) {
@@ -94,16 +120,14 @@ class AuthSetup extends ConfigGeneric<ConfigGenericProps, AuthSetupState> {
 			if (r?.ok) {
 				this.setState({
 					testing: false,
-					testStatusMsg: r.controllerName
-						? I18n.t('auth_test_success_named', r.controllerName)
-						: I18n.t('auth_test_success'),
+					testStatusMsg: AuthSetup.describeSuccess(r),
 					testStatusKind: 'success',
 					snackbar: I18n.t('auth_test_success'),
 				});
 			} else {
 				this.setState({
 					testing: false,
-					testStatusMsg: AuthSetup.describeVerifyError(r?.error),
+					testStatusMsg: AuthSetup.describeVerifyError(r),
 					testStatusKind: 'error',
 				});
 			}

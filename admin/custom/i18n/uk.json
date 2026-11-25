@@ -5,9 +5,12 @@
     "auth_test_missingFields": "Спочатку введіть хост і API-токен.",
     "auth_test_placeholder": "Поле API-токена ще містить замаскований заповнювач. Повністю очистьте поле та введіть токен заново.",
     "auth_test_success": "Підключення успішне",
-    "auth_test_success_named": "Підключення успішне — контролер: %s",
+    "auth_test_success_devices": "Підключення успішне — знайдено пристроїв: %s",
+    "auth_test_success_one_device": "Підключення успішне — знайдено 1 пристрій",
+    "auth_test_success_no_devices": "Підключення успішне — пристроїв не знайдено",
     "auth_test_error_unauthorized": "Токен відхилено (неавторизовано).",
     "auth_test_error_network": "Контролер недоступний (мережева помилка).",
+    "auth_test_error_tls": "Не вдалося перевірити сертифікат контролера (%s). Вкажіть CA-сертифікат або вимкніть «Перевіряти TLS-сертифікат».",
     "auth_test_error_unknown": "Тест підключення не пройдено.",
 
     "devices_title": "Виявлені пристрої UniFi Access",

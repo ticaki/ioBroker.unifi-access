@@ -269,4 +269,81 @@ describe('useIobStates', () => {
         unmount();
         expect(conn.activeSubscriptions()).toBe(0);
     });
+
+    it('reads the states again after a reconnect', async () => {
+        const socket = await loadSocket();
+        const { result } = renderHook(() => socket.useIobStates('doors.*'));
+        await waitFor(() => expect(FakeConnection.last).not.toBeNull());
+        const conn = FakeConnection.last as FakeConnection;
+        conn.values['unifi-access.0.doors.d1.name'] = 'Front door';
+        await connect();
+        await waitFor(() => expect(Object.keys(result.current)).toEqual(['unifi-access.0.doors.d1.name']));
+        expect(conn.getStates).toHaveBeenCalledTimes(1);
+
+        act(() => conn.setConnected(false));
+        // while the connection was down: a door was added and the name changed, nobody reports it
+        conn.values['unifi-access.0.doors.d1.name'] = 'Main entrance';
+        conn.values['unifi-access.0.doors.d2.name'] = 'Garage';
+        act(() => conn.setConnected(true));
+
+        await waitFor(() =>
+            expect(Object.fromEntries(Object.entries(result.current).map(([id, s]) => [id, s.val]))).toEqual({
+                'unifi-access.0.doors.d1.name': 'Main entrance',
+                'unifi-access.0.doors.d2.name': 'Garage',
+            }),
+        );
+        expect(conn.getStates).toHaveBeenCalledTimes(2);
+        // the subscription of the old connection was removed, not doubled
+        expect(conn.activeSubscriptions()).toBe(1);
+    });
+});
+
+describe('loading socket.io.js', () => {
+    type LoaderWindow = {
+        registerSocketOnLoad?: (cb: () => void) => void;
+        registerSocketLoadError?: (cb: (tried: string) => void) => void;
+    };
+    const w = window as unknown as LoaderWindow;
+
+    afterEach(() => {
+        delete w.registerSocketOnLoad;
+        delete w.registerSocketLoadError;
+    });
+
+    it('waits for the loader of index.html before it connects', async () => {
+        delete (globalThis as { io?: unknown }).io;
+        let loaded: (() => void) | undefined;
+        w.registerSocketOnLoad = cb => (loaded = cb);
+        const socket = await loadSocket();
+        renderHook(() => socket.useConnection());
+
+        await waitFor(() => expect(loaded).toBeTypeOf('function'));
+        expect(FakeConnection.last).toBeNull();
+
+        (globalThis as { io?: unknown }).io = {};
+        act(() => loaded?.());
+        await waitFor(() => expect(FakeConnection.last).not.toBeNull());
+    });
+
+    it('reports the URLs index.html could not load the library from', async () => {
+        delete (globalThis as { io?: unknown }).io;
+        let failed: ((tried: string) => void) | undefined;
+        w.registerSocketOnLoad = () => {};
+        w.registerSocketLoadError = cb => (failed = cb);
+        const socket = await loadSocket();
+        const { result } = renderHook(() => socket.useSocketLoadError());
+        expect(result.current).toBeNull();
+
+        act(() => failed?.('http://192.0.2.5:8082/lib/js/socket.io.js'));
+
+        expect(result.current).toBe('http://192.0.2.5:8082/lib/js/socket.io.js');
+        expect(FakeConnection.last).toBeNull();
+    });
+
+    it('stays quiet with an index.html that has no error callback', async () => {
+        const socket = await loadSocket();
+        const { result } = renderHook(() => socket.useSocketLoadError());
+
+        expect(result.current).toBeNull();
+    });
 });

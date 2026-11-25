@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { App } from './App';
 import { useThemeMode } from './theme';
-import { setIobState, setStates } from './test/socketMock';
+import { setIobState, setSocketLoadError, setStates } from './test/socketMock';
 
 vi.mock('./socket', () => import('./test/socketMock'));
 
@@ -30,6 +30,7 @@ function installMatchMedia(prefersDark: boolean): { setSystemDark: (dark: boolea
 beforeEach(() => {
     localStorage.clear();
     setIobState.mockClear();
+    setSocketLoadError(null);
     setStates({});
 });
 
@@ -38,6 +39,19 @@ afterEach(() => {
 });
 
 describe('App', () => {
+    it('explains that socket.io.js could not be loaded instead of waiting silently', () => {
+        installMatchMedia(false);
+        render(<App />);
+        expect(screen.queryByText('Cannot load the connection library of ioBroker')).toBeNull();
+
+        act(() => setSocketLoadError('http://192.0.2.5:8082/lib/js/socket.io.js'));
+
+        const alert = screen.getByRole('alert');
+        expect(alert.textContent).toContain('Cannot load the connection library of ioBroker');
+        expect(alert.textContent).toContain('socket.io.js could not be loaded from http://192.0.2.5:8082/lib/js/socket.io.js.');
+        expect(alert.textContent).toContain('web adapter');
+    });
+
     it('renders the empty panel without errors', () => {
         const error = vi.spyOn(console, 'error');
         installMatchMedia(false);
@@ -85,6 +99,15 @@ describe('App', () => {
         expect(screen.queryByText('Doors')).toBeNull();
         expect(screen.queryByText('Recent events')).toBeNull();
         expect(screen.getByText('Last event image')).toBeTruthy();
+    });
+
+    it('limits the content to the stored maximum width', () => {
+        installMatchMedia(false);
+        setStates({ 'admin.uiSettings': JSON.stringify({ maxWidth: 800 }) });
+        render(<App />);
+
+        const content = screen.getByText('Recent events').closest('.MuiStack-root')?.parentElement as HTMLElement;
+        expect(getComputedStyle(content).maxWidth).toBe('800px');
     });
 
     it('stores a switch of the settings panel', () => {

@@ -39,12 +39,52 @@ function logError(what: string): (err: unknown) => void {
     };
 }
 
+interface SocketLoaderWindow {
+    registerSocketOnLoad?: (cb: () => void) => void;
+    /** set by index.html: calls back with the URLs it tried if socket.io.js could not be loaded */
+    registerSocketLoadError?: (cb: (tried: string) => void) => void;
+}
+
+let socketLoadError: string | null = null;
+const loadErrorListeners = new Set<() => void>();
+let watchingLoadError = false;
+
+function watchSocketLoadError(): void {
+    if (watchingLoadError || typeof window === 'undefined') {
+        return;
+    }
+    watchingLoadError = true;
+    const w = window as unknown as SocketLoaderWindow;
+    if (typeof w.registerSocketLoadError === 'function') {
+        w.registerSocketLoadError(tried => {
+            socketLoadError = tried || 'socket.io.js';
+            for (const l of loadErrorListeners) {
+                l();
+            }
+        });
+    }
+}
+
+/** The URLs `index.html` tried in vain to load socket.io.js from, or null while nothing failed */
+export function useSocketLoadError(): string | null {
+    return useSyncExternalStore(
+        listener => {
+            loadErrorListeners.add(listener);
+            watchSocketLoadError();
+            return () => loadErrorListeners.delete(listener);
+        },
+        () => socketLoadError,
+        () => null,
+    );
+}
+
 function awaitSocketIo(): Promise<void> {
+    watchSocketLoadError();
     if (typeof globalThis !== 'undefined' && (globalThis as any).io) {
         return Promise.resolve();
     }
     return new Promise(resolve => {
-        const w = window as unknown as { registerSocketOnLoad?: (cb: () => void) => void };
+        const w = window as unknown as SocketLoaderWindow;
         if (typeof w.registerSocketOnLoad === 'function') {
             w.registerSocketOnLoad(resolve);
         } else {
