@@ -132,6 +132,20 @@ describe('LastThumbnailCard', () => {
         expect(screen.queryByRole('img')).toBeNull();
     });
 
+    it('names the disabled thumbnail server for the empty URL the adapter writes when the server is off', () => {
+        // since E-04 the adapter clears lastThumbnailUrl at start instead of keeping an old URL
+        setStates({
+            ...ULTRA,
+            'devices.aabbccddeeff.lastThumbnailAt': 1_800_000_000_000,
+            'devices.aabbccddeeff.lastThumbnailUrl': '',
+        });
+        render(<LastThumbnailCard />);
+
+        expect(screen.getByText(/thumbnail server is switched off/)).toBeTruthy();
+        expect(screen.queryByText(/could not be loaded/)).toBeNull();
+        expect(screen.queryByRole('img')).toBeNull();
+    });
+
     it('says so if the image cannot be loaded and tries again with the next image', () => {
         setStates({ ...ULTRA, 'devices.aabbccddeeff.lastThumbnailUrl': URL_A });
         render(<LastThumbnailCard />);
