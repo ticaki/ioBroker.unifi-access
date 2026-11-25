@@ -1,11 +1,4 @@
 {
-    "auth_status_loading": "正在检查适配器状态…",
-    "auth_status_connected": "已连接到 UniFi Access 控制器",
-    "auth_status_connected_named": "已连接到 %s",
-    "auth_status_missingToken": "缺少 API 令牌 — 请填写后点击「测试连接」",
-    "auth_status_unauthorized": "控制器拒绝了令牌(未授权)",
-    "auth_status_network": "无法连接控制器(网络错误)",
-    "auth_status_disconnected": "未连接",
     "auth_test_button": "测试连接",
     "auth_test_tooltip": "使用上方输入的值测试控制器(不保存)。",
     "auth_test_running": "正在测试控制器…",
@@ -15,6 +8,7 @@
     "auth_test_error_unauthorized": "令牌被拒绝(未授权)。",
     "auth_test_error_network": "无法连接控制器(网络错误)。",
     "auth_test_error_unknown": "连接测试失败。",
+
     "devices_title": "已发现的 UniFi Access 设备",
     "devices_refresh": "刷新",
     "devices_loading": "正在加载设备…",
@@ -26,10 +20,17 @@
     "devices_cap_doorbell": "门铃",
     "devices_cap_door_unlock": "门解锁",
     "devices_cap_live_events": "实时事件",
-    "actor_select_label": "Unlock actor (shown in logs)",
-    "actor_select_none": "None (use API token name)",
-    "actor_select_loading": "Loading users…",
-    "actor_select_error": "Could not load users. Is the adapter running?",
-    "actor_select_refresh": "Refresh user list",
-    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
+
+    "actor_select_label": "开门操作者(显示在日志中)",
+    "actor_select_none": "无(使用 API 令牌名称)",
+    "actor_select_loading": "正在加载用户…",
+    "actor_select_error": "无法加载用户。适配器正在运行吗?",
+    "actor_select_refresh": "刷新用户列表",
+    "actor_select_help": "当 ioBroker 开门时,所选用户会显示在 UniFi Access 的日志和 Webhook 中。",
+
+    "generic_webhook_urls": "Webhook URL",
+    "generic_webhook_url_loading": "正在加载网络接口…",
+    "generic_webhook_url_no_addresses": "未找到网络接口地址。",
+    "generic_webhook_copy": "复制到剪贴板",
+    "generic_webhook_copied": "已复制!"
 }

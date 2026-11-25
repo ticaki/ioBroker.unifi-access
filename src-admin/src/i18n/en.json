@@ -1,12 +1,4 @@
 {
-    "auth_status_loading": "Checking adapter status…",
-    "auth_status_connected": "Connected to UniFi Access controller",
-    "auth_status_connected_named": "Connected to %s",
-    "auth_status_missingToken": "API token missing — fill it in and click 'Test connection'",
-    "auth_status_unauthorized": "Token rejected by controller (unauthorized)",
-    "auth_status_network": "Cannot reach controller (network error)",
-    "auth_status_disconnected": "Not connected",
-
     "auth_test_button": "Test connection",
     "auth_test_tooltip": "Probe the controller with the values entered above (does not save).",
     "auth_test_running": "Probing controller…",
@@ -34,5 +26,11 @@
     "actor_select_loading": "Loading users…",
     "actor_select_error": "Could not load users. Is the adapter running?",
     "actor_select_refresh": "Refresh user list",
-    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
+    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door.",
+
+    "generic_webhook_urls": "Webhook URL(s)",
+    "generic_webhook_url_loading": "Loading network interfaces…",
+    "generic_webhook_url_no_addresses": "No network interface addresses found.",
+    "generic_webhook_copy": "Copy to clipboard",
+    "generic_webhook_copied": "Copied!"
 }

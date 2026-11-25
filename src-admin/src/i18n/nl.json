@@ -1,11 +1,4 @@
 {
-    "auth_status_loading": "Adapterstatus controleren…",
-    "auth_status_connected": "Verbonden met UniFi Access-controller",
-    "auth_status_connected_named": "Verbonden met %s",
-    "auth_status_missingToken": "API-token ontbreekt — vul deze in en klik op ‚Verbinding testen'",
-    "auth_status_unauthorized": "Token geweigerd door controller (niet geautoriseerd)",
-    "auth_status_network": "Controller niet bereikbaar (netwerkfout)",
-    "auth_status_disconnected": "Niet verbonden",
     "auth_test_button": "Verbinding testen",
     "auth_test_tooltip": "Test de controller met de hierboven ingevulde waarden (slaat niet op).",
     "auth_test_running": "Controller controleren…",
@@ -15,6 +8,7 @@
     "auth_test_error_unauthorized": "Token geweigerd (niet geautoriseerd).",
     "auth_test_error_network": "Controller niet bereikbaar (netwerkfout).",
     "auth_test_error_unknown": "Verbindingstest mislukt.",
+
     "devices_title": "Gevonden UniFi Access-apparaten",
     "devices_refresh": "Vernieuwen",
     "devices_loading": "Apparaten laden…",
@@ -26,10 +20,17 @@
     "devices_cap_doorbell": "deurbel",
     "devices_cap_door_unlock": "deur ontgrendelen",
     "devices_cap_live_events": "live-events",
-    "actor_select_label": "Unlock actor (shown in logs)",
-    "actor_select_none": "None (use API token name)",
-    "actor_select_loading": "Loading users…",
-    "actor_select_error": "Could not load users. Is the adapter running?",
-    "actor_select_refresh": "Refresh user list",
-    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
+
+    "actor_select_label": "Ontgrendelende gebruiker (zichtbaar in logboeken)",
+    "actor_select_none": "Geen (naam van het API-token gebruiken)",
+    "actor_select_loading": "Gebruikers laden…",
+    "actor_select_error": "Gebruikers konden niet worden geladen. Draait de adapter?",
+    "actor_select_refresh": "Gebruikerslijst vernieuwen",
+    "actor_select_help": "De geselecteerde gebruiker verschijnt in de logboeken en webhooks van UniFi Access wanneer ioBroker een deur ontgrendelt.",
+
+    "generic_webhook_urls": "Webhook-URL('s)",
+    "generic_webhook_url_loading": "Netwerkinterfaces laden…",
+    "generic_webhook_url_no_addresses": "Geen netwerkinterface-adressen gevonden.",
+    "generic_webhook_copy": "Naar klembord kopiëren",
+    "generic_webhook_copied": "Gekopieerd!"
 }

@@ -1,11 +1,4 @@
 {
-    "auth_status_loading": "Controllo dello stato dell'adapter…",
-    "auth_status_connected": "Connesso al controller UniFi Access",
-    "auth_status_connected_named": "Connesso a %s",
-    "auth_status_missingToken": "Token API mancante — inseriscilo e fai clic su «Testa connessione»",
-    "auth_status_unauthorized": "Token rifiutato dal controller (non autorizzato)",
-    "auth_status_network": "Impossibile raggiungere il controller (errore di rete)",
-    "auth_status_disconnected": "Non connesso",
     "auth_test_button": "Testa connessione",
     "auth_test_tooltip": "Sonda il controller con i valori inseriti sopra (senza salvare).",
     "auth_test_running": "Sondaggio del controller…",
@@ -15,6 +8,7 @@
     "auth_test_error_unauthorized": "Token rifiutato (non autorizzato).",
     "auth_test_error_network": "Impossibile raggiungere il controller (errore di rete).",
     "auth_test_error_unknown": "Test della connessione fallito.",
+
     "devices_title": "Dispositivi UniFi Access rilevati",
     "devices_refresh": "Aggiorna",
     "devices_loading": "Caricamento dispositivi…",
@@ -26,10 +20,17 @@
     "devices_cap_doorbell": "campanello",
     "devices_cap_door_unlock": "apertura porta",
     "devices_cap_live_events": "eventi live",
-    "actor_select_label": "Unlock actor (shown in logs)",
-    "actor_select_none": "None (use API token name)",
-    "actor_select_loading": "Loading users…",
-    "actor_select_error": "Could not load users. Is the adapter running?",
-    "actor_select_refresh": "Refresh user list",
-    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
+
+    "actor_select_label": "Utente di apertura (mostrato nei log)",
+    "actor_select_none": "Nessuno (usa il nome del token API)",
+    "actor_select_loading": "Caricamento utenti…",
+    "actor_select_error": "Impossibile caricare gli utenti. L'adapter è in esecuzione?",
+    "actor_select_refresh": "Aggiorna elenco utenti",
+    "actor_select_help": "L'utente selezionato compare nei log e nei webhook di UniFi Access quando ioBroker apre una porta.",
+
+    "generic_webhook_urls": "URL del webhook",
+    "generic_webhook_url_loading": "Caricamento interfacce di rete…",
+    "generic_webhook_url_no_addresses": "Nessun indirizzo di interfaccia di rete trovato.",
+    "generic_webhook_copy": "Copia negli appunti",
+    "generic_webhook_copied": "Copiato!"
 }

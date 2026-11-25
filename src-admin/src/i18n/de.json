@@ -1,12 +1,4 @@
 {
-    "auth_status_loading": "Adapter-Status wird geprüft…",
-    "auth_status_connected": "Mit UniFi-Access-Controller verbunden",
-    "auth_status_connected_named": "Verbunden mit %s",
-    "auth_status_missingToken": "API-Token fehlt — bitte eintragen und „Verbindung testen“ klicken",
-    "auth_status_unauthorized": "Token wurde vom Controller abgelehnt (unauthorized)",
-    "auth_status_network": "Controller nicht erreichbar (Netzwerkfehler)",
-    "auth_status_disconnected": "Nicht verbunden",
-
     "auth_test_button": "Verbindung testen",
     "auth_test_tooltip": "Prüft den Controller mit den oben eingetragenen Werten (ohne zu speichern).",
     "auth_test_running": "Prüfe Controller…",
@@ -34,5 +26,11 @@
     "actor_select_loading": "Benutzer werden geladen…",
     "actor_select_error": "Benutzer konnten nicht geladen werden. Läuft der Adapter?",
     "actor_select_refresh": "Benutzerliste aktualisieren",
-    "actor_select_help": "Der gewählte Benutzer erscheint in UniFi-Access-Protokollen und Webhooks, wenn ioBroker eine Tür öffnet."
+    "actor_select_help": "Der gewählte Benutzer erscheint in UniFi-Access-Protokollen und Webhooks, wenn ioBroker eine Tür öffnet.",
+
+    "generic_webhook_urls": "Webhook-URL(s)",
+    "generic_webhook_url_loading": "Netzwerk-Interfaces werden geladen…",
+    "generic_webhook_url_no_addresses": "Keine Netzwerk-Interface-Adressen gefunden.",
+    "generic_webhook_copy": "In Zwischenablage kopieren",
+    "generic_webhook_copied": "Kopiert!"
 }
