@@ -245,7 +245,7 @@
 					"label": "publicBaseUrl",
 					"help": "publicBaseUrl_help",
 					"default": "",
-					"validator": "!data.publicBaseUrl || (v => !v || (/^https?:\\/\\/[^\\s/?#]+(\\/[A-Za-z0-9._~-]+)*$/i.test(v) && URL.canParse(v) && !new URL(v).username && !new URL(v).password))(String(data.publicBaseUrl).trim().replace(/\\/+$/, ''))",
+					"validator": "return !data.publicBaseUrl || (v => { if (!v) { return true; } if (!/^https?:\\/\\/[^\\s/?#]+(\\/[A-Za-z0-9._~-]+)*$/i.test(v)) { return false; } try { const u = new URL(v); return !u.username && !u.password; } catch (e) { return false; } })(String(data.publicBaseUrl).trim().replace(/\\/+$/, ''))",
 					"validatorErrorText": "publicBaseUrl_invalid",
 					"validatorNoSaveOnError": true,
 					"newLine": true,

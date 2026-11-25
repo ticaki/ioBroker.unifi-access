@@ -106,7 +106,8 @@ type JsonConfigItem = { validator?: string; [key: string]: unknown };
 
 /**
  * The validator of a field in admin/jsonConfig.json as a function of the form data — evaluated the way
- * the admin does it (an expression over `data`).
+ * the admin does it (`ConfigGeneric.execute()` of `@iobroker/json-config`): `return` is put in front only
+ * when the text does not contain the word `return` anywhere; an exception counts as "invalid".
  *
  * @param tab Tab key
  * @param field Field key
@@ -114,8 +115,15 @@ type JsonConfigItem = { validator?: string; [key: string]: unknown };
 function jsonConfigValidator(tab: string, field: string): (data: Record<string, unknown>) => boolean {
 	const item = (jsonConfig.items[tab].items as Record<string, JsonConfigItem>)[field];
 	expect(item?.validator, `${tab}.${field}.validator`).to.be.a('string');
-	const fn = new Function('data', `return (${item.validator});`) as (data: Record<string, unknown>) => unknown;
-	return data => fn(data) === true;
+	const body = item.validator!.includes('return') ? item.validator! : `return ${item.validator}`;
+	const fn = new Function('data', body) as (data: Record<string, unknown>) => unknown;
+	return data => {
+		try {
+			return fn(data) === true;
+		} catch {
+			return false;
+		}
+	};
 }
 
 /** Error codes describeAdapterError translates (everything else is shown raw). */
@@ -414,6 +422,21 @@ describe('contract adapter ↔ frontend (sendTo answers, error codes, state ids)
 				expect(validator({ publicBaseUrl: value }), JSON.stringify(value)).to.equal(
 					normalizePublicBaseUrl(value).problem === undefined,
 				);
+			}
+			// the same in a browser without URL.canParse (Chrome < 120, Safari < 17, Firefox < 115; R2F-02)
+			const canParse = Object.getOwnPropertyDescriptor(URL, 'canParse');
+			try {
+				Object.defineProperty(URL, 'canParse', { value: undefined, configurable: true, writable: true });
+				for (const value of values) {
+					expect(
+						validator({ publicBaseUrl: value }),
+						`without URL.canParse: ${JSON.stringify(value)}`,
+					).to.equal(normalizePublicBaseUrl(value).problem === undefined);
+				}
+			} finally {
+				if (canParse) {
+					Object.defineProperty(URL, 'canParse', canParse);
+				}
 			}
 			// and the admin page applies the same rule (shown URL ↔ validator)
 			const frontend = loadFrontendModule<FrontendServerUrl>('src-admin', 'src', 'serverUrl.ts');

@@ -147,7 +147,8 @@ describe('adapter configuration metadata (io-package.json / admin/jsonConfig.jso
 		})(jsonConfig);
 
 		/**
-		 * Evaluate an expression the way the admin does.
+		 * Evaluate an expression the way the admin does: `return` is put in front only when the text
+		 * does not contain the word `return` (`ConfigGeneric.execute()` of `@iobroker/json-config`).
 		 *
 		 * @param expr The expression
 		 * @param data The form values
@@ -161,7 +162,7 @@ describe('adapter configuration metadata (io-package.json / admin/jsonConfig.jso
 				'instanceObj',
 				'arrayIndex',
 				'globalData',
-				`return ${expr};`,
+				expr.includes('return') ? expr : `return ${expr};`,
 			)(data, true, {}, {}, {}, 0, {});
 
 		it('finds the expressions (sanity check)', () => {
