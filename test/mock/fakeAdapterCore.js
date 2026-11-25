@@ -61,12 +61,34 @@ class FakeAdapter {
 		/** @type {Record<string, string>} certificate store: name → PEM (see getCertificatesAsync) */
 		this.certificates = {};
 		this.unloaded = false;
+		/** True from the moment the unload handler is called (js-controller stops the instance). */
+		this.stopping = false;
+		/**
+		 * Every effect after the stop began: state/object writes and timers. Work that is still running
+		 * when the instance stops must not have any (see src/lib/stopSignal.ts).
+		 *
+		 * @type {{ method: string, id?: string, val?: any }[]}
+		 */
+		this.effectsAfterStop = [];
+		/** Number of log messages when the stop began (`log.messages.slice(logsAtStop)` = after the stop). */
+		this.logsAtStop = 0;
 		FakeAdapter.instances.push(this);
 	}
 
 	on(event, handler) {
 		this.handlers[event] = handler;
 		return this;
+	}
+
+	/**
+	 * @param {string} method Method of the fake core
+	 * @param {string} [id] Object/state id
+	 * @param {any} [val] Value written
+	 */
+	noteEffect(method, id, val) {
+		if (this.stopping) {
+			this.effectsAfterStop.push({ method, id, val });
+		}
 	}
 
 	fullId(id) {
@@ -88,6 +110,7 @@ class FakeAdapter {
 			isPlainObject(state) && 'val' in state
 				? { val: state.val, ack: state.ack === true }
 				: { val: state, ack: ack === true };
+		this.noteEffect('setState', id, normalised.val);
 		this.states.set(id, { ...normalised, ts: Date.now() });
 		this.stateWrites.push({ id, ...normalised });
 		return id;
@@ -116,6 +139,7 @@ class FakeAdapter {
 	}
 
 	async extendForeignObjectAsync(id, obj) {
+		this.noteEffect('extendObject', id);
 		const current = this.objects.get(id) ?? { _id: id };
 		this.objects.set(id, mergeDeep(current, obj));
 		return { id };
@@ -123,6 +147,7 @@ class FakeAdapter {
 
 	async setObjectNotExistsAsync(id, obj) {
 		const full = this.fullId(id);
+		this.noteEffect('setObjectNotExists', full);
 		if (!this.objects.has(full)) {
 			this.objects.set(full, mergeDeep({ _id: full }, obj));
 		}
@@ -140,17 +165,20 @@ class FakeAdapter {
 	/** Like js-controller: deleting a state object also removes its state. */
 	async delObjectAsync(id) {
 		const full = this.fullId(id);
+		this.noteEffect('delObject', full);
 		this.objects.delete(full);
 		this.states.delete(full);
 	}
 
 	async delStateAsync(id) {
+		this.noteEffect('delState', this.fullId(id));
 		this.states.delete(this.fullId(id));
 	}
 
 	// ------------------------------------------------------------------ timers
 
 	setTimeout(callback, ms, ...args) {
+		this.noteEffect('setTimeout', undefined, ms);
 		if (this.unloaded) {
 			return undefined;
 		}
@@ -170,6 +198,7 @@ class FakeAdapter {
 	}
 
 	setInterval(callback, ms, ...args) {
+		this.noteEffect('setInterval', undefined, ms);
 		if (this.unloaded) {
 			return undefined;
 		}
@@ -281,6 +310,10 @@ class FakeAdapter {
 	 * @returns {Promise<void>} Resolves when the adapter called the unload callback
 	 */
 	async fireUnload() {
+		if (!this.stopping) {
+			this.stopping = true;
+			this.logsAtStop = this.log.messages.length;
+		}
 		await new Promise(resolve => {
 			if (!this.handlers.unload) {
 				resolve(undefined);

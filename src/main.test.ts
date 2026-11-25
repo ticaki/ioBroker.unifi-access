@@ -32,7 +32,6 @@ import {
 	waitFor,
 	type FakeAdapter,
 } from '../test/mock';
-import { ProtectHttp } from './lib/protectHttp';
 import { SnapshotCache } from './lib/snapshotCache';
 import { UnifiHttp } from './lib/unifiHttp';
 import { SharedHttpServer } from './webserver/sharedHttpServer';
@@ -98,7 +97,18 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 	 * @param overrides Values overriding the default test configuration
 	 */
 	async function start(overrides: Record<string, unknown> = {}): Promise<FakeAdapter> {
-		adapter = createAdapterWithFakeCore(MAIN, {
+		adapter = create(overrides);
+		await adapter.fireReady();
+		return adapter;
+	}
+
+	/**
+	 * Create the adapter with the given config overrides without starting it.
+	 *
+	 * @param overrides Values overriding the default test configuration
+	 */
+	function create(overrides: Record<string, unknown> = {}): FakeAdapter {
+		return createAdapterWithFakeCore(MAIN, {
 			controllerHost: '127.0.0.1',
 			controllerPort: mock.port,
 			apiToken: TOKEN,
@@ -118,8 +128,70 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			unlockActorId: '',
 			...overrides,
 		});
-		await adapter.fireReady();
-		return adapter;
+	}
+
+	/**
+	 * Let the controller answer one request late and stop the instance while the adapter waits for
+	 * that answer. Resolves once the late answer has arrived and the adapter had every chance to go on
+	 * (real time for the network, 20 min of fake time for its timers).
+	 *
+	 * @param instance The adapter
+	 * @param fault The request to delay (method and path below /api/v1/developer)
+	 * @param fault.method HTTP method
+	 * @param fault.path Path below /api/v1/developer
+	 * @param trigger Starts the path under test; the request has to be sent from it
+	 * @returns The number of requests the controller had received when the instance stopped
+	 */
+	async function stopWhileTheControllerAnswers(
+		instance: FakeAdapter,
+		fault: { method: string; path: string },
+		trigger: () => Promise<unknown> | void,
+	): Promise<number> {
+		mock.failNext({ ...fault, delayMs: 300 });
+		await trigger();
+		// the fault is taken when the request arrives: from then on the adapter waits for the answer
+		await waitFor(() => !mock.faults.some(f => f.method === fault.method && f.path === fault.path), {
+			description: `${fault.method} ${fault.path} sent`,
+		});
+		// requests sent in parallel (Promise.all) arrive as well before the stop
+		await delay(30);
+		const seq = mock.requestSeq;
+		await instance.fireUnload();
+		await waitFor(() => new Set(mock.requests.filter(r => r.id <= seq).map(r => r.id)).size === seq, {
+			description: 'the late answer',
+			timeoutMs: 3000,
+		});
+		await delay(50);
+		await clock.tickAsync(20 * 60_000);
+		await delay(50);
+		return seq;
+	}
+
+	/**
+	 * Nothing happened after the stop: no request reached the controller, nothing was written, no timer
+	 * was created, nothing but debug output was logged (except `allowedLogs`: reports of an action the
+	 * controller carried out before the stop).
+	 *
+	 * @param instance The adapter
+	 * @param requestsAtStop Requests the controller had received when the instance stopped
+	 * @param allowedLogs Info messages that may still appear
+	 */
+	function expectNoEffectAfterTheStop(
+		instance: FakeAdapter,
+		requestsAtStop: number,
+		allowedLogs: RegExp[] = [],
+	): void {
+		expect(
+			mock.requests.filter(r => r.id > requestsAtStop).map(r => `${r.method} ${r.path}`),
+			'requests after the stop',
+		).to.deep.equal([]);
+		expect(instance.effectsAfterStop, 'writes and timers after the stop').to.deep.equal([]);
+		expect(
+			instance.log.messages
+				.slice(instance.logsAtStop)
+				.filter(m => m.level !== 'debug' && m.level !== 'silly' && !allowedLogs.some(re => re.test(m.message))),
+			'logs after the stop',
+		).to.deep.equal([]);
 	}
 
 	async function startConnected(overrides: Record<string, unknown> = {}): Promise<FakeAdapter> {
@@ -575,6 +647,40 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 						expect(mock.webhookEndpoints.map(e => e.id)).to.deep.equal([old]);
 						expect(JSON.stringify(instance.objects.get(INSTANCE_OBJECT)?.native)).to.equal(native);
 						expect(instance.timers.size, 'no registration retry').to.equal(0);
+					} finally {
+						stub.restore();
+					}
+				});
+
+				it('stopped while the controller creates the new endpoint: its credentials are still stored (R3T-03)', async () => {
+					const instance = await startConnected();
+					const original = UnifiHttp.prototype.createWebhookEndpoint;
+					const stub = sinon.stub(UnifiHttp.prototype, 'createWebhookEndpoint').callsFake(async function (
+						this: UnifiHttp,
+						payload,
+					) {
+						const result = await original.call(this, payload);
+						// the controller has created the endpoint when the instance stops
+						await instance.fireUnload();
+						return result;
+					});
+					try {
+						const answer = await instance.request('reregisterWebhook', undefined, 5000);
+						const created = mock.webhookEndpoints.find(e => e.name === ENDPOINT_NAME)!;
+						expect(answer).to.deep.equal({ ok: true, id: created.id });
+						await waitFor(
+							() => instance.objects.get(INSTANCE_OBJECT)?.native?.webhookEndpointId === created.id,
+							{ description: 'credentials stored' },
+						);
+						expect(instance.objects.get(INSTANCE_OBJECT)?.native?.webhookSecret).to.equal(
+							`encrypted(${created.secret})`,
+						);
+						expect(instance.val('info.webhookEndpointId')).to.equal(created.id);
+						// the only effects after the stop are the stored credentials
+						expect(instance.effectsAfterStop.map(e => `${e.method} ${e.id}`)).to.deep.equal([
+							`setState ${NS}.info.webhookEndpointId`,
+							`extendObject ${INSTANCE_OBJECT}`,
+						]);
 					} finally {
 						stub.restore();
 					}
@@ -3322,6 +3428,28 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				expect(response.body.equals(protect.snapshot)).to.equal(true);
 			});
 
+			it('stopped while the system log is queried: no snapshot is fetched from Protect afterwards (I-A)', async () => {
+				const instance = await startWithProtect();
+				mock.systemLogHits = [cameraHit()];
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'POST', path: '/system/logs' },
+					async () => {
+						await mock.deliverWebhook(
+							fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }),
+						);
+						await waitFor(() => events().length === 1, { description: 'event logged' });
+						await clock.tickAsync(3000);
+					},
+				);
+				expect(
+					protect.requests.filter(r => r.url.includes('/snapshot')),
+					'no snapshot request after the stop',
+				).to.deep.equal([]);
+				expectNoEffectAfterTheStop(instance, seq);
+				expect(events()[0].protectSnapshotUrl).to.equal(undefined);
+			});
+
 			// K-05: two doors opened within seconds — the lookup window contains the entries of both
 			describe('camera events belong to the door of the event', () => {
 				const OTHER_CAMERA = '77b2c3d4e5f60718293a4b5c';
@@ -4921,17 +5049,23 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				expect(instance.timers.size + instance.intervals.size).to.equal(0);
 			});
 
+			/**
+			 * Stops the instance while the Protect login is in flight: the console has received it and
+			 * answers right after the stop.
+			 *
+			 * @param _inst The adapter (unused)
+			 * @param stop Stops the instance
+			 */
+			function stopDuringProtectLogin(_inst: FakeAdapter, stop: () => void): void {
+				protect.onLoginReceived = () => {
+					protect.onLoginReceived = null;
+					stop();
+				};
+			}
+
 			it('stopped during a failing Protect login: no retry is planned and nothing is reported', async () => {
 				protect.failLogins(503, 5);
-				const instance = await stopDuringStart((_inst, stop) => {
-					const original = ProtectHttp.prototype.login;
-					stubs.push(
-						sinon.stub(ProtectHttp.prototype, 'login').callsFake(async function (this: ProtectHttp) {
-							stop();
-							await original.call(this);
-						}),
-					);
-				});
+				const instance = await stopDuringStart(stopDuringProtectLogin);
 				expect(protect.logins.map(l => l.status)).to.deep.equal([503]);
 				expect(instance.log.of('warn').filter(w => w.includes('Protect login failed'))).to.deep.equal([]);
 				const logins = protect.logins.length;
@@ -4939,22 +5073,6 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				await delay(30);
 				expect(protect.logins, 'no login retry after the stop').to.have.length(logins);
 			});
-
-			/**
-			 * Stops the instance as soon as the Protect login has been sent.
-			 *
-			 * @param _inst The adapter (unused)
-			 * @param stop Stops the instance
-			 */
-			function stopDuringProtectLogin(_inst: FakeAdapter, stop: () => void): void {
-				const original = ProtectHttp.prototype.login;
-				stubs.push(
-					sinon.stub(ProtectHttp.prototype, 'login').callsFake(async function (this: ProtectHttp) {
-						stop();
-						await original.call(this);
-					}),
-				);
-			}
 
 			it('stopped during a Protect login that succeeds: "Protect connected" is not reported (R2K-02)', async () => {
 				const instance = await stopDuringStart(stopDuringProtectLogin);
@@ -4973,6 +5091,246 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				await delay(50);
 				expect(instance.log.of('warn').filter(w => w.includes('Protect'))).to.deep.equal([]);
 				expect(instance.val('info.protectConnected')).to.equal(false);
+			});
+		});
+
+		// I-A: every asynchronous path that waits for the controller when the instance stops. After the
+		// late answer nothing may happen any more — no request, no write, no timer, no report.
+		describe('work that waits for the controller when the instance stops has no effect afterwards', () => {
+			const unlockPath = `/doors/${DOOR_3855}/unlock`;
+
+			it('loading the controller state at the start', async () => {
+				const instance = (adapter = create());
+				let ready: Promise<void> | undefined;
+				const seq = await stopWhileTheControllerAnswers(instance, { method: 'GET', path: '/devices' }, () => {
+					ready = instance.fireReady();
+				});
+				await ready;
+				expectNoEffectAfterTheStop(instance, seq);
+				expect(mock.wsHandshakes, 'no WebSocket').to.have.length(0);
+			});
+
+			it('the webhook registration at the start (R3K-01): no POST, not reported as registered', async () => {
+				const instance = (adapter = create());
+				let ready: Promise<void> | undefined;
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'GET', path: '/webhooks/endpoints' },
+					() => {
+						ready = instance.fireReady();
+					},
+				);
+				await ready;
+				expectNoEffectAfterTheStop(instance, seq);
+				expect(mock.webhookEndpoints, 'no endpoint created after the stop').to.deep.equal([]);
+				expect(instance.val('info.webhookRegistered')).to.equal(false);
+				expect(instance.objects.get(INSTANCE_OBJECT)?.native?.webhookEndpointId).to.equal(undefined);
+			});
+
+			it('the webhook registration at the start, stopped while the controller creates the endpoint: credentials stored, not reported as registered', async () => {
+				const instance = (adapter = create());
+				let ready: Promise<void> | undefined;
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'POST', path: '/webhooks/endpoints' },
+					() => {
+						ready = instance.fireReady();
+					},
+				);
+				await ready;
+				const [created] = mock.webhookEndpoints;
+				expect(instance.objects.get(INSTANCE_OBJECT)?.native).to.include({
+					webhookEndpointId: created.id,
+					webhookSecret: `encrypted(${created.secret})`,
+				});
+				expect(instance.val('info.webhookRegistered')).to.equal(false);
+				// the stored credentials are the exception (the endpoint exists at the controller)
+				expect(instance.effectsAfterStop.map(e => `${e.method} ${e.id}`)).to.deep.equal([
+					`setState ${NS}.info.webhookEndpointId`,
+					`extendObject ${INSTANCE_OBJECT}`,
+				]);
+				instance.effectsAfterStop.splice(0);
+				expectNoEffectAfterTheStop(instance, seq);
+			});
+
+			it('the periodic check of the webhook registration', async () => {
+				const instance = await startConnected();
+				await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+				// the endpoint is gone at the controller: the check would register a new one
+				mock.webhookEndpoints.splice(0);
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'GET', path: '/webhooks/endpoints' },
+					() => clock.tickAsync(15 * 60_000),
+				);
+				expectNoEffectAfterTheStop(instance, seq);
+				expect(mock.webhookEndpoints).to.deep.equal([]);
+			});
+
+			it('the retry of a failed webhook registration', async () => {
+				mock.failNext({ method: 'POST', path: '/webhooks/endpoints', status: 500 });
+				const instance = await startConnected();
+				await waitFor(() => instance.log.of('warn').some(m => m.startsWith('Webhook registration failed')), {
+					description: 'registration failed',
+				});
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'GET', path: '/webhooks/endpoints' },
+					() => clock.tickAsync(60_000),
+				);
+				expectNoEffectAfterTheStop(instance, seq);
+				expect(mock.webhookEndpoints).to.deep.equal([]);
+			});
+
+			it('the retry of a failed start (bootstrap retry)', async () => {
+				mock.failNext({ method: 'GET', path: '/devices', status: 500 });
+				const instance = await start();
+				await waitFor(() => instance.log.of('warn').some(m => m.startsWith('Bootstrap failed')), {
+					description: 'bootstrap failed',
+				});
+				const seq = await stopWhileTheControllerAnswers(instance, { method: 'GET', path: '/devices' }, () =>
+					clock.tickAsync(30_000),
+				);
+				expectNoEffectAfterTheStop(instance, seq);
+				expect(mock.wsHandshakes, 'no WebSocket').to.have.length(0);
+			});
+
+			it('the reload after a WebSocket reconnect', async () => {
+				const instance = await startConnected();
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'GET', path: '/devices' },
+					async () => {
+						mock.dropWsConnections();
+						await waitFor(() => instance.val('info.connection') === false, {
+							description: 'connection lost',
+						});
+						await clock.tickAsync(200);
+					},
+				);
+				expectNoEffectAfterTheStop(instance, seq);
+			});
+
+			it('the door refresh after a door sensor event', async () => {
+				const instance = await startConnected();
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'GET', path: '/doors' },
+					async () => {
+						await mock.deliverWebhook(
+							fixtures.webhookEvents.dpsStatus({ door: door(DOOR_3855), device: hub(), status: 'open' }),
+						);
+						await waitFor(() => events().length === 1, { description: 'event logged' });
+						await clock.tickAsync(2000);
+					},
+				);
+				expectNoEffectAfterTheStop(instance, seq);
+			});
+
+			it('a door unlock command (the door is unlocked, but not acknowledged afterwards)', async () => {
+				const instance = await startConnected();
+				const seq = await stopWhileTheControllerAnswers(instance, { method: 'PUT', path: unlockPath }, () => {
+					instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+				});
+				// the controller carried the command out: saying so is a report, not an effect
+				expectNoEffectAfterTheStop(instance, seq, [/^Door .* unlocked \(pulse\)\.$/]);
+				expect(mock.unlocks).to.have.length(1);
+				expect(instance.states.get(`${NS}.doors.${DOOR_3855}.unlock`)?.ack).to.equal(false);
+			});
+
+			it('a lock rule command', async () => {
+				const instance = await startConnected();
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'PUT', path: `/doors/${DOOR_3855}/lock_rule` },
+					() => {
+						instance.fireStateChange(`doors.${DOOR_3855}.lock_rule`, 2);
+					},
+				);
+				expectNoEffectAfterTheStop(instance, seq, [/lock_rule set to keep_lock\.$/]);
+			});
+
+			it('the status check of a door after an unlock (door and lock rule)', async () => {
+				const instance = await startConnected();
+				instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+				await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.unlock`)?.ack === true, {
+					description: 'unlock acknowledged',
+				});
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'GET', path: `/doors/${DOOR_3855}` },
+					() => clock.tickAsync(7000),
+				);
+				// without the stop the lock rule of the door would be read next
+				expectNoEffectAfterTheStop(instance, seq);
+			});
+
+			it('the lock rule read of a door status check', async () => {
+				const instance = await startConnected();
+				instance.fireStateChange(`doors.${DOOR_3855}.unlock`, true);
+				await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_3855}.unlock`)?.ack === true, {
+					description: 'unlock acknowledged',
+				});
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'GET', path: `/doors/${DOOR_3855}/lock_rule` },
+					() => clock.tickAsync(7000),
+				);
+				expectNoEffectAfterTheStop(instance, seq);
+			});
+
+			it('an emergency command (no PUT with the flags read before the stop)', async () => {
+				mock.emergency = { lockdown: false, evacuation: false };
+				const instance = await startConnected();
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'GET', path: '/doors/settings/emergency' },
+					() => {
+						instance.fireStateChange('doors.emergency.lockdown', true);
+					},
+				);
+				expectNoEffectAfterTheStop(instance, seq);
+				expect(mock.emergency).to.deep.equal({ lockdown: false, evacuation: false });
+			});
+
+			it('the emergency status read after an emergency event', async () => {
+				const instance = await startConnected();
+				const seq = await stopWhileTheControllerAnswers(
+					instance,
+					{ method: 'GET', path: '/doors/settings/emergency' },
+					() =>
+						mock.deliverWebhook(
+							fixtures.webhookEvents.emergencyStatus({ device: hub(), mode: 'lockdown', value: true }),
+						),
+				);
+				expectNoEffectAfterTheStop(instance, seq);
+			});
+
+			it('an event that is being processed when the instance stops', async () => {
+				const instance = await startConnected();
+				// stop right when the event log is written: the doorbell states that follow are not written
+				const target = instance as unknown as Record<string, (...args: unknown[]) => unknown>;
+				const original = target.setForeignStateAsync.bind(instance);
+				let unloaded: Promise<void> | undefined;
+				target.setForeignStateAsync = (...args: unknown[]) => {
+					if (String(args[0]).endsWith('.events.last') && !unloaded) {
+						unloaded = instance.fireUnload();
+						// the write that was already on its way is the last one
+						return original(...args);
+					}
+					return original(...args);
+				};
+				const seq = mock.requestSeq;
+				mock.emitRemoteView();
+				await waitFor(() => unloaded !== undefined, { description: 'event processed' });
+				await unloaded;
+				await delay(50);
+				await clock.tickAsync(20 * 60_000);
+				await delay(50);
+				expect(instance.effectsAfterStop.map(e => e.id)).to.deep.equal([`${NS}.events.last`]);
+				instance.effectsAfterStop.splice(0);
+				expectNoEffectAfterTheStop(instance, seq);
+				expect(instance.val('doorbell.activeCallId')).to.equal(null);
 			});
 		});
 

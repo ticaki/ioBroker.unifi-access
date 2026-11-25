@@ -374,6 +374,92 @@ describe('webhook registration (against the mock controller)', () => {
 		});
 	});
 
+	describe('ensureRegistration() stops sending once isStopped() says so (R3K-01)', () => {
+		/**
+		 * The options with a stop that comes right after the controller answered the list request.
+		 *
+		 * @returns Options for ensureRegistration
+		 */
+		function stopAfterTheListing(): RegistrationOptions {
+			let stopped = false;
+			const original = options.http.listWebhookEndpoints.bind(options.http);
+			const http = Object.create(options.http) as typeof options.http;
+			http.listWebhookEndpoints = async () => {
+				const list = await original();
+				stopped = true;
+				return list;
+			};
+			return { ...options, http, isStopped: () => stopped };
+		}
+
+		it('stopped before the start: nothing is sent', async () => {
+			const err = await rejection(ensureRegistration({ ...options, isStopped: () => true }));
+			expect(err).to.be.instanceOf(RegistrationStoppedError);
+			expect(calls()).to.deep.equal([]);
+		});
+
+		it('stopped after the listing: no POST for a new endpoint', async () => {
+			const err = await rejection(ensureRegistration(stopAfterTheListing()));
+			expect(err).to.be.instanceOf(RegistrationStoppedError);
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`]);
+			expect(mock.webhookEndpoints).to.deep.equal([]);
+		});
+
+		it('stopped after the listing: an endpoint with an outdated URL is neither moved nor deleted', async () => {
+			const old = mock.addWebhookEndpoint({ endpoint: OLD_URL, name: NAME });
+			const err = await rejection(ensureRegistration(stopAfterTheListing()));
+			expect(err).to.be.instanceOf(RegistrationStoppedError);
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`]);
+			expect(mock.webhookEndpoints).to.deep.equal([old]);
+		});
+
+		it('stopped after the listing: an endpoint with missing events is not updated', async () => {
+			const existing = mock.addWebhookEndpoint({
+				endpoint: PUBLIC_URL,
+				name: NAME,
+				events: ['access.door.unlock'],
+			});
+			const err = await rejection(ensureRegistration(stopAfterTheListing()));
+			expect(err).to.be.instanceOf(RegistrationStoppedError);
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`]);
+			expect(mock.webhookEndpoints).to.deep.equal([existing]);
+		});
+
+		it('a request the HTTP client refuses because of the stop ends the registration (not taken for a failed step)', async () => {
+			mock.addWebhookEndpoint({ endpoint: OLD_URL, name: NAME });
+			let stopped = false;
+			const http = new UnifiHttp({ host: '127.0.0.1', port: mock.port, token: TOKEN, isStopped: () => stopped });
+			const original = http.listWebhookEndpoints.bind(http);
+			http.listWebhookEndpoints = async () => {
+				const list = await original();
+				stopped = true;
+				return list;
+			};
+			// no isStopped for the registration itself: only the client knows about the stop
+			const err = await rejection(ensureRegistration({ ...options, http }));
+			expect(err).to.be.instanceOf(RegistrationStoppedError);
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`]);
+			// the refused PUT is not reported as a failure and does not lead to "registering a new one"
+			expect(logger.of('warn')).to.deep.equal([]);
+		});
+
+		it('reregister(): a DELETE the HTTP client refuses because of the stop ends it as well', async () => {
+			const old = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME });
+			let stopped = false;
+			const http = new UnifiHttp({ host: '127.0.0.1', port: mock.port, token: TOKEN, isStopped: () => stopped });
+			const original = http.listWebhookEndpoints.bind(http);
+			http.listWebhookEndpoints = async () => {
+				const list = await original();
+				stopped = true;
+				return list;
+			};
+			const err = await rejection(reregister({ ...options, http }, old.id));
+			expect(err).to.be.instanceOf(RegistrationStoppedError);
+			expect(calls()).to.deep.equal([`GET ${ENDPOINTS}`]);
+			expect(logger.of('warn')).to.deep.equal([]);
+		});
+	});
+
 	describe('reregister()', () => {
 		it('deletes the stored endpoint and creates a new one with a fresh secret', async () => {
 			const old = mock.addWebhookEndpoint({ endpoint: PUBLIC_URL, name: NAME });

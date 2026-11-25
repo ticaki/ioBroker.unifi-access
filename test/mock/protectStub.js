@@ -32,6 +32,13 @@ class ProtectStub {
 		this.logins = [];
 		/** HTTP status forced for the next N logins: `{ status, times }` */
 		this.loginFault = null;
+		/**
+		 * Called when a login request has arrived, before it is answered (e.g. to stop the adapter
+		 * while its login is in flight).
+		 *
+		 * @type {(() => void) | null}
+		 */
+		this.onLoginReceived = null;
 		this.snapshot = Buffer.from([0xff, 0xd8, 0x50, 0x52, 0x4f, 0x54, 0xff, 0xd9]);
 		this.clip = Buffer.from('protect-clip-bytes');
 		/** @type {Record<string, Record<string, unknown>>} event id → event metadata */
@@ -130,6 +137,7 @@ class ProtectStub {
 				this.loginFault.times -= 1;
 			}
 			this.logins.push({ username: credentials.username, password: credentials.password, status });
+			this.onLoginReceived?.();
 			if (status !== 200) {
 				send(status, { error: 'login failed' });
 				return;

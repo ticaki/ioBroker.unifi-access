@@ -150,7 +150,10 @@ export class MockUnifiController extends EventEmitter {
 	autoPong: boolean;
 	duplicateEndpointHttpStatus: number;
 
+	/** Answered requests in the order of their answers */
 	requests: RecordedRequest[];
+	/** Number of API requests received so far (`RecordedRequest.id` counts in the order of arrival) */
+	readonly requestSeq: number;
 	unlocks: {
 		doorId: string;
 		actor_id?: string;
@@ -302,6 +305,12 @@ export class FakeAdapter {
 	/** Running intervals created through adapter.setInterval */
 	intervals: Set<unknown>;
 	unloaded: boolean;
+	/** True from the moment the unload handler is called */
+	stopping: boolean;
+	/** Every state/object write and timer after the stop began */
+	effectsAfterStop: { method: string; id?: string; val?: any }[];
+	/** Number of log messages when the stop began */
+	logsAtStop: number;
 
 	setState(id: string, state: unknown, ack?: boolean): Promise<string>;
 	getStateAsync(id: string): Promise<FakeState | null>;
@@ -355,6 +364,8 @@ export class ProtectStub {
 	requests: { method: string; url: string; headers: IncomingHttpHeaders; body: string; status: number }[];
 	/** Every login attempt with the credentials received and the status answered */
 	logins: { username?: string; password?: string; status: number }[];
+	/** Called when a login request has arrived, before it is answered */
+	onLoginReceived: (() => void) | null;
 	snapshot: Buffer;
 	clip: Buffer;
 	events: Record<string, Record<string, unknown>>;
