@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { EventLogCard, parseEvents } from './EventLogCard';
 import { setStates, updateState } from '../test/socketMock';
 import { SettingsContext, useSettingsProvider } from '../settings';
+import { createPanelTheme, focusRingColor } from '../theme';
+import { ThemeProvider } from '@mui/material';
 import type { JSX, ReactNode } from 'react';
 
 vi.mock('../socket', () => import('../test/socketMock'));
@@ -531,5 +533,62 @@ describe('EventLogCard', () => {
             fireEvent.click(button);
             expect(screen.getByRole('dialog')).toBeTruthy();
         });
+
+        it.each(['light', 'dark'] as const)(
+            'the keyboard focus on the camera image is a clearly visible ring (%s theme)',
+            mode => {
+                const theme = createPanelTheme(mode);
+                setStates({
+                    'events.last': JSON.stringify([
+                        { ts: NOW - 60_000, type: 'access.door.unlock', doorName: 'Front door', protectSnapshotUrl: SNAPSHOT },
+                    ]),
+                });
+                render(
+                    <ThemeProvider theme={theme}>
+                        <EventLogCard />
+                    </ThemeProvider>,
+                );
+                const button = thumbButton() as HTMLElement;
+                expect(getComputedStyle(button).outlineStyle).not.toBe('solid');
+                // what MUI sets for keyboard focus (focus-visible)
+                button.classList.add('Mui-focusVisible');
+                const style = getComputedStyle(button);
+                expect(style.outlineStyle).toBe('solid');
+                expect(style.outlineWidth).toBe('3px');
+                const ring = mode === 'dark' ? theme.palette.primary.light : theme.palette.primary.main;
+                expect(ring).toBe(focusRingColor(theme));
+                expect(contrast(ring, theme.palette.background.paper)).toBeGreaterThanOrEqual(3);
+                expect(style.outline.replace(/\s/g, '')).toContain(rgb(ring));
+            },
+        );
     });
 });
+
+/** Channels of a colour as MUI writes it: `#rgb`, `#rrggbb` or `rgb(r, g, b)` */
+function channels(color: string): [number, number, number] {
+    const m = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(color);
+    if (m) {
+        return [Number(m[1]), Number(m[2]), Number(m[3])];
+    }
+    const hex = color.length === 4 ? color.replace(/[0-9a-f]/gi, c => c + c) : color;
+    const n = Number.parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** A colour as `rgb(r,g,b)` (how jsdom reports colours, without blanks) */
+function rgb(color: string): string {
+    return `rgb(${channels(color).join(',')})`;
+}
+
+/** WCAG contrast ratio of two colours */
+function contrast(a: string, b: string): number {
+    const lum = (color: string): number => {
+        const [r, g, bl] = channels(color).map(c => {
+            const v = c / 255;
+            return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+    };
+    const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+}

@@ -2,6 +2,7 @@ import { Box, ButtonBase, Card, CardContent, List, ListItem, ListItemText, Stack
 import { type JSX, useEffect, useMemo, useRef, useState } from 'react';
 import { ADAPTER_NAMESPACE, useIobState, useIobStateArrival } from '../socket';
 import { useSettings } from '../settings';
+import { focusRingColor } from '../theme';
 import { EventMediaModal } from './EventMediaModal';
 
 // Adapter triggers the Protect snapshot fetch via system-log poll for these event types only.
@@ -330,7 +331,16 @@ export function EventLogCard(): JSX.Element {
                                                 onClick={() => setModalEvent(e)}
                                                 aria-label={`Show camera image${e.doorName ? ` of ${e.doorName}` : ''}, ${new Date(e.ts).toLocaleString()}`}
                                                 focusRipple
-                                                sx={{ borderRadius: 0.5, flexShrink: 0, mt: 0.5 }}
+                                                sx={theme => ({
+                                                    borderRadius: 0.5,
+                                                    flexShrink: 0,
+                                                    mt: 0.5,
+                                                    // clearly visible keyboard focus, in both themes
+                                                    '&.Mui-focusVisible, &:focus-visible': {
+                                                        outline: `3px solid ${focusRingColor(theme)}`,
+                                                        outlineOffset: '2px',
+                                                    },
+                                                })}
                                             >
                                                 <Box
                                                     component="img"
