@@ -121,6 +121,7 @@
 		"caCert": "",
 		"wsReconnectDelay": 5,
 		"defaultUnlockDuration": 0,
+		"unlockActorId": "",
 		"listenPort": 8095,
 		"listenIp": "0.0.0.0",
 		"enableTls": false,

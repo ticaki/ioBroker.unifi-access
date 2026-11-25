@@ -164,9 +164,8 @@
 					"lg": 3,
 					"xl": 3
 				},
-				"_actorSelect": {
+				"unlockActorId": {
 					"type": "custom",
-					"attr": "unlockActorId",
 					"name": "ConfigCustomUnifiAccessSet/Components/ActorSelect",
 					"url": "custom/customComponents.js",
 					"i18n": true,
