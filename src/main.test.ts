@@ -92,8 +92,10 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 	async function startConnected(overrides: Record<string, unknown> = {}): Promise<FakeAdapter> {
 		const instance = await start(overrides);
 		await mock.waitForWsClients(1);
-		// the client side of the WebSocket is open once the heartbeat interval runs
-		await waitFor(() => instance.intervals.size === 1, { description: 'WebSocket open in the adapter' });
+		// the client side of the WebSocket is open once the adapter logged it (heartbeat runs from then on)
+		await waitFor(() => instance.log.of('info').includes('UniFi Access WebSocket open.'), {
+			description: 'WebSocket open in the adapter',
+		});
 		return instance;
 	}
 
@@ -407,6 +409,61 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(mock.webhookEndpoints).to.have.length(1);
 			expect(instance.log.of('warn').filter(m => m.startsWith('Webhook registration failed'))).to.have.length(1);
 			expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(true);
+		});
+
+		// K-08: the endpoint may disappear at the controller without the WebSocket ever dropping
+		describe('periodic check of the registration (every 15 minutes)', () => {
+			// small steps: the WebSocket heartbeat needs real time for its pongs
+			async function advance(ms: number): Promise<void> {
+				for (let done = 0; done < ms; done += 20_000) {
+					await clock.tickAsync(Math.min(20_000, ms - done));
+					await delay(5);
+				}
+			}
+			const listings = (): number => mock.findRequests({ method: 'GET', path: '/webhooks/endpoints' }).length;
+
+			it('an endpoint that is still there: one GET per check, nothing written, no restart', async () => {
+				const instance = await startConnected();
+				const before = listings();
+				const objectWrites = JSON.stringify(instance.objects.get(INSTANCE_OBJECT));
+				await advance(15 * 60_000);
+				await waitFor(() => listings() === before + 1, { description: 'check' });
+				await delay(30);
+				expect(mock.requests.filter(r => r.path.startsWith('/webhooks') && r.method !== 'GET')).to.have.length(
+					1,
+				);
+				expect(JSON.stringify(instance.objects.get(INSTANCE_OBJECT)), 'instance object untouched').to.equal(
+					objectWrites,
+				);
+				expect(instance.val('info.webhookRegistered')).to.equal(true);
+			});
+
+			it('an endpoint deleted at the controller is registered again at the next check', async () => {
+				const instance = await startConnected();
+				mock.webhookEndpoints.length = 0;
+				await advance(15 * 60_000);
+				await waitFor(() => mock.webhookEndpoints.length === 1, { description: 'registered again' });
+				expect(instance.val('info.webhookRegistered')).to.equal(true);
+				expect((await instance.request('getConnectionStatus')).webhookRegistered).to.equal(true);
+			});
+
+			it('no check while the connection is lost (the reconnect checks anyway); none without webhooks', async () => {
+				const instance = await startConnected({ enableWebhooks: false });
+				expect(instance.intervals.size, 'only the heartbeat').to.equal(1);
+				await instance.fireUnload();
+				adapter = undefined;
+				const withHooks = await startConnected();
+				expect(withHooks.intervals.size, 'heartbeat and registration check').to.equal(2);
+				const before = listings();
+				mock.wsAccepting = false;
+				mock.dropWsConnections();
+				await waitFor(() => withHooks.val('info.connection') === false, { description: 'connection lost' });
+				await advance(15 * 60_000);
+				expect(listings()).to.equal(before);
+				await withHooks.fireUnload();
+				expect(withHooks.intervals.size, 'cleared on unload').to.equal(0);
+				adapter = undefined;
+			});
 		});
 
 		// E2E finding E-01: a controller that came back without the endpoint (restored backup, reset, endpoint

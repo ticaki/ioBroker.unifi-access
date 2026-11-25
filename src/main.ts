@@ -60,6 +60,8 @@ const DOOR_CHECK_AFTER_EVENT_MS = 7000;
 const DOORBELL_CALL_MAX_MS = 3 * 60_000;
 /** Rules ending later than this are not given a timer of their own (the next reload plans it). */
 const RULE_END_CHECK_HORIZON_MS = 24 * 60 * 60_000;
+/** Distance between two checks that the webhook endpoint is still registered at the controller. */
+const WEBHOOK_CHECK_INTERVAL_MS = 15 * 60_000;
 /** Minimum distance between two full reloads after WebSocket reconnects. */
 const RESYNC_MIN_INTERVAL_MS = 60_000;
 /** A planned end-of-rule check that differs by less than this from the controller's end time is kept. */
@@ -203,6 +205,8 @@ class UnifiAccess extends utils.Adapter {
 	private readonly lockRuleUnavailableDoors = new Set<string>();
 	/** The doorbell call currently published in doorbell.active*. */
 	private activeDoorbellCall: { requestId?: string; fromWebhook: boolean } | null = null;
+	/** Periodic check that the webhook endpoint is still registered at the controller. */
+	private webhookCheckInterval: ioBroker.Interval | undefined;
 	/** Start of the last resync after a reconnect (ms epoch, 0 = none yet). */
 	private lastResyncAt = 0;
 	/** A resync that waits for the minimum distance to the previous one. */
@@ -307,6 +311,7 @@ class UnifiAccess extends utils.Adapter {
 		// The receivers listen before the controller is contacted: the webhook endpoint is registered
 		// at the end of a successful bootstrap and events may arrive right away.
 		await this.startSharedHttpServer();
+		this.startWebhookRegistrationCheck();
 		await this.bootstrapAndConnect();
 		// sendTo requests that arrived meanwhile are answered now, with what was loaded
 		this.finishStartup();
@@ -760,6 +765,27 @@ class UnifiAccess extends utils.Adapter {
 		} finally {
 			this.webhookRegistrationRunning = false;
 		}
+	}
+
+	/**
+	 * Check the registration at the controller every {@link WEBHOOK_CHECK_INTERVAL_MS} while the receiver
+	 * runs: the endpoint may be deleted at the controller (by hand, restored backup, another integration)
+	 * or the address of this host may change without the WebSocket ever dropping. An endpoint that is
+	 * still in place costs one GET; nothing is written to the instance configuration then, so the check
+	 * can never cause a restart loop.
+	 */
+	private startWebhookRegistrationCheck(): void {
+		if (this.config.enableWebhooks !== true || !this.webhookReceiverActive || this.webhookCheckInterval) {
+			return;
+		}
+		this.webhookCheckInterval = this.setInterval(() => {
+			if (this.unloading || !this.connectedToController || this.webhookRegistrationRunning) {
+				// without connection the reconnect checks the registration anyway
+				return;
+			}
+			this.webhookRegistrationStale = true;
+			this.runDetached('webhook registration check', this.ensureWebhookRegistration());
+		}, WEBHOOK_CHECK_INTERVAL_MS);
 	}
 
 	/**
@@ -2627,6 +2653,10 @@ class UnifiAccess extends utils.Adapter {
 			if (this.resyncTimer) {
 				this.clearTimeout(this.resyncTimer);
 				this.resyncTimer = undefined;
+			}
+			if (this.webhookCheckInterval) {
+				this.clearInterval(this.webhookCheckInterval);
+				this.webhookCheckInterval = undefined;
 			}
 			for (const timer of this.unlockPendingTimers.values()) {
 				this.clearTimeout(timer);
