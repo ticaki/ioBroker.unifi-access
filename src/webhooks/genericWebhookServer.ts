@@ -49,6 +49,25 @@ export function normalizeWebhookPath(raw: unknown): string {
 }
 
 /**
+ * Paths the adapter's own receivers use on the shared server: the UniFi Access webhook and everything
+ * below `/unifi-access/` (thumbnails, Protect snapshots and clips of every instance). A generic webhook
+ * there would never be reached — the request goes to the other receiver (e.g. answered 401 as a
+ * webhook with a bad signature). The admin validator of `genericWebhookPath` applies the same rule.
+ *
+ * @param path Normalised listen path (see {@link normalizeWebhookPath})
+ * @returns The receiver that owns the path, or null when the path is free
+ */
+export function reservedWebhookPathOwner(path: string): string | null {
+	if (path === '/unifi-access-webhook') {
+		return 'the UniFi Access webhook receiver';
+	}
+	if (path.startsWith('/unifi-access/')) {
+		return 'the thumbnail and Protect media server';
+	}
+	return null;
+}
+
+/**
  * Path of a request URL without query, percent-decoded (a client may encode characters the path
  * setting contains literally). An undecodable path is compared as it is.
  *

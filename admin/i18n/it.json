@@ -74,7 +74,7 @@
 	"enableGenericWebhook_help": "Accetta richieste POST dall'Alarm Manager tramite il server HTTP condiviso (vedi scheda Server HTTP) sul percorso configurato sotto.",
 	"genericWebhookPath": "Percorso di ascolto",
 	"genericWebhookPath_help": "Percorso URL su cui il ricevitore accetta richieste.",
-	"genericWebhookPath_invalid": "Solo lettere, cifre e . _ ~ - separati da singole barre, ad es. /webhook o /alarm/door.",
+	"genericWebhookPath_invalid": "Solo lettere, cifre e . _ ~ - separati da singole barre, ad es. /webhook o /alarm/door. /unifi-access-webhook e i percorsi sotto /unifi-access/ sono usati dall'adattatore stesso.",
 	"generic_webhook_auth_header": "Autenticazione",
 	"genericWebhookAuth": "Modalità di autenticazione",
 	"genericWebhookAuth_help": "Come devono autenticarsi le richieste in entrata.",

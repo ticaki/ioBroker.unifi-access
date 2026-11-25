@@ -392,7 +392,7 @@
 					"help": "genericWebhookPath_help",
 					"default": "/webhook",
 					"disabled": "!data.enableGenericWebhook",
-					"validator": "!data.enableGenericWebhook || /^\\/?(?:[A-Za-z0-9._~-]+\\/)*[A-Za-z0-9._~-]*$/.test(data.genericWebhookPath || '/webhook')",
+					"validator": "!data.enableGenericWebhook || (/^\\/?(?:[A-Za-z0-9._~-]+\\/)*[A-Za-z0-9._~-]*$/.test(data.genericWebhookPath || '/webhook') && !/^\\/?unifi-access(?:-webhook$|\\/)/.test(data.genericWebhookPath || ''))",
 					"validatorErrorText": "genericWebhookPath_invalid",
 					"validatorNoSaveOnError": true,
 					"newLine": true,

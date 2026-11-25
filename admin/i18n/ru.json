@@ -74,7 +74,7 @@
 	"enableGenericWebhook_help": "Принимает POST-запросы от Alarm Manager через общий HTTP-сервер (см. вкладку HTTP-сервер) по настроенному ниже пути.",
 	"genericWebhookPath": "Путь прослушивания",
 	"genericWebhookPath_help": "URL-путь, на котором приёмник принимает запросы.",
-	"genericWebhookPath_invalid": "Только латинские буквы, цифры и . _ ~ -, разделённые одиночными косыми чертами, например /webhook или /alarm/door.",
+	"genericWebhookPath_invalid": "Только буквы, цифры и . _ ~ -, разделённые одиночными косыми чертами, например /webhook или /alarm/door. /unifi-access-webhook и пути внутри /unifi-access/ использует сам адаптер.",
 	"generic_webhook_auth_header": "Аутентификация",
 	"genericWebhookAuth": "Режим аутентификации",
 	"genericWebhookAuth_help": "Как должны аутентифицироваться входящие запросы.",

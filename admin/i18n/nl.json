@@ -74,7 +74,7 @@
 	"enableGenericWebhook_help": "Accepteert POST-verzoeken van de Alarm Manager via de gedeelde HTTP-server (zie tab HTTP-server) op het hieronder geconfigureerde pad.",
 	"genericWebhookPath": "Listen-pad",
 	"genericWebhookPath_help": "URL-pad waarop de ontvanger verzoeken accepteert.",
-	"genericWebhookPath_invalid": "Alleen letters, cijfers en . _ ~ - gescheiden door enkele slashes, bijv. /webhook of /alarm/door.",
+	"genericWebhookPath_invalid": "Alleen letters, cijfers en . _ ~ - gescheiden door enkele schuine strepen, bijv. /webhook of /alarm/door. /unifi-access-webhook en paden onder /unifi-access/ gebruikt de adapter zelf.",
 	"generic_webhook_auth_header": "Authenticatie",
 	"genericWebhookAuth": "Authenticatiemodus",
 	"genericWebhookAuth_help": "Hoe inkomende verzoeken zich moeten authenticeren.",

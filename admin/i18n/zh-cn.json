@@ -74,7 +74,7 @@
 	"enableGenericWebhook_help": "通过共享 HTTP 服务器(见 HTTP 服务器选项卡)在下方配置的路径上接受来自 Alarm Manager 的 POST 请求。",
 	"genericWebhookPath": "监听路径",
 	"genericWebhookPath_help": "接收器接受请求的 URL 路径。",
-	"genericWebhookPath_invalid": "只能使用字母、数字和 . _ ~ -，以单个斜杠分隔，例如 /webhook 或 /alarm/door。",
+	"genericWebhookPath_invalid": "仅允许字母、数字和 . _ ~ -，以单个斜杠分隔，例如 /webhook 或 /alarm/door。/unifi-access-webhook 以及 /unifi-access/ 下的路径由适配器本身使用。",
 	"generic_webhook_auth_header": "身份验证",
 	"genericWebhookAuth": "身份验证模式",
 	"genericWebhookAuth_help": "传入请求必须如何进行身份验证。",

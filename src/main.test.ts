@@ -4222,6 +4222,60 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		});
 	});
 
+	describe('generic alarm webhook on a path of the adapter itself (RK-03)', () => {
+		for (const path of ['unifi-access-webhook', '/unifi-access-webhook', '//unifi-access-webhook']) {
+			it(`"${path}": not started, one error names the collision, the UniFi webhook keeps working`, async () => {
+				const instance = await startConnected({ enableGenericWebhook: true, genericWebhookPath: path });
+				await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+				const errors = instance.log.of('error');
+				expect(errors).to.have.length(1);
+				expect(errors[0]).to.contain('Generic webhook NOT started');
+				expect(errors[0]).to.contain(
+					'"/unifi-access-webhook" is reserved for the UniFi Access webhook receiver',
+				);
+
+				const [result] = await mock.deliverWebhook(
+					fixtures.webhookEvents.doorbellCompleted({ door: door(DOOR_A2), device: hub() }),
+				);
+				expect(result.status, 'signed UniFi webhook').to.equal(200);
+				expect(instance.log.of('warn').filter(w => w.includes('signature'))).to.deep.equal([]);
+			});
+		}
+
+		it('a path below /unifi-access/ is refused as well (thumbnail and Protect media routes)', async () => {
+			const instance = await startConnected({
+				enableWebhooks: false,
+				enableThumbnailServer: true,
+				enableGenericWebhook: true,
+				genericWebhookPath: '/unifi-access/0/thumbnail/alarm',
+			});
+			expect(instance.log.of('error')).to.have.length(1);
+			expect(instance.log.of('error')[0]).to.contain('reserved for the thumbnail and Protect media server');
+			const answer = await httpRequest({
+				url: `http://127.0.0.1:${listenPort}/unifi-access/0/thumbnail/alarm`,
+				method: 'POST',
+				body: '{"alarm_id":"x"}',
+			});
+			expect(answer.status).to.not.equal(200);
+			expect(instance.val('notifications.lastAlarmId')).to.equal(undefined);
+		});
+
+		it('similar but free paths are accepted', async () => {
+			const instance = await startConnected({
+				enableGenericWebhook: true,
+				genericWebhookPath: '/unifi-access-webhook2',
+			});
+			expect(instance.log.of('error')).to.deep.equal([]);
+			const answer = await httpRequest({
+				url: `http://127.0.0.1:${listenPort}/unifi-access-webhook2`,
+				method: 'POST',
+				body: '{"alarm_id":"free-path"}',
+			});
+			expect(answer.status).to.equal(200);
+			await waitFor(() => instance.val('notifications.lastAlarmId') === 'free-path', { description: 'alarm' });
+		});
+	});
+
 	describe('Protect clips are streamed (R-15)', () => {
 		let protect: ProtectStub;
 

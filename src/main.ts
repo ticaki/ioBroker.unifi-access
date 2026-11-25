@@ -42,7 +42,7 @@ import { WebhookHandler } from './webhooks/server';
 import { DEFAULT_WEBHOOK_EVENTS, ensureRegistration, reregister } from './webhooks/registration';
 import { ThumbnailHandler } from './webserver/snapshotEndpoint';
 import { ProtectMediaHandler } from './webserver/protectSnapshotEndpoint';
-import { GenericWebhookHandler } from './webhooks/genericWebhookServer';
+import { GenericWebhookHandler, reservedWebhookPathOwner } from './webhooks/genericWebhookServer';
 import { SharedHttpServer, type SharedHttpServerTls } from './webserver/sharedHttpServer';
 
 const WEBHOOK_PATH = '/unifi-access-webhook';
@@ -703,14 +703,22 @@ class UnifiAccess extends utils.Adapter {
 					`Generic webhook listens on ${handler.path} (setting: "${cfg.genericWebhookPath ?? ''}").`,
 				);
 			}
-			if (!handler.credentialsConfigured) {
+			const owner = reservedWebhookPathOwner(handler.path);
+			if (owner) {
+				this.log.error(
+					`Generic webhook NOT started: its path "${handler.path}" is reserved for ${owner} of this adapter ` +
+						`— requests there would never reach the generic webhook. Choose another path (e.g. /webhook) on the generic webhook tab.`,
+				);
+			} else if (!handler.credentialsConfigured) {
 				this.log.warn(
 					`Generic webhook: authentication "${cfg.genericWebhookAuth}" is selected but no ${
 						cfg.genericWebhookAuth === 'basic' ? 'user name and password are' : 'token is'
 					} configured — every request will be rejected.`,
 				);
 			}
-			server.registerHandler('generic-webhook', handler.matches, handler.handle);
+			if (!owner) {
+				server.registerHandler('generic-webhook', handler.matches, handler.handle);
+			}
 		}
 
 		if (server.handlerCount === 0) {

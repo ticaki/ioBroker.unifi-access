@@ -30,7 +30,7 @@ import {
 import { featuresFor, type UnifiDeviceModel } from '../../src/lib/deviceModels';
 import { normalizePort } from '../../src/lib/controlValues';
 import { normalizePublicBaseUrl } from '../../src/lib/publicBaseUrl';
-import { normalizeWebhookPath } from '../../src/webhooks/genericWebhookServer';
+import { normalizeWebhookPath, reservedWebhookPathOwner } from '../../src/webhooks/genericWebhookServer';
 
 const ROOT = join(__dirname, '..', '..');
 const MAIN = join(ROOT, 'src', 'main');
@@ -100,6 +100,22 @@ const adminWebhookUrl = source('src-admin', 'src', 'GenericWebhookUrl.tsx');
 const jsonConfig = JSON.parse(source('admin', 'jsonConfig.json')) as {
 	items: Record<string, { items: Record<string, { error?: Record<string, string> }> }>;
 };
+
+type JsonConfigItem = { validator?: string; [key: string]: unknown };
+
+/**
+ * The validator of a field in admin/jsonConfig.json as a function of the form data — evaluated the way
+ * the admin does it (an expression over `data`).
+ *
+ * @param tab Tab key
+ * @param field Field key
+ */
+function jsonConfigValidator(tab: string, field: string): (data: Record<string, unknown>) => boolean {
+	const item = (jsonConfig.items[tab].items as Record<string, JsonConfigItem>)[field];
+	expect(item?.validator, `${tab}.${field}.validator`).to.be.a('string');
+	const fn = new Function('data', `return (${item.validator});`) as (data: Record<string, unknown>) => unknown;
+	return data => fn(data) === true;
+}
 
 /** Error codes describeAdapterError translates (everything else is shown raw). */
 const TRANSLATED_ERRORS = new Set(objectLiteralKeys(adminRequest, 'ADAPTER_ERROR_TEXTS'));
@@ -361,6 +377,37 @@ describe('contract adapter ↔ frontend (sendTo answers, error codes, state ids)
 			for (const raw of ports) {
 				expect(frontend.normalizePort(raw), String(raw)).to.equal(normalizePort(raw, 8095));
 			}
+		});
+
+		it('the path validator refuses exactly the paths the adapter does not start the generic webhook on (RK-03)', () => {
+			const validator = jsonConfigValidator('_genericWebhookTab', 'genericWebhookPath');
+			const FORMAT = /^\/?(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]*$/;
+			const paths = [
+				'',
+				'/webhook',
+				'alarm/door',
+				'unifi-access-webhook',
+				'/unifi-access-webhook',
+				'/unifi-access-webhook2',
+				'/unifi-access-webhook/x',
+				'/unifi-access',
+				'unifi-access/',
+				'/unifi-access/0/thumbnail/x',
+				'/unifi-access/1/protect-video/a',
+				'/my/unifi-access-webhook',
+			];
+			for (const path of paths) {
+				const free = reservedWebhookPathOwner(normalizeWebhookPath(path)) === null;
+				expect(validator({ enableGenericWebhook: true, genericWebhookPath: path }), path).to.equal(
+					FORMAT.test(path || '/webhook') && free,
+				);
+				// switched off, any value can be saved
+				expect(validator({ enableGenericWebhook: false, genericWebhookPath: path }), path).to.equal(true);
+			}
+			expect(validator({ enableGenericWebhook: true, genericWebhookPath: '/unifi-access-webhook' })).to.equal(
+				false,
+			);
+			expect(validator({ enableGenericWebhook: true, genericWebhookPath: '/unifi-access/0/x' })).to.equal(false);
 		});
 
 		it('the generic webhook answers at the path the admin page shows', async () => {
