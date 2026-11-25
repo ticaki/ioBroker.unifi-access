@@ -11,6 +11,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 interface LoaderWindow {
     socketUrl?: string;
+    socketPath?: string;
     socketLoadError?: string;
     socketLoadedHandler?: () => void;
     socketLoadErrorHandler?: (tried: string) => void;
@@ -137,5 +138,46 @@ describe('index.html socket.io loader', () => {
         const w = run('/iob/unifi-access/index.html');
 
         expect(w.socketUrl).toBe('http://localhost:3000');
+    });
+
+    describe('WebSocket path behind a reverse proxy with a path prefix', () => {
+        const w = window as unknown as LoaderWindow & { io?: unknown };
+        afterEach(() => {
+            delete w.io;
+            delete w.socketPath;
+        });
+
+        it('passes the prefix as socketPath to the ws client of the web adapter (it ignores the "path" option)', () => {
+            run('/iob/unifi-access/index.html');
+            w.io = { connect: vi.fn() };
+            settle(0, 'load');
+
+            expect(w.socketPath).toBe('/iob/');
+        });
+
+        it('sets no socketPath for a page directly below the root', () => {
+            run('/unifi-access/index.html');
+            w.io = { connect: vi.fn() };
+            settle(0, 'load');
+
+            expect(w.socketPath).toBeUndefined();
+        });
+
+        it('sets no socketPath if the library was only found at the root of the server', () => {
+            run('/iob/unifi-access/index.html');
+            settle(0, 'error');
+            w.io = { connect: vi.fn() };
+            settle(1, 'load');
+
+            expect(w.socketPath).toBeUndefined();
+        });
+
+        it('sets no socketPath for real socket.io (it uses the "path" option)', () => {
+            run('/iob/unifi-access/index.html');
+            w.io = { connect: vi.fn(), Manager: vi.fn() };
+            settle(0, 'load');
+
+            expect(w.socketPath).toBeUndefined();
+        });
     });
 });

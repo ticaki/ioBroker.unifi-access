@@ -42,6 +42,14 @@
                     }
                     tried.push(script.src);
                     script.onload = function () {
+                        // Behind a reverse proxy with a path prefix the WebSocket must use the prefix as well.
+                        // The ws client of the web adapter (io with only "connect") ignores the "path" option
+                        // of socket-client and connects to socketUrl + socketPath - so pass the prefix there.
+                        // Real socket.io (io.Manager) uses the "path" option instead and needs nothing here.
+                        var base = new URL(script.src, window.location.href).pathname.replace(/lib\/js\/socket\.io\.js$/, '');
+                        if (base !== '/' && window.io && !window.io.Manager) {
+                            window.socketPath = base;
+                        }
                         if (typeof window.socketLoadedHandler === 'function') {
                             window.socketLoadedHandler();
                         }
