@@ -15,17 +15,19 @@ export function fullId(id: string): string {
     return id.startsWith(`${ADAPTER_NAMESPACE}.`) ? id : `${ADAPTER_NAMESPACE}.${id}`;
 }
 
-function makeState(val: ioBroker.StateValue): ioBroker.State {
-    return { val, ack: true, ts: 1, lc: 1, from: 'system.adapter.unifi-access.0' };
+function makeState(val: ioBroker.StateValue, ts: number): ioBroker.State {
+    return { val, ack: true, ts, lc: ts, from: 'system.adapter.unifi-access.0' };
 }
 
 /**
  * Replace all states of the adapter.
  *
  * @param values state id (with or without namespace) => value
+ * @param options.ts time stamp of the states as ioBroker writes it (its own clock); default: `Date.now()`
  */
-export function setStates(values: Record<string, ioBroker.StateValue>): void {
-    states = Object.fromEntries(Object.entries(values).map(([id, val]) => [fullId(id), makeState(val)]));
+export function setStates(values: Record<string, ioBroker.StateValue>, options: { ts?: number } = {}): void {
+    const ts = options.ts ?? Date.now();
+    states = Object.fromEntries(Object.entries(values).map(([id, val]) => [fullId(id), makeState(val, ts)]));
     for (const listener of listeners) {
         listener();
     }

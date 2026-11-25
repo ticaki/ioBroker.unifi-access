@@ -178,6 +178,91 @@ describe('EventLogCard', () => {
         expect(tickers().started).toBe(0);
     });
 
+    it('counts down normally on a browser whose clock is minutes behind', () => {
+        // wall tablet 5 minutes late; ioBroker wrote the list at NOW, the event happened 1 s before
+        vi.setSystemTime(NOW - 300_000);
+        setStates(
+            {
+                'info.protectConnected': true,
+                'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock' }]),
+            },
+            { ts: NOW },
+        );
+        render(<EventLogCard />);
+        expect(screen.getByText('2')).toBeTruthy();
+
+        act(() => {
+            vi.advanceTimersByTime(3500);
+        });
+        expect(screen.getByText('Not available')).toBeTruthy();
+        expect(screen.queryByText(/^[123]$/)).toBeNull();
+        expect(tickers()).toEqual({ started: 1, running: 0 });
+    });
+
+    it('counts down normally on a browser whose clock is ahead', () => {
+        vi.setSystemTime(NOW + 3_600_000);
+        setStates(
+            {
+                'info.protectConnected': true,
+                'events.last': JSON.stringify([{ ts: NOW - 1000, type: 'access.door.unlock' }]),
+            },
+            { ts: NOW },
+        );
+        render(<EventLogCard />);
+
+        expect(screen.getByText('2')).toBeTruthy();
+        expect(screen.queryByText('Not available')).toBeNull();
+    });
+
+    it('ends the waiting window of an event "from the future" 4 s after it arrived', () => {
+        // controller clock one minute ahead of ioBroker
+        setStates({
+            'info.protectConnected': true,
+            'events.last': JSON.stringify([{ ts: NOW + 60_000, type: 'access.door.unlock' }]),
+        });
+        render(<EventLogCard />);
+        expect(screen.getByText('3')).toBeTruthy();
+
+        act(() => {
+            vi.advanceTimersByTime(4000);
+        });
+        expect(screen.getByText('Not available')).toBeTruthy();
+        expect(tickers()).toEqual({ started: 1, running: 0 });
+    });
+
+    it('keeps the window of an event when the list is written again (new event) instead of restarting it', () => {
+        const first = { ts: NOW - 1000, type: 'access.door.unlock', doorName: 'Front door' };
+        setStates({ 'info.protectConnected': true, 'events.last': JSON.stringify([first]) });
+        render(<EventLogCard />);
+        expect(screen.getByText('2')).toBeTruthy();
+
+        act(() => {
+            vi.advanceTimersByTime(2000);
+            // ioBroker writes the list again 2 s later with a newer event in front
+            setStates({
+                'info.protectConnected': true,
+                'events.last': JSON.stringify([{ ts: NOW + 2000, type: 'access.device.dps_status' }, first]),
+            });
+        });
+        act(() => {
+            vi.advanceTimersByTime(1100);
+        });
+        expect(screen.getByText('Not available')).toBeTruthy();
+        expect(tickers().running).toBe(0);
+    });
+
+    it('stops ticking when it is unmounted during the countdown', () => {
+        setStates({
+            'info.protectConnected': true,
+            'events.last': JSON.stringify([{ ts: NOW - 500, type: 'access.door.unlock' }]),
+        });
+        const { unmount } = render(<EventLogCard />);
+        expect(tickers()).toEqual({ started: 1, running: 1 });
+
+        unmount();
+        expect(tickers()).toEqual({ started: 1, running: 0 });
+    });
+
     it('shows the snapshot, replaces the placeholder when it arrives and opens the media dialog', () => {
         const event = { ts: NOW - 1000, type: 'access.door.unlock', doorName: 'Front door' };
         setStates({ 'info.protectConnected': true, 'events.last': JSON.stringify([event]) });
