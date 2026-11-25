@@ -17,7 +17,28 @@ jobs:
       pull-requests: write
 
     steps:
+      # Updates of src-admin / src-www usually change the committed bundles (admin/custom, www) and then
+      # fail the check "Committed bundle is up to date" until somebody rebuilds and commits them. The
+      # auto-merge action can only match on dependency and update type, not on the directory, so these
+      # PRs are recognised here by their changed files (read-only API call, nothing of the PR is checked
+      # out or run) and left for a manual merge instead of occupying a runner for hours.
+      - name: Leave frontend updates to a manual merge
+        id: scope
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          files="$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')"
+          if printf '%s\n' "$files" | grep -qE '^(src-admin|src-www)/'; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Not auto-merged::This update changes src-admin/src-www. Rebuild the bundles (npm run build:admin / build:www), commit them on the PR branch and merge by hand."
+          else
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Auto-merge Dependabot PRs
+        if: steps.scope.outputs.frontend != 'true'
         uses: iobroker-bot-orga/action-automerge-dependabot@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

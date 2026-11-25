@@ -91,12 +91,21 @@ jobs:
       - run: npm test
       - run: npm run build
       # admin/custom and www are committed build output (needed for installs from GitHub and
-      # published as-is by the deploy job). Fail if the committed bundle is stale.
+      # published as-is by the deploy job). Fail if the committed bundle is stale. This also stops
+      # Dependabot PRs of src-admin / src-www that change bundled code: they are not auto-merged
+      # (see .github/workflows/automerge-dependabot.yml) and need the rebuild commit described below.
       - name: Committed bundle is up to date
         working-directory: .
+        env:
+          PROJECT: ${{ matrix.project }}
         run: |
-          git status --porcelain -- admin/custom www
-          test -z "$(git status --porcelain -- admin/custom www)"
+          changes="$(git status --porcelain -- admin/custom www)"
+          if [ -n "$changes" ]; then
+            echo "$changes"
+            if [ "$PROJECT" = "src-admin" ]; then target="npm run build:admin"; out="admin/custom"; else target="npm run build:www"; out="www"; fi
+            echo "::error title=Committed bundle is out of date::The committed $out differs from a fresh build of $PROJECT. Fix: on this branch run 'npm ci' in the root and in $PROJECT, then '$target' in the repository root, and commit + push the changed files under $out (for a Dependabot PR: check out its branch and push the rebuild commit onto it)."
+            exit 1
+          fi
 
   # Deploys the final package to NPM. Requires npm trusted publishing to be set up
   # for the package — see https://docs.npmjs.com/trusted-publishers.

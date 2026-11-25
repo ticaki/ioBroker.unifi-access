@@ -39,7 +39,10 @@ updates:
         versions:
           - '7.x'
 
-  # Admin custom components and www panel (own package.json each)
+  # Admin custom components and www panel (own package.json each). These PRs are NOT auto-merged
+  # (.github/workflows/automerge-dependabot.yml): most of them change the committed bundles admin/custom
+  # and www, which CI checks ("Committed bundle is up to date"). Rebuild (npm run build:admin / build:www),
+  # commit on the PR branch, merge by hand.
   - package-ecosystem: 'npm'
     directories:
       - '/src-admin'
