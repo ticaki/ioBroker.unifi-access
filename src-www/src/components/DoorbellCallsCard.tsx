@@ -1,3 +1,4 @@
+import type { JSX } from 'react';
 import { Alert, Card, CardContent, Chip, Stack, Typography } from '@mui/material';
 import DoorbellIcon from '@mui/icons-material/Doorbell';
 import { useIobState } from '../socket';
@@ -18,7 +19,7 @@ export function DoorbellCallsCard(): JSX.Element {
                     <Stack
                         direction="row"
                         spacing={1}
-                        alignItems="center"
+                        sx={{ alignItems: 'center' }}
                     >
                         <DoorbellIcon color="disabled" />
                         <Typography

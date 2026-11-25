@@ -1,5 +1,5 @@
 import { Box, Card, CardContent, List, ListItem, ListItemText, Stack, Typography } from '@mui/material';
-import { useEffect, useMemo, useState } from 'react';
+import { type JSX, useEffect, useMemo, useState } from 'react';
 import { useIobState } from '../socket';
 import { useSettings } from '../settings';
 import { EventMediaModal } from './EventMediaModal';
@@ -137,8 +137,7 @@ export function EventLogCard(): JSX.Element {
                                                 <Stack
                                                     direction="row"
                                                     spacing={1}
-                                                    alignItems="center"
-                                                    flexWrap="wrap"
+                                                    sx={{ alignItems: 'center', flexWrap: 'wrap' }}
                                                 >
                                                     <Typography variant="body2">
                                                         {label}

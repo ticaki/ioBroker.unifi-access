@@ -1,5 +1,5 @@
 import { Stack, Typography } from '@mui/material';
-import { useMemo } from 'react';
+import { type JSX, useMemo } from 'react';
 import { useIobStates, ADAPTER_NAMESPACE } from '../socket';
 import { DoorCard } from './DoorCard';
 

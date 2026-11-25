@@ -1,3 +1,4 @@
+import type { JSX } from 'react';
 import { Button, Card, CardActions, CardContent, Chip, Stack, Typography } from '@mui/material';
 import LockIcon from '@mui/icons-material/Lock';
 import LockOpenIcon from '@mui/icons-material/LockOpen';
@@ -22,8 +23,7 @@ export function DoorCard({ doorId, name, locked }: DoorCardProps): JSX.Element {
             <CardContent>
                 <Stack
                     direction="row"
-                    justifyContent="space-between"
-                    alignItems="center"
+                    sx={{ justifyContent: 'space-between', alignItems: 'center' }}
                 >
                     <Typography variant="subtitle1">{name}</Typography>
                     <Chip

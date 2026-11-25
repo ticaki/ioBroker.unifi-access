@@ -1,3 +1,4 @@
+import type { JSX } from 'react';
 import { Box, Dialog, DialogContent, DialogTitle, IconButton } from '@mui/material';
 import Close from '@mui/icons-material/Close';
 
