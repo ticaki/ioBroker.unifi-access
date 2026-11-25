@@ -12,7 +12,7 @@ import Components from './Components';
 const here = dirname(fileURLToPath(import.meta.url));
 const LANGUAGES = ['de', 'en', 'es', 'fr', 'it', 'nl', 'pl', 'pt', 'ru', 'uk', 'zh-cn'];
 /** Properties of an item whose value is a translation key */
-const TEXT_PROPERTIES = new Set(['label', 'help', 'text', 'title', 'tooltip', 'placeholder']);
+const TEXT_PROPERTIES = new Set(['label', 'help', 'text', 'title', 'tooltip', 'placeholder', 'validatorErrorText']);
 
 type Item = Record<string, unknown>;
 
