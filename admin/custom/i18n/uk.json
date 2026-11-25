@@ -1,20 +1,15 @@
 {
-    "auth_status_loading": "Перевірка стану адаптера…",
-    "auth_status_connected": "Підключено до контролера UniFi Access",
-    "auth_status_connected_named": "Підключено до %s",
-    "auth_status_missingToken": "API-токен відсутній — введіть його та натисніть «Перевірити підключення»",
-    "auth_status_unauthorized": "Контролер відхилив токен (неавторизовано)",
-    "auth_status_network": "Контролер недоступний (мережева помилка)",
-    "auth_status_disconnected": "Не підключено",
     "auth_test_button": "Перевірити підключення",
     "auth_test_tooltip": "Перевірити контролер із введеними вище значеннями (без збереження).",
     "auth_test_running": "Перевірка контролера…",
     "auth_test_missingFields": "Спочатку введіть хост і API-токен.",
+    "auth_test_placeholder": "Поле API-токена ще містить замаскований заповнювач. Повністю очистьте поле та введіть токен заново.",
     "auth_test_success": "Підключення успішне",
     "auth_test_success_named": "Підключення успішне — контролер: %s",
     "auth_test_error_unauthorized": "Токен відхилено (неавторизовано).",
     "auth_test_error_network": "Контролер недоступний (мережева помилка).",
     "auth_test_error_unknown": "Тест підключення не пройдено.",
+
     "devices_title": "Виявлені пристрої UniFi Access",
     "devices_refresh": "Оновити",
     "devices_loading": "Завантаження пристроїв…",
@@ -26,10 +21,21 @@
     "devices_cap_doorbell": "дзвінок",
     "devices_cap_door_unlock": "розблокування дверей",
     "devices_cap_live_events": "live-події",
-    "actor_select_label": "Unlock actor (shown in logs)",
-    "actor_select_none": "None (use API token name)",
-    "actor_select_loading": "Loading users…",
-    "actor_select_error": "Could not load users. Is the adapter running?",
-    "actor_select_refresh": "Refresh user list",
-    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
+
+    "actor_select_label": "Ініціатор розблокування (показується в журналах)",
+    "actor_select_none": "Немає (використовувати назву API-токена)",
+    "actor_select_unknown": "Користувача немає у списку (ID: %s)",
+    "actor_select_loading": "Завантаження користувачів…",
+    "actor_select_error": "Не вдалося завантажити користувачів. Чи запущено адаптер?",
+    "actor_select_refresh": "Оновити список користувачів",
+    "actor_select_help": "Вибраний користувач відображається в журналах і вебхуках UniFi Access, коли ioBroker розблоковує двері.",
+
+    "generic_webhook_urls": "URL вебхука",
+    "generic_webhook_url_loading": "Завантаження мережевих інтерфейсів…",
+    "generic_webhook_url_no_addresses": "Адреси мережевих інтерфейсів не знайдено.",
+    "generic_webhook_copy": "Копіювати до буфера обміну",
+    "generic_webhook_copied": "Скопійовано!",
+
+    "adapter_not_running": "Екземпляр адаптера не запущено. Запустіть його та повторіть спробу.",
+    "adapter_no_response": "Адаптер не відповів вчасно."
 }
