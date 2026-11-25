@@ -87,8 +87,7 @@ describe('ActorSelect', () => {
 		// how json-config reports reset/reloaded data to its items
 		const register = vi.mocked(props.oContext.registerOnForceUpdate!);
 		const onUpdate = register.mock.calls.find(call => call[0] === 'unlockActorId')?.[1] as
-			| ((data: Record<string, unknown>) => void)
-			| undefined;
+			((data: Record<string, unknown>) => void) | undefined;
 		expect(onUpdate).toBeTypeOf('function');
 		act(() => onUpdate!({ unlockActorId: 'u2' }));
 		expect(screen.getByRole('combobox', { name: LABEL }).textContent).toBe('Bob Example');
