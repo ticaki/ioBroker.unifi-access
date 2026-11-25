@@ -42,7 +42,8 @@ export function SettingsPanel(): JSX.Element {
                         max={200}
                         step={8}
                         value={settings.thumbWidth}
-                        onChange={(_, v) => update({ thumbWidth: v as number })}
+                        onChange={(_, v) => update({ thumbWidth: v as number }, false)}
+                        onChangeCommitted={(_, v) => update({ thumbWidth: v as number })}
                         marks={[
                             { value: 0, label: 'Off' },
                             { value: 96, label: '96' },
@@ -63,7 +64,8 @@ export function SettingsPanel(): JSX.Element {
                         max={600}
                         step={20}
                         value={settings.snapshotHeight}
-                        onChange={(_, v) => update({ snapshotHeight: v as number })}
+                        onChange={(_, v) => update({ snapshotHeight: v as number }, false)}
+                        onChangeCommitted={(_, v) => update({ snapshotHeight: v as number })}
                         marks={[
                             { value: 0, label: 'Auto' },
                             { value: 240, label: '240' },
@@ -83,7 +85,8 @@ export function SettingsPanel(): JSX.Element {
                         max={2000}
                         step={50}
                         value={settings.maxWidth}
-                        onChange={(_, v) => update({ maxWidth: v as number })}
+                        onChange={(_, v) => update({ maxWidth: v as number }, false)}
+                        onChangeCommitted={(_, v) => update({ maxWidth: v as number })}
                         marks={[
                             { value: 600, label: '600' },
                             { value: 1200, label: '1200' },
