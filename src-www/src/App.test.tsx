@@ -101,6 +101,15 @@ describe('App', () => {
         expect(screen.getByText('Last event image')).toBeTruthy();
     });
 
+    it('limits the content to the stored maximum width', () => {
+        installMatchMedia(false);
+        setStates({ 'admin.uiSettings': JSON.stringify({ maxWidth: 800 }) });
+        render(<App />);
+
+        const content = screen.getByText('Recent events').closest('.MuiStack-root')?.parentElement as HTMLElement;
+        expect(getComputedStyle(content).maxWidth).toBe('800px');
+    });
+
     it('stores a switch of the settings panel', () => {
         installMatchMedia(false);
         render(<App />);

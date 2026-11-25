@@ -111,6 +111,27 @@ describe('GenericWebhookUrl', () => {
 		expect(await screen.findByLabelText('Copied!')).toBeTruthy();
 	});
 
+	it('loads the interfaces as soon as the instance is started', async () => {
+		const DATA = { enableGenericWebhook: true, listenIp: '0.0.0.0', listenPort: 8095 };
+		const first = makeHarness({ data: DATA, alive: false });
+		const { rerender } = render(<GenericWebhookUrl {...first.props} />);
+		expect(await screen.findByText('The adapter instance is not running. Start it and try again.')).toBeTruthy();
+
+		const second = makeHarness({
+			data: DATA,
+			alive: true,
+			answers: {
+				getNetworkInterfaces: { addresses: ['192.0.2.5'] },
+				getServerInfo: { running: true, scheme: 'http', port: 8095, tlsEnabled: false, tlsActive: false },
+			},
+		});
+		rerender(<GenericWebhookUrl {...second.props} />);
+
+		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.5:8095/webhook']));
+		expect(second.socket.sendTo).toHaveBeenCalledWith('unifi-access.0', 'getNetworkInterfaces', {});
+		expect(screen.queryByText('The adapter instance is not running. Start it and try again.')).toBeNull();
+	});
+
 	it('explains missing addresses', async () => {
 		const empty = makeHarness({
 			data: { enableGenericWebhook: true, listenIp: '0.0.0.0' },

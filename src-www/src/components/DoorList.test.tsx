@@ -174,6 +174,14 @@ describe('DoorList', () => {
         expect(screen.queryByText('locked')).toBeNull();
     });
 
+    it('sorts the doors by name and names a door without name by its id', () => {
+        setStates({ ...BOOTSTRAP, 'doors.door-0.locked': true });
+        render(<DoorList />);
+
+        const titles = [...document.querySelectorAll('.MuiCard-root .MuiTypography-subtitle1')].map(t => t.textContent);
+        expect(titles).toEqual(['door-0', 'Front door', 'Side entrance']);
+    });
+
     it('shows no door at all if only the emergency states exist', () => {
         setStates({ 'doors.emergency.lockdown': false, 'doors.emergency.evacuation': false });
         render(<DoorList />);

@@ -121,6 +121,40 @@ describe('DeviceManagement', () => {
 		expect(screen.getByRole('button', { name: 'Refresh' })).toHaveProperty('disabled', false);
 	});
 
+	it('loads the devices as soon as the instance is started', async () => {
+		const first = makeHarness({ alive: false, aliveState: false });
+		const { rerender } = render(<DeviceManagement {...first.props} />);
+		await screen.findByRole('alert');
+
+		const second = makeHarness({ alive: true, answers: { listDevices: { devices: [ULTRA] } } });
+		rerender(<DeviceManagement {...second.props} />);
+
+		expect(await screen.findByText('Front door')).toBeTruthy();
+		expect(screen.queryByRole('alert')).toBeNull();
+		expect(second.socket.sendTo).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not ask again on every update while the instance keeps running', async () => {
+		const { props, socket } = makeHarness({ answers: { listDevices: { devices: [ULTRA] } } });
+		const { rerender } = render(<DeviceManagement {...props} />);
+		await screen.findByText('Front door');
+
+		rerender(
+			<DeviceManagement
+				{...props}
+				data={{ controllerHost: '192.0.2.1' }}
+			/>,
+		);
+		rerender(
+			<DeviceManagement
+				{...props}
+				alive
+			/>,
+		);
+
+		expect(socket.sendTo).toHaveBeenCalledTimes(1);
+	});
+
 	it('reloads the list with the refresh button', async () => {
 		const { props, socket } = makeHarness({ answers: { listDevices: { devices: [] } } });
 		render(<DeviceManagement {...props} />);

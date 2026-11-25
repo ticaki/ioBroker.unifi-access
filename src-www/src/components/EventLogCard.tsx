@@ -156,6 +156,7 @@ export function EventLogCard(): JSX.Element {
     // placeholder is shown - it would count down and end in "Not available" for every door opening.
     const protectConnected = useIobState('info.protectConnected')?.val === true;
     const { settings } = useSettings();
+    const showThumbs = settings.thumbWidth > 0;
     const [modalEvent, setModalEvent] = useState<EventEntry | null>(null);
     const [now, setNow] = useState<number>(browserClock);
     const [brokenImages, setBrokenImages] = useState<ReadonlySet<string>>(() => new Set());
@@ -171,7 +172,8 @@ export function EventLogCard(): JSX.Element {
         // Always render once with a fresh `now`, so old events (loaded already past their timeout)
         // settle on showNoSnapshot reliably.
         setNow(tickNow);
-        if (!protectConnected || !timed.some(t => isSnapshotPending(t, tickNow))) {
+        // no countdown is shown while the thumbnails are switched off: nothing to tick for
+        if (!protectConnected || !showThumbs || !timed.some(t => isSnapshotPending(t, tickNow))) {
             return;
         }
         // ends on its own: every window is over SNAPSHOT_WAIT_MS after the list arrived (timeEvents)
@@ -184,7 +186,7 @@ export function EventLogCard(): JSX.Element {
             }
         }, 250);
         return () => clearInterval(id);
-    }, [timed, protectConnected]);
+    }, [timed, protectConnected, showThumbs]);
 
     return (
         <>
