@@ -13,6 +13,9 @@
 		"checkJs": true,
 
 		"noEmitOnError": true,
+		// TypeScript 6 no longer infers rootDir from the input files (TS5011) – ts-node (test:ts) needs it.
+		// This config covers src/ and test/, so the project directory is the root.
+		"rootDir": ".",
 		"outDir": "./build/",
 		"removeComments": false,
 
