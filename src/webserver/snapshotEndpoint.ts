@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import { sanitizeStaticPath } from '../lib/pathSafety';
 import type { UnifiHttp } from '../lib/unifiHttp';
 import type { RequestHandler } from './sharedHttpServer';
+import { LogThrottle } from '../lib/logThrottle';
 
 export interface ThumbnailHandlerOptions {
 	pathPrefix: string;
@@ -22,9 +23,12 @@ export interface ThumbnailHandlerOptions {
  */
 export class ThumbnailHandler {
 	readonly options: ThumbnailHandlerOptions;
+	/** A dashboard may poll a broken URL every few seconds: at most one warning per kind and minute. */
+	private readonly failures: LogThrottle;
 
 	constructor(options: ThumbnailHandlerOptions) {
 		this.options = options;
+		this.failures = new LogThrottle(options.logger);
 	}
 
 	matches = (req: IncomingMessage): boolean => {
@@ -58,7 +62,7 @@ export class ThumbnailHandler {
 		try {
 			path = await this.options.resolvePath(deviceId);
 		} catch (err) {
-			this.options.logger.warn(`Thumbnail path lookup failed: ${(err as Error).message}`);
+			this.failures.warn('lookup', `Thumbnail path lookup failed: ${(err as Error).message}`);
 			res.statusCode = 500;
 			res.end();
 			return true;
@@ -71,7 +75,10 @@ export class ThumbnailHandler {
 		if (sanitizeStaticPath(path) === null) {
 			// The stored path stems from an event payload / a state. Whatever is not a plain static-resource
 			// path is never forwarded — the proxy must not become a gateway to other API endpoints.
-			this.options.logger.warn(`Thumbnail for ${deviceId} not served: invalid thumbnail path stored.`);
+			this.failures.warn(
+				`path:${deviceId}`,
+				`Thumbnail for ${deviceId} not served: invalid thumbnail path stored.`,
+			);
 			res.statusCode = 404;
 			res.end();
 			return true;
@@ -83,7 +90,10 @@ export class ThumbnailHandler {
 			res.setHeader('Cache-Control', 'no-store');
 			res.end(buf);
 		} catch (err) {
-			this.options.logger.warn(`Thumbnail fetch for ${deviceId} failed: ${(err as Error).message}`);
+			this.failures.warn(
+				`fetch:${deviceId}`,
+				`Thumbnail fetch for ${deviceId} failed: ${(err as Error).message}`,
+			);
 			res.statusCode = 502;
 			res.end();
 		}

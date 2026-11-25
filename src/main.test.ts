@@ -3704,10 +3704,32 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				protectPort: protect.port,
 			});
 			expect(instance.val('info.protectConnected')).to.equal(false);
-			for (const path of ['protect-video/evt_9.mp4', 'protect-snapshot/66a1b2c3d4e5f60718293a4b/1.jpg']) {
-				const response = await httpRequest({ url: `http://127.0.0.1:${listenPort}/unifi-access/0/${path}` });
-				expect(response.status, path).to.equal(502);
-			}
+			const video = await httpRequest({
+				url: `http://127.0.0.1:${listenPort}/unifi-access/0/protect-video/evt_9.mp4`,
+			});
+			expect(video.status).to.equal(502);
+			// a snapshot URL is only ever answered from the cache of door-event snapshots (K-02)
+			const snapshot = await httpRequest({
+				url: `http://127.0.0.1:${listenPort}/unifi-access/0/protect-snapshot/66a1b2c3d4e5f60718293a4b/1.jpg`,
+			});
+			expect(snapshot.status).to.equal(404);
+		});
+
+		// K-02 / U-03: after a restart the snapshot of an old door event is gone — no live picture in its place
+		it('the snapshot URL of a door event from before a restart answers 404 without asking Protect', async () => {
+			await startConnected({
+				enableWebhooks: false,
+				enableProtect: true,
+				protectUsername: 'viewer',
+				protectPassword: 'protect-secret',
+				protectPort: protect.port,
+			});
+			const before = protect.requests.length;
+			const response = await httpRequest({
+				url: `http://127.0.0.1:${listenPort}/unifi-access/0/protect-snapshot/66a1b2c3d4e5f60718293a4b/1722913291000.jpg`,
+			});
+			expect(response.status).to.equal(404);
+			expect(protect.requests.slice(before)).to.deep.equal([]);
 		});
 	});
 

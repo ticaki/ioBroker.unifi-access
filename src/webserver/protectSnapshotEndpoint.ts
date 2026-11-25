@@ -1,14 +1,17 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Readable } from 'node:stream';
 import type { RequestHandler } from './sharedHttpServer';
+import { LogThrottle } from '../lib/logThrottle';
 
 export interface ProtectMediaHandlerOptions {
 	snapshotPathPrefix: string;
 	videoPathPrefix: string;
-	/** Return cached snapshot buffer for key `<cameraId>:<ts>`, or undefined on miss. */
+	/**
+	 * The snapshot taken for the door event `<cameraId>:<ts>`, or undefined when it is not (or no
+	 * longer) held. There is deliberately no fallback to a live picture: the URL names an event, and a
+	 * current image under it would be attributed to that event (e.g. in the event log of the panel).
+	 */
 	getSnapshot: (cameraId: string, ts: string) => Buffer | undefined;
-	/** On-demand snapshot fetch from Protect when cache misses. */
-	fetchSnapshot: (cameraId: string) => Promise<Buffer>;
 	/** Fetch Protect event metadata to resolve the clip URL. */
 	getEventMeta: (eventId: string) => Promise<{ clipUrl?: string } | null>;
 	/**
@@ -18,14 +21,19 @@ export interface ProtectMediaHandlerOptions {
 	fetchClip: (clipPath: string) => Promise<Buffer | { stream: Readable; contentLength?: number }>;
 	/** Largest clip that is served (default {@link DEFAULT_MAX_CLIP_BYTES}); larger ones are cut off / refused. */
 	maxClipBytes?: number;
-	logger: { warn: (msg: string) => void };
+	logger: { debug: (msg: string) => void; warn: (msg: string) => void };
 }
 
 /** Default upper bound for a served clip: door-event clips are a few MB, this only stops runaway responses. */
 export const DEFAULT_MAX_CLIP_BYTES = 256 * 1024 * 1024;
 
 export class ProtectMediaHandler {
-	constructor(private readonly options: ProtectMediaHandlerOptions) {}
+	/** Media URLs are polled by dashboards: at most one warning per kind and minute. */
+	private readonly failures: LogThrottle;
+
+	constructor(private readonly options: ProtectMediaHandlerOptions) {
+		this.failures = new LogThrottle(options.logger);
+	}
 
 	matches = (req: IncomingMessage): boolean => {
 		const url = req.url?.split('?')[0] ?? '';
@@ -58,16 +66,13 @@ export class ProtectMediaHandler {
 		}
 		const [, cameraId, ts] = match;
 
-		let buf = this.options.getSnapshot(cameraId, ts);
+		const buf = this.options.getSnapshot(cameraId, ts);
 		if (!buf) {
-			try {
-				buf = await this.options.fetchSnapshot(cameraId);
-			} catch (err) {
-				this.options.logger.warn(`Protect snapshot ${cameraId} failed: ${(err as Error).message}`);
-				res.statusCode = 502;
-				res.end();
-				return true;
-			}
+			// not held (any more): adapter restarted or the snapshot was evicted from the cache
+			this.options.logger.debug(`Protect snapshot ${cameraId}/${ts} not available (not in the cache).`);
+			res.statusCode = 404;
+			res.end('Snapshot of this event is not available any more');
+			return true;
 		}
 
 		res.statusCode = 200;
@@ -92,9 +97,13 @@ export class ProtectMediaHandler {
 		try {
 			meta = await this.options.getEventMeta(eventId);
 		} catch (err) {
-			this.options.logger.warn(`Protect event meta ${eventId} failed: ${(err as Error).message}`);
+			this.failures.warn('event-meta', `Protect event meta ${eventId} failed: ${(err as Error).message}`);
 			res.statusCode = 502;
 			res.end();
+			return true;
+		}
+		if (clientGone(res)) {
+			// the client left while the metadata was looked up: do not open the clip at all
 			return true;
 		}
 
@@ -109,9 +118,16 @@ export class ProtectMediaHandler {
 		try {
 			clip = await this.options.fetchClip(meta.clipUrl);
 		} catch (err) {
-			this.options.logger.warn(`Protect clip ${eventId} failed: ${(err as Error).message}`);
+			this.failures.warn('clip', `Protect clip ${eventId} failed: ${(err as Error).message}`);
 			res.statusCode = 502;
 			res.end();
+			return true;
+		}
+		if (clientGone(res)) {
+			// the client left while the clip was opened: close the upstream connection right away
+			if (!Buffer.isBuffer(clip)) {
+				clip.stream.destroy();
+			}
 			return true;
 		}
 
@@ -161,7 +177,7 @@ export class ProtectMediaHandler {
 				}
 				done = true;
 				if (problem) {
-					this.options.logger.warn(`Protect clip ${eventId} aborted: ${problem}`);
+					this.failures.warn('clip-aborted', `Protect clip ${eventId} aborted: ${problem}`);
 					source.destroy();
 					// headers are out already — the only honest signal left is to cut the connection
 					res.destroy();
@@ -170,7 +186,24 @@ export class ProtectMediaHandler {
 				}
 				resolve();
 			};
+			const clientLeft = (): void => {
+				if (!done) {
+					done = true;
+					source.destroy();
+					resolve();
+				}
+			};
+			// registered first: a client that is already gone has fired its 'close' before this point
+			res.on('close', clientLeft);
+			if (clientGone(res)) {
+				clientLeft();
+				return;
+			}
 			source.on('data', (chunk: Buffer) => {
+				if (clientGone(res)) {
+					clientLeft();
+					return;
+				}
 				sent += chunk.length;
 				if (sent > maxBytes) {
 					finish(`more than ${maxBytes} bytes`);
@@ -183,13 +216,15 @@ export class ProtectMediaHandler {
 			});
 			source.on('end', () => finish());
 			source.on('error', (err: Error) => finish(err.message));
-			res.on('close', () => {
-				if (!done) {
-					done = true;
-					source.destroy();
-					resolve();
-				}
-			});
 		});
 	}
+}
+
+/**
+ * Whether the client connection of a response is gone (closed, aborted or already answered).
+ *
+ * @param res Response to the client
+ */
+function clientGone(res: ServerResponse): boolean {
+	return res.destroyed || res.writableEnded;
 }

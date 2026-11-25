@@ -592,7 +592,6 @@ class UnifiAccess extends utils.Adapter {
 			const videoPrefix = `/unifi-access/${this.instance}/protect-video`;
 			// resolved per request: the client is dropped when the login turns out to be misconfigured
 			const protect = {
-				getSnapshot: (cameraId: string): Promise<Buffer> => this.requireProtect().getSnapshot(cameraId),
 				getEventMeta: (eventId: string): Promise<{ clipUrl?: string } | null> =>
 					this.requireProtect().getEventMeta(eventId),
 				getClipStream: (clipPath: string): Promise<ProtectClipStream> =>
@@ -602,7 +601,6 @@ class UnifiAccess extends utils.Adapter {
 				snapshotPathPrefix: snapshotPrefix,
 				videoPathPrefix: videoPrefix,
 				getSnapshot: (cameraId, ts) => this.protectSnapshotCache.get(`${cameraId}:${ts}`),
-				fetchSnapshot: cameraId => protect.getSnapshot(cameraId),
 				getEventMeta: eventId => protect.getEventMeta(eventId),
 				// streamed: a clip is passed on chunk by chunk instead of being held in memory
 				fetchClip: clipPath => protect.getClipStream(clipPath),

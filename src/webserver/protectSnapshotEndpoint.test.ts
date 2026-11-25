@@ -1,4 +1,5 @@
 import { expect } from 'chai';
+import type { ServerResponse } from 'node:http';
 import { connect } from 'node:net';
 import { Readable } from 'node:stream';
 
@@ -18,19 +19,16 @@ describe('ProtectMediaHandler (Protect snapshot / clip proxy)', () => {
 	let baseUrl: string;
 
 	let cache: Map<string, Buffer>;
-	let fetchSnapshot: (cameraId: string) => Promise<Buffer>;
 	let getEventMeta: (eventId: string) => Promise<{ clipUrl?: string } | null>;
 	let fetchClip: (clipPath: string) => Promise<Buffer | { stream: Readable; contentLength?: number }>;
 	let calls: string[];
+	/** response of the latest request (to see when the server noticed a client that left) */
+	let lastResponse: ServerResponse | undefined;
 
 	beforeEach(async () => {
 		logger = createTestLogger();
 		cache = new Map();
 		calls = [];
-		fetchSnapshot = async cameraId => {
-			calls.push(`fetchSnapshot ${cameraId}`);
-			return Buffer.from(`live-${cameraId}`);
-		};
 		getEventMeta = async eventId => {
 			calls.push(`getEventMeta ${eventId}`);
 			return { clipUrl: `video/${eventId}.mp4` };
@@ -46,13 +44,16 @@ describe('ProtectMediaHandler (Protect snapshot / clip proxy)', () => {
 			snapshotPathPrefix: SNAPSHOT_PREFIX,
 			videoPathPrefix: VIDEO_PREFIX,
 			getSnapshot: (cameraId, ts) => cache.get(`${cameraId}:${ts}`),
-			fetchSnapshot: cameraId => fetchSnapshot(cameraId),
 			getEventMeta: eventId => getEventMeta(eventId),
 			fetchClip: clipPath => fetchClip(clipPath),
 			maxClipBytes: MAX_CLIP_BYTES,
 			logger,
 		});
-		server.registerHandler('protect-media', handler.matches, handler.handle);
+		lastResponse = undefined;
+		server.registerHandler('protect-media', handler.matches, (req, res) => {
+			lastResponse = res;
+			return handler.handle(req, res);
+		});
 		await server.start();
 	});
 
@@ -71,20 +72,19 @@ describe('ProtectMediaHandler (Protect snapshot / clip proxy)', () => {
 			expect(calls).to.deep.equal([]);
 		});
 
-		it('fetches a live snapshot on a cache miss', async () => {
-			const response = await httpRequest({ url: `${baseUrl}${SNAPSHOT_PREFIX}/cam1abc/1.jpg?x=1` });
-			expect(response.status).to.equal(200);
-			expect(response.text).to.equal('live-cam1abc');
-			expect(calls).to.deep.equal(['fetchSnapshot cam1abc']);
-		});
-
-		it('answers 502 when Protect cannot deliver the snapshot', async () => {
-			fetchSnapshot = async () => {
-				throw new Error('Protect snapshot HTTP 404');
-			};
-			const response = await httpRequest({ url: `${baseUrl}${SNAPSHOT_PREFIX}/cam1abc/1.jpg` });
-			expect(response.status).to.equal(502);
-			expect(logger.of('warn')).to.deep.equal(['Protect snapshot cam1abc failed: Protect snapshot HTTP 404']);
+		// K-02 / U-03: the URL names a door event — a live picture under it would be taken for the event
+		it('answers 404 on a cache miss and does not fetch a live picture from Protect', async () => {
+			cache.set('cam1abc:1722913291000', Buffer.from('cached-image'));
+			for (const path of [
+				`${SNAPSHOT_PREFIX}/cam1abc/1.jpg?x=1`,
+				`${SNAPSHOT_PREFIX}/othercam/1722913291000.jpg`,
+			]) {
+				const response = await httpRequest({ url: `${baseUrl}${path}` });
+				expect(response.status, path).to.equal(404);
+				expect(response.text).to.equal('Snapshot of this event is not available any more');
+			}
+			expect(calls).to.deep.equal([]);
+			expect(logger.of('warn')).to.deep.equal([]);
 		});
 
 		for (const tail of [
@@ -204,6 +204,54 @@ describe('ProtectMediaHandler (Protect snapshot / clip proxy)', () => {
 				expect(logger.of('warn')).to.deep.equal(['Protect clip evt1 aborted: Protect went away']);
 			});
 
+			// K-06: the client goes away while the event is looked up / the clip is opened
+			it('a client that left during the event lookup: the clip is not opened at all', async () => {
+				let releaseMeta: () => void = () => undefined;
+				let metaAsked = false;
+				getEventMeta = eventId => {
+					metaAsked = true;
+					return new Promise(resolve => {
+						releaseMeta = () => resolve({ clipUrl: `video/${eventId}.mp4` });
+					});
+				};
+				const client = connect(Number(new URL(baseUrl).port), '127.0.0.1', () => {
+					client.write(`GET ${VIDEO_PREFIX}/evt1.mp4 HTTP/1.1\r\nHost: x\r\n\r\n`);
+				});
+				await waitFor(() => metaAsked, { description: 'event lookup started' });
+				client.destroy();
+				// the server sees the closed connection before the lookup answers
+				await waitFor(() => lastResponse?.destroyed === true, {
+					description: 'server noticed the client left',
+				});
+				releaseMeta();
+				// a request that proves the handler finished the first one
+				expect((await httpRequest({ url: `${baseUrl}${SNAPSHOT_PREFIX}/cam1/1.jpg` })).status).to.equal(404);
+				expect(calls).to.deep.equal([]);
+			});
+
+			it('a client that left while the clip was opened: the upstream stream is destroyed, nothing hangs', async () => {
+				const stream = new Readable({ read() {} });
+				let releaseClip: () => void = () => undefined;
+				let clipAsked = false;
+				fetchClip = () => {
+					clipAsked = true;
+					return new Promise(resolve => {
+						releaseClip = () => resolve({ stream, contentLength: 1000 });
+					});
+				};
+				const client = connect(Number(new URL(baseUrl).port), '127.0.0.1', () => {
+					client.write(`GET ${VIDEO_PREFIX}/evt1.mp4 HTTP/1.1\r\nHost: x\r\n\r\n`);
+				});
+				await waitFor(() => clipAsked, { description: 'clip requested' });
+				client.destroy();
+				await waitFor(() => lastResponse?.destroyed === true, {
+					description: 'server noticed the client left',
+				});
+				releaseClip();
+				await waitFor(() => stream.destroyed, { description: 'source stream destroyed' });
+				expect(logger.of('warn')).to.deep.equal([]);
+			});
+
 			it('stops reading from Protect when the client disconnects', async () => {
 				const stream = new Readable({ read() {} });
 				fetchClip = async () => ({ stream });
@@ -233,6 +281,18 @@ describe('ProtectMediaHandler (Protect snapshot / clip proxy)', () => {
 				'Protect event meta evt1 failed: meta down',
 				'Protect clip evt1 failed: Protect clip HTTP 404',
 			]);
+		});
+
+		// K-14: a dashboard polling a broken URL must not flood the log
+		it('repeated failures of the same kind give one warning per minute, the rest at debug level', async () => {
+			getEventMeta = async () => {
+				throw new Error('meta down');
+			};
+			for (let i = 0; i < 5; i++) {
+				expect((await httpRequest({ url: `${baseUrl}${VIDEO_PREFIX}/evt${i}.mp4` })).status).to.equal(502);
+			}
+			expect(logger.of('warn')).to.deep.equal(['Protect event meta evt0 failed: meta down']);
+			expect(logger.of('debug').filter(m => m.includes('meta down'))).to.have.length(4);
 		});
 
 		for (const tail of [

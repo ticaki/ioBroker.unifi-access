@@ -323,4 +323,22 @@ describe('WebhookHandler (UniFi Access webhook receiver)', () => {
 			expect(received).to.have.length(1);
 		});
 	});
+
+	// K-14: anybody on the network can send requests to the receiver
+	it('rejected requests of the same kind give one warning per minute, the rest at debug level', async () => {
+		for (let i = 0; i < 5; i++) {
+			const response = await sendWebhook({ url, secret: SECRET, body: sampleEvent(), signature: 'invalid' });
+			expect(response.status).to.equal(401);
+		}
+		secret = null;
+		for (let i = 0; i < 3; i++) {
+			const response = await sendWebhook({ url, secret: SECRET, body: sampleEvent() });
+			expect(response.status).to.equal(401);
+		}
+		expect(logger.of('warn')).to.deep.equal([
+			'Webhook signature verification failed.',
+			'Webhook received but no secret configured — rejecting.',
+		]);
+		expect(logger.of('debug').filter(m => m.startsWith('Webhook'))).to.have.length(6);
+	});
 });

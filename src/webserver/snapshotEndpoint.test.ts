@@ -123,6 +123,18 @@ describe('ThumbnailHandler (thumbnail proxy on the shared HTTP server)', () => {
 			expect(logger.of('warn')[0]).to.contain(`Thumbnail fetch for ${READER} failed`);
 		});
 
+		// K-14: a dashboard polling a broken thumbnail URL must not flood the log
+		it('a thumbnail that keeps failing gives one warning per minute, the rest at debug level', async () => {
+			paths.set(READER, '/preview/gone.jpg');
+			for (let i = 0; i < 4; i++) {
+				expect((await httpRequest({ url: `${baseUrl}${PREFIX}/${READER}.jpg` })).status).to.equal(502);
+			}
+			expect(logger.of('warn')).to.have.length(1);
+			expect(logger.of('debug').filter(m => m.startsWith(`Thumbnail fetch for ${READER} failed`))).to.have.length(
+				3,
+			);
+		});
+
 		it('502 when the controller connection breaks', async () => {
 			paths.set(READER, THUMBNAIL_PATH);
 			mock.failNext({ hangUp: true });
