@@ -3,6 +3,22 @@ import { Alert, Box, Button, CircularProgress, Snackbar, Stack, Tooltip } from '
 import WifiTetheringIcon from '@mui/icons-material/WifiTethering';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
 import { I18n } from '@iobroker/gui-components';
+import { describeRequestError, requestAdapter } from './adapterRequest';
+
+/** The adapter probes the controller with a 10 s HTTP timeout, so wait a bit longer than that */
+const VERIFY_TIMEOUT_MS = 20_000;
+
+/**
+ * The password field of the admin shows this text instead of a stored secret. If the user types into
+ * the field without clearing it first, the placeholder becomes a part of the value.
+ */
+const PASSWORD_PLACEHOLDER = '____ppp____';
+
+interface VerifyTokenAnswer {
+	ok?: boolean;
+	error?: string;
+	controllerName?: string | null;
+}
 
 interface AuthSetupState extends ConfigGenericState {
 	testing: boolean;
@@ -13,6 +29,8 @@ interface AuthSetupState extends ConfigGenericState {
 }
 
 class AuthSetup extends ConfigGeneric<ConfigGenericProps, AuthSetupState> {
+	private unmounted = false;
+
 	constructor(props: ConfigGenericProps) {
 		super(props);
 		Object.assign(this.state, {
@@ -23,16 +41,41 @@ class AuthSetup extends ConfigGeneric<ConfigGenericProps, AuthSetupState> {
 		} satisfies Partial<AuthSetupState>);
 	}
 
+	componentWillUnmount(): void {
+		this.unmounted = true;
+		super.componentWillUnmount();
+	}
+
+	private static describeVerifyError(code: string | undefined): string {
+		switch (code) {
+			case 'unauthorized':
+				return I18n.t('auth_test_error_unauthorized');
+			case 'network':
+				return I18n.t('auth_test_error_network');
+			case 'missing-fields':
+				return I18n.t('auth_test_missingFields');
+			default:
+				return code || I18n.t('auth_test_error_unknown');
+		}
+	}
+
 	private async runConnectionTest(): Promise<void> {
 		const data = this.props.data as Record<string, unknown> | undefined;
-		const host = (data?.controllerHost as string | undefined) ?? '';
-		const port = (data?.controllerPort as number | undefined) ?? 12_445;
-		const token = (data?.apiToken as string | undefined) ?? '';
-		const verifyTLS = (data?.verifyTLS as boolean | undefined) ?? false;
+		const host = typeof data?.controllerHost === 'string' ? data.controllerHost : '';
+		const port = Number(data?.controllerPort) || 12_445;
+		const token = typeof data?.apiToken === 'string' ? data.apiToken : '';
+		const verifyTLS = data?.verifyTLS === true;
 
 		if (!host || !token) {
 			this.setState({
 				testStatusMsg: I18n.t('auth_test_missingFields'),
+				testStatusKind: 'error',
+			});
+			return;
+		}
+		if (token.includes(PASSWORD_PLACEHOLDER)) {
+			this.setState({
+				testStatusMsg: I18n.t('auth_test_placeholder'),
 				testStatusKind: 'error',
 			});
 			return;
@@ -45,39 +88,38 @@ class AuthSetup extends ConfigGeneric<ConfigGenericProps, AuthSetupState> {
 		});
 
 		try {
-			const raw: unknown = await this.props.oContext.socket.sendTo(
-				`unifi-access.${this.props.oContext.instance}`,
+			const r = await requestAdapter<VerifyTokenAnswer | undefined>(
+				this.props,
 				'verifyToken',
 				{ host, port, token, verifyTLS },
+				VERIFY_TIMEOUT_MS,
 			);
-			const r = raw as
-				{ ok?: boolean; error?: /*'unauthorized' | 'network' |*/ string; controllerName?: string } | undefined;
+			if (this.unmounted) {
+				return;
+			}
 			if (r?.ok) {
 				this.setState({
 					testing: false,
 					testStatusMsg: r.controllerName
-						? I18n.t('auth_test_success_named').replace('%s', r.controllerName)
+						? I18n.t('auth_test_success_named', r.controllerName)
 						: I18n.t('auth_test_success'),
 					testStatusKind: 'success',
 					snackbar: I18n.t('auth_test_success'),
 				});
 			} else {
-				const reason =
-					r?.error === 'unauthorized'
-						? I18n.t('auth_test_error_unauthorized')
-						: r?.error === 'network'
-							? I18n.t('auth_test_error_network')
-							: (r?.error ?? I18n.t('auth_test_error_unknown'));
 				this.setState({
 					testing: false,
-					testStatusMsg: reason,
+					testStatusMsg: AuthSetup.describeVerifyError(r?.error),
 					testStatusKind: 'error',
 				});
 			}
 		} catch (err) {
+			if (this.unmounted) {
+				return;
+			}
 			this.setState({
 				testing: false,
-				testStatusMsg: (err as Error)?.message ?? I18n.t('auth_test_error_unknown'),
+				testStatusMsg: describeRequestError(err, 'auth_test_error_unknown'),
 				testStatusKind: 'error',
 			});
 		}

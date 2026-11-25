@@ -3,6 +3,7 @@
     "auth_test_tooltip": "Test de controller met de hierboven ingevulde waarden (slaat niet op).",
     "auth_test_running": "Controller controleren…",
     "auth_test_missingFields": "Vul eerst host en API-token in.",
+    "auth_test_placeholder": "Het veld voor het API-token bevat nog de gemaskeerde plaatshouder. Maak het veld volledig leeg en voer het volledige token opnieuw in.",
     "auth_test_success": "Verbinding gelukt",
     "auth_test_success_named": "Verbinding gelukt — controller: %s",
     "auth_test_error_unauthorized": "Token geweigerd (niet geautoriseerd).",

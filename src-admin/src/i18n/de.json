@@ -3,6 +3,7 @@
     "auth_test_tooltip": "Prüft den Controller mit den oben eingetragenen Werten (ohne zu speichern).",
     "auth_test_running": "Prüfe Controller…",
     "auth_test_missingFields": "Bitte zuerst Host und API-Token eintragen.",
+    "auth_test_placeholder": "Das API-Token-Feld enthält noch den maskierten Platzhalter. Bitte das Feld vollständig leeren und das Token komplett neu eingeben.",
     "auth_test_success": "Verbindung erfolgreich",
     "auth_test_success_named": "Verbindung erfolgreich — Controller: %s",
     "auth_test_error_unauthorized": "Token wurde abgelehnt (unauthorized).",

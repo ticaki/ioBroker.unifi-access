@@ -3,6 +3,7 @@
     "auth_test_tooltip": "Prueba el controlador con los valores introducidos arriba (no guarda).",
     "auth_test_running": "Probando controlador…",
     "auth_test_missingFields": "Introduce primero el host y el token de API.",
+    "auth_test_placeholder": "El campo del token de API todavía contiene el marcador oculto. Vacía el campo por completo e introduce de nuevo el token completo.",
     "auth_test_success": "Conexión correcta",
     "auth_test_success_named": "Conexión correcta — controlador: %s",
     "auth_test_error_unauthorized": "Token rechazado (no autorizado).",

@@ -3,6 +3,7 @@
     "auth_test_tooltip": "使用上方输入的值测试控制器(不保存)。",
     "auth_test_running": "正在测试控制器…",
     "auth_test_missingFields": "请先输入主机和 API 令牌。",
+    "auth_test_placeholder": "API 令牌字段仍包含被遮盖的占位符。请完全清空该字段并重新输入完整的令牌。",
     "auth_test_success": "连接成功",
     "auth_test_success_named": "连接成功 — 控制器:%s",
     "auth_test_error_unauthorized": "令牌被拒绝(未授权)。",

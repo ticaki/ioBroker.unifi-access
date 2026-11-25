@@ -3,6 +3,7 @@
     "auth_test_tooltip": "Sprawdź kontroler z wprowadzonymi powyżej wartościami (bez zapisu).",
     "auth_test_running": "Sprawdzanie kontrolera…",
     "auth_test_missingFields": "Najpierw wprowadź host i token API.",
+    "auth_test_placeholder": "Pole tokena API nadal zawiera zamaskowany symbol zastępczy. Wyczyść pole całkowicie i wprowadź ponownie cały token.",
     "auth_test_success": "Połączenie udane",
     "auth_test_success_named": "Połączenie udane — kontroler: %s",
     "auth_test_error_unauthorized": "Token odrzucony (brak autoryzacji).",

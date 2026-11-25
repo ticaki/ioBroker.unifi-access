@@ -3,6 +3,7 @@
     "auth_test_tooltip": "Probe the controller with the values entered above (does not save).",
     "auth_test_running": "Probing controller…",
     "auth_test_missingFields": "Please enter host and API token first.",
+    "auth_test_placeholder": "The API token field still contains the masked placeholder. Clear the field completely and enter the full token again.",
     "auth_test_success": "Connection successful",
     "auth_test_success_named": "Connection successful — controller: %s",
     "auth_test_error_unauthorized": "Token rejected (unauthorized).",
