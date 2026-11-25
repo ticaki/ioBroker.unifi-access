@@ -872,10 +872,22 @@ function defineAdapterTests({ suite, describe, it }) {
 				expect((await tools.sendTo(harness, 'getConnectionStatus')).webhookRegistered).to.equal(true);
 			});
 
-			it('answers nothing harmful for an unknown command (adapter keeps running)', async () => {
-				harness.sendTo(tools.NAMESPACE, 'thisCommandDoesNotExist', {}, () => undefined);
+			it('answers an unknown command with an error (the caller is not left waiting, the adapter keeps running)', async () => {
+				expect(await tools.sendTo(harness, 'thisCommandDoesNotExist', {})).to.deep.equal({
+					ok: false,
+					error: 'unknown-command',
+				});
 				expect((await tools.sendTo(harness, 'getConnectionStatus')).connected).to.equal(true);
 				expect(harness.isAdapterRunning()).to.equal(true);
+			});
+
+			it('admin.uiSettings is a writable JSON state and a value written by the www panel is confirmed', async () => {
+				const obj = await tools.getObject(harness, tools.id('admin.uiSettings'));
+				expect(obj.common).to.include({ type: 'string', role: 'json', read: true, write: true });
+				const value = JSON.stringify({ showDoorList: false, thumbWidth: 128 });
+				await tools.writeState(harness, 'admin.uiSettings', value);
+				const confirmed = await tools.waitForState(harness, 'admin.uiSettings', s => s.ack === true);
+				expect(confirmed.val).to.equal(value);
 			});
 		});
 
@@ -1155,11 +1167,9 @@ function defineAdapterTests({ suite, describe, it }) {
 				expect(response.status).to.equal(200);
 			});
 
-			// BUG-C-13: the objects of notifications.* (and info.webhook*) are only created by a successful
-			// bootstrap. While the controller has never been reachable the adapter writes these states without
-			// objects — js-controller warns "State … has no existing object, this might lead to an error in
-			// future versions" for each of them and the values are invisible in admin.
-			it.skip('BUG-C-13: creates the objects of the states it writes even without a successful bootstrap', async () => {
+			// Without objects js-controller warns "State … has no existing object, this might lead to an error
+			// in future versions" for each state and the values are invisible in admin.
+			it('creates the objects of the states it writes even without a successful bootstrap', async () => {
 				await httpRequest({
 					url: `http://127.0.0.1:${listenPort}/webhook`,
 					method: 'POST',

@@ -1543,29 +1543,493 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		});
 	});
 
-	describe('system log lookup after an unlock', () => {
-		it('queries the system logs 3 s after access.door.unlock for a window around the event', async () => {
+	describe('system log lookup after an unlock (R-11, D-07)', () => {
+		it('does not query the system logs at all while the Protect integration is off', async () => {
 			const instance = await startConnected();
 			await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
-			const ts = events()[0].ts;
-			expect(mock.findRequests({ path: '/system/logs' })).to.have.length(0);
-
-			await clock.tickAsync(2999);
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.generic('access.temporary_unlock.start', {
+					door: door(DOOR_3855),
+					device: hub(),
+				}),
+			);
+			await waitFor(() => events().length === 2, { description: 'events logged' });
+			await clock.tickAsync(60_000);
 			await delay(30);
-			expect(mock.findRequests({ path: '/system/logs' })).to.have.length(0);
-			await clock.tickAsync(1);
-			await waitFor(() => mock.findRequests({ path: '/system/logs' }).length === 2, {
-				description: 'log queries',
+			expect(mock.findRequests({ path: '/system/logs' })).to.deep.equal([]);
+			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+
+		describe('with the Protect integration', () => {
+			let protect: ProtectStub;
+			const CAMERA = '66a1b2c3d4e5f60718293a4b';
+			const cameraHit = (eventId = 'evt_77'): unknown => ({
+				_source: {
+					target: [
+						{ type: 'door', id: DOOR_3855 },
+						{ type: 'camera event', id: `protect_${CAMERA}_${eventId}` },
+					],
+				},
 			});
 
-			const queries = mock.findRequests({ path: '/system/logs' });
-			expect(queries.every(q => q.method === 'POST')).to.equal(true);
-			expect(queries[0].body).to.deep.equal({
-				topic: 'door_openings',
-				since: Math.floor(ts / 1000) - 10,
-				until: Math.floor(ts / 1000) + 30,
+			beforeEach(async () => {
+				protect = new ProtectStub();
+				await protect.start();
 			});
-			expect(instance.log.of('warn').filter(m => m.includes('system-logs'))).to.deep.equal([]);
+
+			afterEach(async () => {
+				await adapter?.fireUnload();
+				adapter = undefined;
+				await protect.stop();
+			});
+
+			const startWithProtect = (overrides: Record<string, unknown> = {}): Promise<FakeAdapter> =>
+				startConnected({
+					enableProtect: true,
+					protectUsername: 'viewer',
+					protectPassword: 'protect-secret',
+					protectPort: protect.port,
+					...overrides,
+				});
+
+			it('queries the documented topic door_openings 3 s after access.door.unlock and attaches the camera snapshot', async () => {
+				const instance = await startWithProtect();
+				mock.systemLogHits = [cameraHit()];
+				await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+				await waitFor(() => events().length === 1, { description: 'event logged' });
+				const ts = events()[0].ts;
+
+				await clock.tickAsync(2999);
+				await delay(30);
+				expect(mock.findRequests({ path: '/system/logs' })).to.have.length(0);
+				await clock.tickAsync(1);
+				await waitFor(() => events()[0].protectSnapshotUrl !== undefined, { description: 'snapshot attached' });
+
+				const queries = mock.findRequests({ path: '/system/logs' });
+				expect(queries.map(q => `${q.method} ${JSON.stringify(q.body)}`)).to.deep.equal([
+					`POST ${JSON.stringify({
+						topic: 'door_openings',
+						since: Math.floor(ts / 1000) - 10,
+						until: Math.floor(ts / 1000) + 30,
+					})}`,
+				]);
+				expect(events()[0]).to.include({
+					protectCameraId: CAMERA,
+					protectEventId: 'evt_77',
+					protectSnapshotUrl: `http://127.0.0.1:${listenPort}/unifi-access/0/protect-snapshot/${CAMERA}/${ts}.jpg`,
+					protectVideoUrl: `http://127.0.0.1:${listenPort}/unifi-access/0/protect-video/evt_77.mp4`,
+				});
+				expect(instance.log.of('warn')).to.deep.equal([]);
+
+				// the cached snapshot is served by the shared HTTP server
+				const response = await httpRequest({ url: events()[0].protectSnapshotUrl as string });
+				expect(response.status).to.equal(200);
+				expect(response.body.equals(protect.snapshot)).to.equal(true);
+			});
+
+			it('falls back to the topic "all" only when door_openings carries no camera event', async () => {
+				await startWithProtect();
+				await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+				await waitFor(() => events().length === 1, { description: 'event logged' });
+				await clock.tickAsync(3000);
+				await waitFor(() => mock.findRequests({ path: '/system/logs' }).length === 2, {
+					description: 'both queries',
+				});
+				expect(mock.findRequests({ path: '/system/logs' }).map(q => q.body.topic)).to.deep.equal([
+					'door_openings',
+					'all',
+				]);
+			});
+
+			it('ignores camera events whose ids are not plain ids', async () => {
+				const instance = await startWithProtect();
+				mock.systemLogHits = [
+					{ _source: { target: [{ type: 'camera event', id: 'protect_../../x_evt' }] } },
+					{ _source: { target: [{ type: 'camera event', id: 'protect_' }] } },
+					{ _source: { target: 'nothing' } },
+					null,
+				];
+				const snapshots = protect.requests.length;
+				await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+				await waitFor(() => events().length === 1, { description: 'event logged' });
+				await clock.tickAsync(3000);
+				await waitFor(() => mock.findRequests({ path: '/system/logs' }).length === 2, {
+					description: 'queries',
+				});
+				await delay(50);
+				expect(protect.requests).to.have.length(snapshots);
+				expect(events()[0].protectSnapshotUrl).to.equal(undefined);
+				expect(instance.log.of('warn')).to.deep.equal([]);
+			});
+
+			it('a token without the system log permission is reported once, not on every unlock', async () => {
+				const instance = await startWithProtect();
+				mock.failNext({ path: '/system/logs', status: 403, times: Number.POSITIVE_INFINITY });
+				for (let i = 1; i <= 3; i++) {
+					await mock.deliverWebhook(
+						fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }),
+					);
+					await waitFor(() => events().length === i, { description: 'event logged' });
+					await clock.tickAsync(3000);
+					await waitFor(() => mock.findRequests({ path: '/system/logs' }).length === i * 2, {
+						description: 'queries',
+					});
+				}
+				await delay(30);
+				const warnings = instance.log.of('warn');
+				expect(warnings).to.have.length(1);
+				expect(warnings[0]).to.contain('view:system_log');
+			});
+
+			it('does not query the system logs after the Protect login was rejected', async () => {
+				await startWithProtect({ protectPassword: 'wrong' });
+				await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub() }));
+				await waitFor(() => events().length === 1, { description: 'event logged' });
+				await clock.tickAsync(10_000);
+				await delay(30);
+				expect(mock.findRequests({ path: '/system/logs' })).to.deep.equal([]);
+			});
+		});
+	});
+
+	describe('objects exist before states are written (R-09)', () => {
+		it('creates the info, doorbell, events and notification objects at start — also without a reachable controller', async () => {
+			mock.failNext({ status: 500, times: Number.POSITIVE_INFINITY });
+			const instance = await start({ enableGenericWebhook: true, genericWebhookAuth: 'none' });
+			for (const id of [
+				'info.webhookRegistered',
+				'info.webhookEndpointId',
+				'info.protectConnected',
+				'events.last',
+				'doorbell.activeCallId',
+				'notifications.lastRaw',
+				'notifications.lastTimestamp',
+				'doors.emergency.lockdown',
+				'admin.uiSettings',
+			]) {
+				expect(instance.obj(id)?.type, id).to.equal('state');
+			}
+			const response = await httpRequest({
+				url: `http://127.0.0.1:${listenPort}/webhook`,
+				method: 'POST',
+				body: '{"alarm_id":"offline-alarm","events":[]}',
+			});
+			expect(response.status).to.equal(200);
+			expect(instance.val('notifications.lastAlarmId')).to.equal('offline-alarm');
+			// every state that was written has an object
+			const written = new Set(instance.stateWrites.map(w => w.id));
+			// info.connection is an instanceObject of io-package.json, created by js-controller itself
+			written.delete(`${NS}.info.connection`);
+			expect([...written].filter(id => !instance.objects.has(id))).to.deep.equal([]);
+		});
+
+		it('never writes a state without object during normal operation (devices, doors, thumbnails, events)', async () => {
+			const instance = await startConnected({
+				enableThumbnailServer: true,
+				forwardEvents: [],
+			});
+			// a reader model without the thumbnail capability flag delivers a thumbnail
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorUnlock({ door: door(DOOR_3855), device: hub(), readerId: DEVICE_HUB }),
+			);
+			await waitFor(() => instance.val(`devices.${DEVICE_HUB}.lastThumbnailPath`), {
+				description: 'thumbnail stored',
+			});
+			expect(instance.obj(`devices.${DEVICE_HUB}.lastThumbnailPath`)?.type).to.equal('state');
+			expect(instance.obj(`devices.${DEVICE_HUB}.lastThumbnailUrl`)?.type).to.equal('state');
+			mock.emitRemoteView();
+			mock.emitRemoteUnlock(DOOR_A2);
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.dpsStatus({ door: door(DOOR_A2), device: hub(), status: 'close' }),
+			);
+			await waitFor(() => instance.val(`doors.${DOOR_A2}.position`) === 'close', {
+				description: 'events processed',
+			});
+			await clock.tickAsync(10_000);
+			await delay(50);
+			const written = new Set(instance.stateWrites.map(w => w.id));
+			// info.connection is an instanceObject of io-package.json, created by js-controller itself
+			written.delete(`${NS}.info.connection`);
+			expect([...written].filter(id => !instance.objects.has(id))).to.deep.equal([]);
+		});
+
+		it('a device that appears after the start gets its objects through a reload before its states are written', async () => {
+			const instance = await startConnected();
+			const newDevice = { id: 'aabbccddee01', name: 'UA-G3-NEW', type: 'UA-G3-PRO', alias: 'Side Entrance' };
+			const before = mock.findRequests({ path: '/devices' }).length;
+			(mock.devices as { id: string }[][])[0].push(newDevice);
+
+			const event = fixtures.webhookEvents.doorbellIncoming({ door: door(DOOR_3855), device: newDevice });
+			await mock.deliverWebhook(event);
+			await waitFor(() => instance.obj('devices.aabbccddee01')?.type === 'channel', {
+				description: 'device channel',
+			});
+			expect(mock.findRequests({ path: '/devices' })).to.have.length(before + 1);
+			expect(
+				instance.stateWrites.filter(w => w.id.includes('aabbccddee01') && !instance.objects.has(w.id)),
+			).to.deep.equal([]);
+
+			// the next event of that device is processed normally
+			await mock.deliverWebhook(event);
+			await waitFor(() => instance.val('devices.aabbccddee01.lastThumbnailPath'), {
+				description: 'thumbnail of the new device',
+			});
+			expect(instance.val('devices.aabbccddee01.lastSeenAt')).to.be.a('string').with.length.greaterThan(0);
+		});
+
+		it('a device id that the controller never lists triggers one reload only and no state writes', async () => {
+			const instance = await startConnected();
+			const ghost = { id: 'ffffffffff99', name: 'ghost', type: 'UAH' };
+			const before = mock.findRequests({ path: '/devices' }).length;
+			for (let i = 1; i <= 3; i++) {
+				await mock.deliverWebhook(
+					fixtures.webhookEvents.dpsStatus({ door: door(DOOR_3855), device: ghost, status: 'open' }),
+				);
+				await waitFor(() => events().length === i, { description: 'event logged' });
+			}
+			await waitFor(() => mock.findRequests({ path: '/devices' }).length === before + 1, {
+				description: 'one reload',
+			});
+			await delay(50);
+			expect(mock.findRequests({ path: '/devices' })).to.have.length(before + 1);
+			expect(instance.stateWrites.filter(w => w.id.includes('ffffffffff99'))).to.deep.equal([]);
+		});
+
+		it('a door that appears after the start gets its objects before its states are written', async () => {
+			const instance = await startConnected();
+			const newDoor = {
+				id: 'c0ffee00-0000-4000-8000-000000000001',
+				name: 'Garage',
+				full_name: 'UNVR - 1F - Garage',
+				type: 'door',
+				is_bind_hub: true,
+				door_lock_relay_status: 'unlock',
+				door_position_status: 'open',
+			};
+			mock.doors.push(newDoor);
+			await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: newDoor, device: hub() }));
+			await waitFor(() => events().length === 1, { description: 'event logged' });
+			expect(instance.stateWrites.filter(w => w.id.includes(newDoor.id))).to.deep.equal([]);
+
+			await clock.tickAsync(2000);
+			await waitFor(() => instance.obj(`doors.${newDoor.id}`)?.type === 'channel', {
+				description: 'door channel',
+			});
+			expect(instance.val(`doors.${newDoor.id}.locked`)).to.equal(false);
+			expect(instance.val(`doors.${newDoor.id}.position`)).to.equal('open');
+			expect(instance.obj(`doors.${newDoor.id}.unlock`)?.common.role).to.equal('button');
+			expect(
+				instance.stateWrites.filter(w => w.id.includes(newDoor.id) && !instance.objects.has(w.id)),
+			).to.deep.equal([]);
+
+			// and it can be controlled right away
+			instance.fireStateChange(`doors.${newDoor.id}.unlock`, true);
+			await waitFor(() => mock.unlocks.some(u => u.doorId === newDoor.id), {
+				description: 'unlock of the new door',
+			});
+		});
+	});
+
+	describe('generic alarm webhook: field types (R-21)', () => {
+		const post = (body: string): Promise<{ status: number }> =>
+			httpRequest({ url: `http://127.0.0.1:${listenPort}/webhook`, method: 'POST', body });
+
+		it('writes only values of the declared state type, whatever the body contains', async () => {
+			const instance = await startConnected({ enableGenericWebhook: true, genericWebhookAuth: 'none' });
+			for (const body of [
+				'null',
+				'[]',
+				'42',
+				'"text"',
+				'{"alarm_id":{"a":1},"events":"none"}',
+				'{"alarm_id":["x"],"events":[null]}',
+				'{"alarm_id":7,"events":[{"id":{"x":1},"location":["a"],"scope":{"locations":{"b":2}},"user":true,"user_name":[],"location_name":{},"direction":5,"unlock_method_text":null,"time":{"t":1}}]}',
+			]) {
+				expect((await post(body)).status, body).to.equal(200);
+			}
+			const types: Record<string, string> = {
+				lastRaw: 'string',
+				lastAlarmId: 'string',
+				lastEventType: 'string',
+				lastLocationId: 'string',
+				lastLocationName: 'string',
+				lastUserId: 'string',
+				lastUserName: 'string',
+				lastDirection: 'string',
+				lastUnlockMethod: 'string',
+				lastTimestamp: 'number',
+			};
+			const wrong = instance.stateWrites
+				.filter(w => w.id.startsWith(`${NS}.notifications.`))
+				.filter(w => typeof w.val !== types[w.id.split('.').pop()!]);
+			expect(wrong).to.deep.equal([]);
+			expect(instance.val('notifications.lastAlarmId')).to.equal('7');
+			expect(instance.val('notifications.lastDirection')).to.equal('5');
+			expect(instance.val('notifications.lastLocationId')).to.equal('');
+			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+
+		it('resolves door and user names and falls back to the names in the payload', async () => {
+			const instance = await startConnected({ enableGenericWebhook: true, genericWebhookAuth: 'none' });
+			const user = fixtures.DEFAULT_USERS[0];
+			await post(JSON.stringify({ alarm_id: 'a1', events: [{ id: 'e', location: DOOR_3855, user: user.id }] }));
+			expect(instance.val('notifications.lastLocationName')).to.equal('Door 3855');
+			expect(instance.val('notifications.lastUserName')).to.equal('Hong Lu');
+			await post(
+				JSON.stringify({
+					alarm_id: 'a2',
+					events: [
+						{
+							id: 'e',
+							scope: { locations: 'loc-9' },
+							location_name: 'Side',
+							user: 'u-9',
+							user_name: 'Guest',
+						},
+					],
+				}),
+			);
+			expect(instance.val('notifications.lastLocationId')).to.equal('loc-9');
+			expect(instance.val('notifications.lastLocationName')).to.equal('Side');
+			expect(instance.val('notifications.lastUserName')).to.equal('Guest');
+		});
+	});
+
+	describe('sendTo commands always answer (X-01, R-25)', () => {
+		it('listUsers reports why the list is empty in an "error" field', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			expect(await instance.request('listUsers')).to.deep.equal({
+				users: [
+					{ id: fixtures.DEFAULT_USERS[0].id, name: 'Hong Lu' },
+					{ id: fixtures.DEFAULT_USERS[1].id, name: 'Ttttt Tttt' },
+				],
+			});
+
+			mock.failNext({ path: '/users', status: 500 });
+			expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'network' });
+
+			mock.failNext({ path: '/users', status: 401, code: 'CODE_ACCESS_TOKEN_INVALID' });
+			expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'unauthorized' });
+		});
+
+		it('listUsers without configured controller answers with error "not-configured"', async () => {
+			const instance = await start({ apiToken: '' });
+			expect(await instance.request('listUsers')).to.deep.equal({ users: [], error: 'not-configured' });
+			expect(await instance.request('reregisterWebhook')).to.deep.equal({ ok: false, error: 'not-configured' });
+			expect(await instance.request('listDevices')).to.deep.equal({ devices: [] });
+			expect(await instance.request('getConnectionStatus')).to.include({ connected: false, hasToken: false });
+		});
+
+		it('an unknown command is answered with an error instead of leaving the caller waiting', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			expect(await instance.request('thisCommandDoesNotExist', { a: 1 })).to.deep.equal({
+				ok: false,
+				error: 'unknown-command',
+			});
+		});
+
+		it('verifyToken tolerates payloads of the wrong type', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			for (const payload of [
+				undefined,
+				null,
+				'text',
+				5,
+				[],
+				{ host: 5, token: {} },
+				{ host: '127.0.0.1', token: ['x'] },
+			]) {
+				expect(await instance.request('verifyToken', payload), JSON.stringify(payload)).to.deep.equal({
+					ok: false,
+					error: 'missing-fields',
+				});
+			}
+			expect(
+				await instance.request('verifyToken', { host: '127.0.0.1', port: 'not-a-port', token: TOKEN }, 20_000),
+			).to.include({ ok: false });
+			expect(
+				await instance.request('verifyToken', { host: '127.0.0.1', port: mock.port, token: TOKEN }),
+			).to.deep.equal({
+				ok: true,
+				controllerName: 'UNVR - Main Floor',
+			});
+		});
+
+		it('a message without callback is processed without sending an answer', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			const handler = (instance as unknown as { handlers: { message: (msg: unknown) => void } }).handlers.message;
+			const before = instance.sentMessages.length;
+			handler({ command: 'listDevices', message: null, from: 'system.adapter.test.0' });
+			handler({ command: 42, from: 'system.adapter.test.0' });
+			handler(null);
+			await instance.request('getConnectionStatus');
+			expect(instance.sentMessages).to.have.length(before + 1);
+		});
+
+		it('reregisterWebhook answers before the credentials are stored (storing restarts the instance)', async () => {
+			const instance = await startConnected();
+			const order: string[] = [];
+			const sendTo = instance.sendTo.bind(instance);
+			instance.sendTo = (...args: Parameters<FakeAdapter['sendTo']>) => {
+				order.push('answer');
+				return sendTo(...args);
+			};
+			const extend = instance.extendForeignObjectAsync.bind(instance);
+			instance.extendForeignObjectAsync = async (id: string, obj: Record<string, unknown>) => {
+				order.push('store');
+				return extend(id, obj);
+			};
+			const answer = await instance.request('reregisterWebhook');
+			expect(answer.ok).to.equal(true);
+			await waitFor(() => order.includes('store'), { description: 'credentials stored' });
+			expect(order).to.deep.equal(['answer', 'store']);
+			expect(instance.objects.get(INSTANCE_OBJECT)?.native.webhookEndpointId).to.equal(answer.id);
+		});
+	});
+
+	describe('admin.uiSettings (storage of the www panel, X-02)', () => {
+		it('confirms a JSON object written by the panel and never treats it as a door command', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			const before = mock.requests.length;
+			const value = JSON.stringify({ showDoorList: false, thumbWidth: 160 });
+			instance.fireStateChange('admin.uiSettings', value);
+			await waitFor(() => instance.states.get(`${NS}.admin.uiSettings`)?.ack === true, { description: 'ack' });
+			expect(instance.val('admin.uiSettings')).to.equal(value);
+			expect(mock.requests.slice(before)).to.deep.equal([]);
+			expect(instance.log.of('warn')).to.deep.equal([]);
+			expect(instance.obj('admin.uiSettings')?.common).to.include({ write: true, role: 'json' });
+		});
+
+		for (const [label, bad] of [
+			['not JSON', '{"thumbWidth":'],
+			['a JSON array', '[1,2]'],
+			['a JSON string', '"text"'],
+			['a number', 5],
+			['null', null],
+			['an oversized value', JSON.stringify({ x: 'y'.repeat(10_001) })],
+		] as [string, unknown][]) {
+			it(`replaces ${label} by the last valid value and warns`, async () => {
+				const instance = await startConnected({ enableWebhooks: false });
+				const valid = JSON.stringify({ showEventLog: false });
+				instance.fireStateChange('admin.uiSettings', valid);
+				await waitFor(() => instance.states.get(`${NS}.admin.uiSettings`)?.ack === true, {
+					description: 'ack',
+				});
+				instance.fireStateChange('admin.uiSettings', bad);
+				await waitFor(() => instance.states.get(`${NS}.admin.uiSettings`)?.ack === true, {
+					description: 'reset',
+				});
+				expect(instance.val('admin.uiSettings')).to.equal(valid);
+				expect(instance.log.of('warn')).to.have.length(1);
+				expect(instance.log.of('warn')[0]).to.contain('admin.uiSettings');
+			});
+		}
+
+		it('falls back to "{}" when there never was a valid value', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			instance.fireStateChange('admin.uiSettings', 'garbage');
+			await waitFor(() => instance.states.get(`${NS}.admin.uiSettings`)?.ack === true, { description: 'reset' });
+			expect(instance.val('admin.uiSettings')).to.equal('{}');
 		});
 	});
 
@@ -1595,6 +2059,41 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(forwarded.val).to.not.contain(channel).and.not.contain(token);
 			expect(instance.states.has('0_userdata.0.other')).to.equal(false);
 			expect(instance.states.has('0_userdata.0.change')).to.equal(false);
+		});
+
+		it('a rule with device filter does not match events without any device id (R-20)', async () => {
+			const instance = await startConnected({
+				forwardEvents: [
+					{
+						event: 'access.doorbell.incoming.REN',
+						deviceId: DEVICE_G2_PRO,
+						targetState: '0_userdata.0.filtered',
+					},
+					{ event: 'access.doorbell.incoming.REN', targetState: '0_userdata.0.unfiltered' },
+				],
+			});
+			// REN doorbells carry "device": null
+			await mock.deliverWebhook(fixtures.webhookEvents.doorbellIncomingRen({ door: door(DOOR_3855) }));
+			await waitFor(() => instance.states.has('0_userdata.0.unfiltered'), { description: 'unfiltered rule' });
+			expect(instance.states.has('0_userdata.0.filtered')).to.equal(false);
+		});
+
+		it('a forward target that cannot be written does not stop the other rules', async () => {
+			const instance = await startConnected({
+				forwardEvents: [
+					{ event: 'access.remote_view', targetState: '0_userdata.0.broken' },
+					{ event: 'access.remote_view', targetState: '0_userdata.0.fine' },
+				],
+			});
+			const original = instance.setForeignStateAsync.bind(instance);
+			instance.setForeignStateAsync = async (id: string, state: unknown, ack?: boolean) => {
+				if (id === '0_userdata.0.broken') {
+					throw new Error('no such object');
+				}
+				return original(id, state, ack);
+			};
+			mock.emitRemoteView();
+			await waitFor(() => instance.states.has('0_userdata.0.fine'), { description: 'second rule' });
 		});
 	});
 

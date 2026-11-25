@@ -52,7 +52,6 @@ describe('Library (object and state management, in-memory adapter)', () => {
 				'doorbell.activeFromDevice': 'string',
 				'doorbell.activeStartedAt': 'number',
 				'events.last': 'string',
-				'admin.uiSettings': 'string',
 				'info.webhookEndpointId': 'string',
 				'info.webhookRegistered': 'boolean',
 				'info.protectConnected': 'boolean',
@@ -91,12 +90,14 @@ describe('Library (object and state management, in-memory adapter)', () => {
 					rawType: 'UA-ULTRA',
 					model: 'UA-Ultra',
 					capabilities: ['event-thumbnail', 'doorbell', 'door-unlock', 'live-events'],
+					controllerName: 'UA-ULTRA-AA01',
 				},
 			});
 			expect(adapter.obj(`devices.${DEVICE_HUB}`).native).to.deep.equal({
 				rawType: 'UAH',
 				model: 'UA-Hub',
 				capabilities: ['live-events'],
+				controllerName: 'UA-HUB-3855',
 			});
 			expect(adapter.obj(`devices.${DEVICE_LITE}`).native.model).to.equal('unknown');
 		});
@@ -355,16 +356,127 @@ describe('Library (object and state management, in-memory adapter)', () => {
 			}
 		});
 
-		// BUG-C-09: pushEvent() reads events.last, modifies the list and writes it back without any
-		// serialisation. Events that arrive at the same time (e.g. the WebSocket ring and the
-		// access.doorbell.incoming webhook of the same doorbell press) overwrite each other.
-		it.skip('BUG-C-09: does not lose events that are pushed concurrently', async () => {
+		// Events arrive at the same time (e.g. the WebSocket ring and the access.doorbell.incoming webhook
+		// of the same doorbell press); the read-modify-write of the list must not let them overwrite each other.
+		it('does not lose events that are pushed concurrently', async () => {
 			await Promise.all([1, 2, 3, 4, 5].map(n => library.pushEvent({ n })));
 			expect(
 				events()
 					.map(e => e.n)
 					.sort(),
 			).to.deep.equal([1, 2, 3, 4, 5]);
+		});
+	});
+
+	describe('concurrent updates of events.last', () => {
+		it('keeps the order of the calls and loses nothing with a slow states database', async () => {
+			// make every read slow so all writers would start from the same (stale) list without serialisation
+			const original = adapter.getStateAsync.bind(adapter);
+			adapter.getStateAsync = async (id: string) => {
+				const value = await original(id);
+				await new Promise(resolve => setImmediate(resolve));
+				return value;
+			};
+			await Promise.all(Array.from({ length: 60 }, (_, n) => library.pushEvent({ n })));
+			const list = events();
+			expect(list).to.have.length(50);
+			expect(list.map(e => e.n)).to.deep.equal(Array.from({ length: 50 }, (_, i) => 59 - i));
+		});
+
+		it('an update of an event does not swallow an event pushed at the same time', async () => {
+			await library.pushEvent({ ts: 1000, type: 'access.door.unlock' });
+			await Promise.all([
+				library.updateEventProtectData(1000, { protectCameraId: 'cam1' }),
+				library.pushEvent({ ts: 2000, type: 'access.remote_view' }),
+				library.updateEventProtectData(2000, { protectCameraId: 'cam2' }),
+			]);
+			expect(events()).to.deep.equal([
+				{ ts: 2000, type: 'access.remote_view', protectCameraId: 'cam2' },
+				{ ts: 1000, type: 'access.door.unlock', protectCameraId: 'cam1' },
+			]);
+		});
+
+		it('a failing write rejects that call only — later events are still stored', async () => {
+			const original = adapter.setForeignStateAsync.bind(adapter);
+			let fail = true;
+			adapter.setForeignStateAsync = async (id: string, state: unknown, ack?: boolean) => {
+				if (fail) {
+					fail = false;
+					throw new Error('states db down');
+				}
+				return original(id, state, ack);
+			};
+			const results = await Promise.allSettled([library.pushEvent({ n: 1 }), library.pushEvent({ n: 2 })]);
+			expect(results.map(r => r.status)).to.deep.equal(['rejected', 'fulfilled']);
+			expect(events()).to.deep.equal([{ n: 2 }]);
+		});
+	});
+
+	describe('objects that follow the controller without overwriting the user', () => {
+		it('takes over a new name from the controller for a channel the user did not rename', async () => {
+			await library.ensureDoor({ id: 'door-r', name: 'Front' });
+			await library.ensureDoor({ id: 'door-r', name: 'Front Door' });
+			expect(adapter.obj('doors.door-r').common.name).to.equal('Front Door');
+			expect(adapter.val('doors.door-r.name')).to.equal('Front Door');
+		});
+
+		it('keeps the name the user gave a door or device channel in ioBroker', async () => {
+			await library.ensureDoor({ id: 'door-u', name: 'Front' });
+			await adapter.extendObject('doors.door-u', { common: { name: 'Haustür' } });
+			await library.ensureDoor({ id: 'door-u', name: 'Front' });
+			await library.ensureDoor({ id: 'door-u', name: 'Front Door' });
+			expect(adapter.obj('doors.door-u').common.name).to.equal('Haustür');
+			// the name state always shows the controller's name
+			expect(adapter.val('doors.door-u.name')).to.equal('Front Door');
+
+			await library.ensureDevice({ id: 'aabbccddeeff', name: 'UA-HUB-1', type: 'UAH' });
+			await adapter.extendObject('devices.aabbccddeeff', { common: { name: 'Hub Keller' } });
+			await library.ensureDevice({ id: 'aabbccddeeff', name: 'UA-HUB-1', type: 'UAH' });
+			expect(adapter.obj('devices.aabbccddeeff').common.name).to.equal('Hub Keller');
+		});
+
+		it('creates thumbnail states on demand for devices without the capability flag — once', async () => {
+			await library.ensureDevice({ id: DEVICE_HUB, name: 'UA-HUB-3855', type: 'UAH' });
+			expect(adapter.obj(`devices.${DEVICE_HUB}.lastThumbnailPath`)).to.equal(undefined);
+			await library.ensureThumbnailStates(DEVICE_HUB);
+			for (const leaf of ['lastThumbnailPath', 'lastThumbnailUrl', 'lastThumbnailAt']) {
+				expect(adapter.obj(`devices.${DEVICE_HUB}.${leaf}`)?.type, leaf).to.equal('state');
+			}
+			const objects = adapter.objects.size;
+			await library.ensureThumbnailStates(DEVICE_HUB);
+			expect(adapter.objects.size).to.equal(objects);
+		});
+
+		it('admin.uiSettings is writable (the www panel stores its settings there) and an old read-only object is corrected', async () => {
+			await adapter.setObjectNotExistsAsync('admin.uiSettings', {
+				type: 'state',
+				common: {
+					name: 'Persistent UI settings (JSON)',
+					type: 'string',
+					role: 'value',
+					read: true,
+					write: false,
+				},
+				native: {},
+			});
+			await library.ensureBaseObjects();
+			expect(adapter.obj('admin.uiSettings').common).to.include({
+				type: 'string',
+				role: 'json',
+				read: true,
+				write: true,
+			});
+		});
+
+		it('keeps firmware and lastSeenAt learned from events when the device list does not carry them', async () => {
+			await library.ensureDevice({ id: DEVICE_HUB, name: 'UA-HUB-3855', type: 'UAH' });
+			await adapter.setState(`devices.${DEVICE_HUB}.firmware`, { val: 'v4.6.1.0', ack: true });
+			await adapter.setState(`devices.${DEVICE_HUB}.lastSeenAt`, { val: '2026-01-02T03:04:05.000Z', ack: true });
+			await library.ensureDevice({ id: DEVICE_HUB, name: 'UA-HUB-3855', type: 'UAH' });
+			expect(adapter.val(`devices.${DEVICE_HUB}.firmware`)).to.equal('v4.6.1.0');
+			expect(adapter.val(`devices.${DEVICE_HUB}.lastSeenAt`)).to.equal('2026-01-02T03:04:05.000Z');
+			await library.ensureDevice({ id: DEVICE_HUB, name: 'UA-HUB-3855', type: 'UAH', firmware: 'v5.0.0' });
+			expect(adapter.val(`devices.${DEVICE_HUB}.firmware`)).to.equal('v5.0.0');
 		});
 	});
 

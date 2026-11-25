@@ -38,6 +38,9 @@ export class Library {
 	private baseObjectsReady = false;
 	/** Last value written per state through writeState() — lets status checks skip unchanged values. */
 	private readonly lastWritten = new Map<string, ioBroker.StateValue>();
+	/** Serialises all changes of events.last. */
+	private eventQueue: Promise<void> = Promise.resolve();
+	private readonly thumbnailStatesReady = new Set<string>();
 
 	/**
 	 * Create every object that does not depend on what the controller reports (channels, info,
@@ -61,7 +64,13 @@ export class Library {
 		await this.ensureSimpleState('doorbell.activeFromDevice', 'string', 'Originating device of active call');
 		await this.ensureSimpleState('doorbell.activeStartedAt', 'number', 'Start of active call (ms epoch)');
 		await this.ensureSimpleState('events.last', 'string', 'Last 50 events as JSON');
-		await this.ensureSimpleState('admin.uiSettings', 'string', 'Persistent UI settings (JSON)');
+		// Written by the www panel (socket setState): must be writable. extendObject also corrects the
+		// object of earlier versions, which was created read-only.
+		await this.adapter.extendObject('admin.uiSettings', {
+			type: 'state',
+			common: { name: 'Persistent UI settings (JSON)', type: 'string', role: 'json', read: true, write: true },
+			native: {},
+		});
 		await this.ensureSwitchState('doors.emergency.lockdown', 'Lockdown – all doors forced locked', 'boolean');
 		await this.ensureSwitchState('doors.emergency.evacuation', 'Evacuation – all doors forced unlocked', 'boolean');
 
@@ -93,10 +102,10 @@ export class Library {
 		const channelId = `devices.${this.safeId(device.id)}`;
 		const capabilities = featuresFor(model);
 
-		await this.adapter.extendObject(channelId, {
-			type: 'channel',
-			common: { name: device.name ?? device.alias ?? device.id },
-			native: { rawType: device.type, model, capabilities },
+		await this.ensureNamedChannel(channelId, device.name ?? device.alias ?? device.id, {
+			rawType: device.type,
+			model,
+			capabilities,
 		});
 
 		await this.ensureSimpleState(`${channelId}.name`, 'string', 'Device name');
@@ -108,37 +117,33 @@ export class Library {
 		await this.ensureSimpleState(`${channelId}.lastSeenAt`, 'string', 'ISO timestamp of last received event');
 
 		if (capabilities.includes('event-thumbnail')) {
-			await this.ensureSimpleState(`${channelId}.lastThumbnailPath`, 'string', 'Path of last event thumbnail');
-			await this.ensureSimpleState(
-				`${channelId}.lastThumbnailUrl`,
-				'string',
-				'Adapter-served URL for last event thumbnail',
-			);
-			await this.ensureSimpleState(
-				`${channelId}.lastThumbnailAt`,
-				'number',
-				'Timestamp of last event thumbnail (ms epoch)',
-			);
+			await this.ensureThumbnailStates(device.id);
 		}
 
 		await this.adapter.setState(`${channelId}.name`, { val: device.name ?? device.id, ack: true });
 		await this.adapter.setState(`${channelId}.alias`, { val: device.alias ?? '', ack: true });
 		await this.adapter.setState(`${channelId}.type`, { val: device.type ?? '', ack: true });
 		await this.adapter.setState(`${channelId}.model`, { val: model, ack: true });
-		await this.adapter.setState(`${channelId}.firmware`, { val: device.firmware ?? '', ack: true });
+		// `firmware` and `online` are not part of the documented response of GET /devices (API reference
+		// 8.1 lists id, name, type, alias only). They are used when the controller sends them: firmware is
+		// written only then (a value learned from an event is kept), and a device counts as online unless
+		// the controller explicitly reports `online: false`.
+		if (typeof device.firmware === 'string' && device.firmware !== '') {
+			await this.adapter.setState(`${channelId}.firmware`, { val: device.firmware, ack: true });
+		} else if ((await this.adapter.getStateAsync(`${channelId}.firmware`)) === null) {
+			await this.adapter.setState(`${channelId}.firmware`, { val: '', ack: true });
+		}
 		await this.adapter.setState(`${channelId}.online`, { val: device.online !== false, ack: true });
-		await this.adapter.setState(`${channelId}.lastSeenAt`, { val: '', ack: true });
+		if ((await this.adapter.getStateAsync(`${channelId}.lastSeenAt`)) === null) {
+			await this.adapter.setState(`${channelId}.lastSeenAt`, { val: '', ack: true });
+		}
 
 		return { model };
 	}
 
 	async ensureDoor(door: UnifiDoorRaw): Promise<void> {
 		const channelId = `doors.${this.safeId(door.id)}`;
-		await this.adapter.extendObject(channelId, {
-			type: 'channel',
-			common: { name: door.name ?? door.full_name ?? door.id },
-			native: {},
-		});
+		await this.ensureNamedChannel(channelId, door.name ?? door.full_name ?? door.id, {});
 		await this.ensureSimpleState(`${channelId}.name`, 'string', 'Door name');
 		await this.ensureSimpleState(`${channelId}.fullName`, 'string', 'Full door path');
 		await this.ensureSimpleState(`${channelId}.locked`, 'boolean', 'Locked');
@@ -279,28 +284,36 @@ export class Library {
 		await this.ensureSimpleState('notifications.lastTimestamp', 'number', 'Last notification timestamp (ms epoch)');
 	}
 
-	async pushEvent(event: unknown): Promise<void> {
-		const id = `${this.adapter.namespace}.events.last`;
-		const current = await this.adapter.getStateAsync('events.last');
-		let list: unknown[] = [];
-		if (typeof current?.val === 'string' && current.val) {
-			try {
-				const parsed = JSON.parse(current.val);
-				if (Array.isArray(parsed)) {
-					list = parsed;
-				}
-			} catch {
-				/* ignore */
+	/**
+	 * Prepend an event to `events.last` (newest first, at most 50).
+	 *
+	 * Events arrive concurrently (WebSocket and webhook). The read-modify-write of the list is
+	 * therefore serialised: every change waits for the previous one, so no event overwrites another.
+	 *
+	 * @param event The normalised event
+	 */
+	pushEvent(event: unknown): Promise<void> {
+		return this.enqueueEventUpdate(async () => {
+			const list = await this.readEventList();
+			list.unshift(event);
+			if (list.length > 50) {
+				list.length = 50;
 			}
-		}
-		list.unshift(event);
-		if (list.length > 50) {
-			list.length = 50;
-		}
-		await this.adapter.setForeignStateAsync(id, { val: JSON.stringify(list), ack: true });
+			await this.writeEventList(list);
+		});
 	}
 
-	async updateEventProtectData(
+	/**
+	 * Add the UniFi Protect fields to the logged event with the given timestamp (serialised with pushEvent()).
+	 *
+	 * @param ts Timestamp of the event to extend
+	 * @param data Protect camera/event ids and media URLs
+	 * @param data.protectCameraId Protect camera id
+	 * @param data.protectEventId Protect event id
+	 * @param data.protectSnapshotUrl Adapter-served snapshot URL
+	 * @param data.protectVideoUrl Adapter-served clip URL
+	 */
+	updateEventProtectData(
 		ts: number,
 		data: {
 			protectCameraId?: string;
@@ -309,25 +322,91 @@ export class Library {
 			protectVideoUrl?: string;
 		},
 	): Promise<void> {
-		const id = `${this.adapter.namespace}.events.last`;
+		return this.enqueueEventUpdate(async () => {
+			const list = (await this.readEventList()) as Record<string, unknown>[];
+			const idx = list.findIndex(e => e !== null && typeof e === 'object' && e.ts === ts);
+			if (idx < 0) {
+				return;
+			}
+			list[idx] = { ...list[idx], ...data };
+			await this.writeEventList(list);
+		});
+	}
+
+	private enqueueEventUpdate(task: () => Promise<void>): Promise<void> {
+		const run = this.eventQueue.then(task);
+		// a failed update must not block the ones behind it
+		this.eventQueue = run.catch(() => undefined);
+		return run;
+	}
+
+	private async readEventList(): Promise<unknown[]> {
 		const current = await this.adapter.getStateAsync('events.last');
-		let list: Record<string, unknown>[] = [];
 		if (typeof current?.val === 'string' && current.val) {
 			try {
-				const parsed = JSON.parse(current.val);
+				const parsed: unknown = JSON.parse(current.val);
 				if (Array.isArray(parsed)) {
-					list = parsed as Record<string, unknown>[];
+					return parsed;
 				}
 			} catch {
-				/* ignore */
+				/* start a fresh list */
 			}
 		}
-		const idx = list.findIndex(e => e.ts === ts);
-		if (idx < 0) {
+		return [];
+	}
+
+	private async writeEventList(list: unknown[]): Promise<void> {
+		await this.adapter.setForeignStateAsync(`${this.adapter.namespace}.events.last`, {
+			val: JSON.stringify(list),
+			ack: true,
+		});
+	}
+
+	/**
+	 * Create the thumbnail states of a device if they do not exist yet. Readers of every model can
+	 * deliver thumbnails, so the states are created on demand for models without the capability flag.
+	 *
+	 * @param deviceId Device id as used by the controller
+	 */
+	async ensureThumbnailStates(deviceId: string): Promise<void> {
+		const channelId = `devices.${this.safeId(deviceId)}`;
+		if (this.thumbnailStatesReady.has(channelId)) {
 			return;
 		}
-		list[idx] = { ...list[idx], ...data };
-		await this.adapter.setForeignStateAsync(id, { val: JSON.stringify(list), ack: true });
+		await this.ensureSimpleState(`${channelId}.lastThumbnailPath`, 'string', 'Path of last event thumbnail');
+		await this.ensureSimpleState(
+			`${channelId}.lastThumbnailUrl`,
+			'string',
+			'Adapter-served URL for last event thumbnail',
+		);
+		await this.ensureSimpleState(
+			`${channelId}.lastThumbnailAt`,
+			'number',
+			'Timestamp of last event thumbnail (ms epoch)',
+		);
+		this.thumbnailStatesReady.add(channelId);
+	}
+
+	/**
+	 * Create or update a device/door channel. The display name follows the controller as long as the
+	 * user did not rename the channel in ioBroker (the name last taken from the controller is kept in
+	 * `native.controllerName` to tell the two apart).
+	 *
+	 * @param id Channel id without namespace
+	 * @param name Name reported by the controller
+	 * @param native Additional native attributes
+	 */
+	private async ensureNamedChannel(id: string, name: string, native: Record<string, unknown>): Promise<void> {
+		const existing = await this.adapter.getObjectAsync(id);
+		const existingName: unknown = existing?.common?.name;
+		const previous: unknown = (existing?.native as Record<string, unknown> | undefined)?.controllerName;
+		const userRenamed =
+			existing !== null && existing !== undefined && typeof previous === 'string' && existingName !== previous;
+		await this.adapter.extendObject(id, {
+			type: 'channel',
+			common: userRenamed ? {} : { name },
+			native: { ...native, controllerName: name },
+		});
 	}
 
 	private async ensureContainer(id: string, name: string): Promise<void> {
