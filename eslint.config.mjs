@@ -1,6 +1,9 @@
 // ioBroker eslint template configuration file for js and ts files
 // Please note that esm or react based modules need additional modules loaded.
 import config from '@iobroker/eslint-config';
+// eslint-plugin-unicorn is a peer dependency of @iobroker/eslint-config and gets installed with it –
+// it must not be listed in our own devDependencies (ioBroker repo checker E0078).
+// The default config does not register the plugin, so we do it below for the one rule we use.
 import pluginUnicorn from 'eslint-plugin-unicorn';
 
 export default [
