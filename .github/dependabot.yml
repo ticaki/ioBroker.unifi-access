@@ -10,9 +10,40 @@
 version: 2
 updates:
 
+  # Adapter (root package)
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'cron'
+      cronjob: '17 3 11 * *'
+      timezone: 'Europe/Berlin'
+    open-pull-requests-limit: 15
+    assignees:
+      - 'ticaki'
+    versioning-strategy: 'increase'
+    cooldown:
+      default-days: 7
+    ignore:
+      # ioBroker pins @types/node to the LTS line of the supported Node version.
+      - dependency-name: '@types/node'
+        update-types:
+          - 'version-update:semver-major'
+      # TypeScript 7 (native compiler) ships without the JavaScript compiler API. In the root package that breaks
+      #   - eslint: "Error: typescript-eslint does not support TS 7.0." (typescript-eslint 8.x declares
+      #     peer typescript ">=4.8.4 <6.1.0", tracking: typescript-eslint/typescript-eslint#10940)
+      #   - test:ts: ts-node 10.9.2 "TypeError: Cannot read properties of undefined (reading 'fileExists')"
+      # and the documented side-by-side setup (typescript = npm:@typescript/typescript6) breaks
+      #   - build: @iobroker/adapter-dev 1.5.0 "Could not find tsc executable".
+      # Remove this entry once typescript-eslint accepts typescript 7 as its "typescript" peer.
+      - dependency-name: 'typescript'
+        versions:
+          - '7.x'
+
+  # Admin custom components and www panel (own package.json each, no TypeScript restriction here)
   - package-ecosystem: 'npm'
     directories:
-      - '**/*'
+      - '/src-admin'
+      - '/src-www'
     schedule:
       interval: 'cron'
       cronjob: '17 3 11 * *'
