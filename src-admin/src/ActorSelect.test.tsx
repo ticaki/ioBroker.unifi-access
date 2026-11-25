@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import ActorSelect from './ActorSelect';
 import { initI18n, makeHarness } from './test/harness';
 
@@ -70,6 +70,28 @@ describe('ActorSelect', () => {
 
 		await waitFor(() => expect(onChange).toHaveBeenCalled());
 		expect(onChange.mock.calls[0][0]).toEqual({ unlockActorId: '' });
+	});
+
+	// R2F (unconfirmed): the admin resets the form without remounting the component
+	it('follows a reset of the form by the admin (forceUpdate) after a selection', async () => {
+		const { props } = makeHarness({
+			attr: 'unlockActorId',
+			data: { unlockActorId: 'u2' },
+			answers: { listUsers: { users: USERS } },
+		});
+		render(<ActorSelect {...props} />);
+		fireEvent.mouseDown(await screen.findByRole('combobox', { name: LABEL }));
+		fireEvent.click(within(screen.getByRole('listbox')).getByText('Alice Example'));
+		await waitFor(() => expect(screen.getByRole('combobox', { name: LABEL }).textContent).toBe('Alice Example'));
+
+		// how json-config reports reset/reloaded data to its items
+		const register = vi.mocked(props.oContext.registerOnForceUpdate!);
+		const onUpdate = register.mock.calls.find(call => call[0] === 'unlockActorId')?.[1] as
+			| ((data: Record<string, unknown>) => void)
+			| undefined;
+		expect(onUpdate).toBeTypeOf('function');
+		act(() => onUpdate!({ unlockActorId: 'u2' }));
+		expect(screen.getByRole('combobox', { name: LABEL }).textContent).toBe('Bob Example');
 	});
 
 	it('keeps a stored user that the controller does not report any more', async () => {
