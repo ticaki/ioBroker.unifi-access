@@ -289,6 +289,8 @@ export class FakeAdapter {
 	encrypt: (value: string) => string;
 	/** Pending timers created through adapter.setTimeout */
 	timers: Set<unknown>;
+	/** Running intervals created through adapter.setInterval */
+	intervals: Set<unknown>;
 	unloaded: boolean;
 
 	setState(id: string, state: unknown, ack?: boolean): Promise<string>;

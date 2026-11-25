@@ -54,6 +54,8 @@ class FakeAdapter {
 		this.handlers = {};
 		/** @type {Set<any>} handles created via adapter.setTimeout that have not fired / been cleared */
 		this.timers = new Set();
+		/** @type {Set<any>} handles created via adapter.setInterval that have not been cleared */
+		this.intervals = new Set();
 		this.unloaded = false;
 		FakeAdapter.instances.push(this);
 	}
@@ -163,6 +165,29 @@ class FakeAdapter {
 		}
 	}
 
+	setInterval(callback, ms, ...args) {
+		if (this.unloaded) {
+			return undefined;
+		}
+		const handle = globalThis.setInterval(() => callback(...args), ms);
+		this.intervals.add(handle);
+		return handle;
+	}
+
+	clearInterval(handle) {
+		if (handle !== undefined) {
+			globalThis.clearInterval(handle);
+			this.intervals.delete(handle);
+		}
+	}
+
+	/** Like adapter.delay: resolves after `ms` through an adapter timer (never after unload). */
+	delay(ms) {
+		return new Promise(resolve => {
+			this.setTimeout(() => resolve(undefined), ms);
+		});
+	}
+
 	// -------------------------------------------------------------------- misc
 
 	sendTo(to, command, message, callback) {
@@ -246,6 +271,10 @@ class FakeAdapter {
 			globalThis.clearTimeout(handle);
 		}
 		this.timers.clear();
+		for (const handle of this.intervals) {
+			globalThis.clearInterval(handle);
+		}
+		this.intervals.clear();
 	}
 
 	/** Value of a state (id with or without namespace), `undefined` when it was never written. */

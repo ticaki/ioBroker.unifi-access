@@ -428,9 +428,7 @@ function defineAdapterTests({ suite, describe, it }) {
 				expect(await state('info.connection')).to.equal(true);
 			});
 
-			// BUG-C-11: info.connection is only ever set to true (bootstrap, WebSocket open). When the controller
-			// goes away the WebSocket "close" handler just logs — the connection indicator stays true forever.
-			it.skip('BUG-C-11: info.connection becomes false while the controller is unreachable', async () => {
+			it('info.connection becomes false while the controller is unreachable', async () => {
 				mock.wsAccepting = false;
 				try {
 					mock.dropWsConnections();

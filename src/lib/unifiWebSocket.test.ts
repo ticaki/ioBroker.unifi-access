@@ -10,6 +10,7 @@ import {
 	WS_PATH,
 	type TestLogger,
 } from '../../test/mock';
+import type { TimerHost } from './timerHost';
 import type { UnifiWebSocketMessage } from './types';
 import { UnifiWebSocket, type UnifiWebSocketOptions } from './unifiWebSocket';
 
@@ -17,12 +18,51 @@ const TOKEN = 'ws-test-token';
 /** 50 ms — keeps reconnect tests fast without fake timers. */
 const FAST_RECONNECT_SECONDS = 0.05;
 
+/**
+ * Timer host backed by the global timer functions (looked up at call time, so sinon's fake timers
+ * apply) that records how it is used — the class must not touch the global timers directly.
+ */
+function recordingTimers(): TimerHost & { calls: string[]; pending: Set<unknown> } {
+	const calls: string[] = [];
+	const pending = new Set<unknown>();
+	return {
+		calls,
+		pending,
+		setTimeout(callback, ms) {
+			calls.push(`setTimeout ${ms}`);
+			const handle = setTimeout(() => {
+				pending.delete(handle);
+				callback();
+			}, ms);
+			pending.add(handle);
+			return handle;
+		},
+		clearTimeout(handle) {
+			calls.push('clearTimeout');
+			pending.delete(handle);
+			clearTimeout(handle as NodeJS.Timeout);
+		},
+		setInterval(callback, ms) {
+			calls.push(`setInterval ${ms}`);
+			const handle = setInterval(callback, ms);
+			pending.add(handle);
+			return handle;
+		},
+		clearInterval(handle) {
+			calls.push('clearInterval');
+			pending.delete(handle);
+			clearInterval(handle as NodeJS.Timeout);
+		},
+	};
+}
+
 interface Harness {
 	socket: UnifiWebSocket;
 	logger: TestLogger;
 	events: UnifiWebSocketMessage[];
 	errors: Error[];
 	counts: { open: number; close: number };
+	timers: ReturnType<typeof recordingTimers>;
 }
 
 describe('UnifiWebSocket (against the mock controller)', () => {
@@ -32,15 +72,17 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 
 	function create(overrides: Partial<UnifiWebSocketOptions> = {}): Harness {
 		const logger = createTestLogger();
+		const timers = recordingTimers();
 		const socket = new UnifiWebSocket({
 			host: '127.0.0.1',
 			port: mock.port,
 			token: TOKEN,
 			reconnectDelaySeconds: FAST_RECONNECT_SECONDS,
+			timers,
 			logger,
 			...overrides,
 		});
-		const harness: Harness = { socket, logger, events: [], errors: [], counts: { open: 0, close: 0 } };
+		const harness: Harness = { socket, logger, events: [], errors: [], counts: { open: 0, close: 0 }, timers };
 		socket.on('open', () => harness.counts.open++);
 		socket.on('close', () => harness.counts.close++);
 		socket.on('error', err => harness.errors.push(err));
@@ -143,17 +185,57 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			expect(events[0].data.door_name).to.equal('Haustür – Süd ✓');
 		});
 
-		it('ignores frames that are not JSON (warning only) and keeps the connection', async () => {
+		it('ignores frames that are not JSON (debug log only, no warning flood) and keeps the connection', async () => {
 			const { events, logger, counts, errors } = await startAndWaitOpen();
 			mock.sendRaw('Hello');
 			mock.sendRaw('{"event": "broken"');
 			mock.emitRemoteViewChange(105);
 			await waitFor(() => events.length === 1, { description: 'event after garbage frames' });
 			expect(events[0].event).to.equal('access.remote_view.change');
-			expect(logger.of('warn').filter(m => m.includes('WebSocket parse error'))).to.have.length(2);
+			expect(logger.of('debug').filter(m => m.includes('WebSocket frame ignored (not JSON)'))).to.have.length(2);
+			expect(logger.of('warn')).to.deep.equal([]);
 			expect(counts).to.deep.equal({ open: 1, close: 0 });
 			expect(errors).to.deep.equal([]);
 			expect(mock.wsClients.size).to.equal(1);
+		});
+
+		it('never emits frames that are valid JSON but not an event object', async () => {
+			const { events, logger, counts } = await startAndWaitOpen();
+			for (const frame of [
+				'null',
+				'42',
+				'"text"',
+				'true',
+				'[]',
+				'[{"event":"x"}]',
+				'{}',
+				'{"event":null}',
+				'{"event":7}',
+			]) {
+				mock.sendRaw(frame);
+			}
+			mock.emitRemoteViewChange(105);
+			await waitFor(() => events.length === 1, { description: 'event after invalid frames' });
+			expect(events.map(e => e.event)).to.deep.equal(['access.remote_view.change']);
+			expect(logger.of('debug').filter(m => m.includes('not an event object'))).to.have.length(9);
+			expect(logger.of('warn')).to.deep.equal([]);
+			expect(counts).to.deep.equal({ open: 1, close: 0 });
+		});
+
+		it('survives a listener that throws', async () => {
+			const { socket, events, logger, counts } = await startAndWaitOpen();
+			let first = true;
+			socket.on('event', () => {
+				if (first) {
+					first = false;
+					throw new Error('listener bug');
+				}
+			});
+			mock.emitRemoteViewChange(105);
+			mock.emitRemoteViewChange(106);
+			await waitFor(() => events.length === 2, { description: 'both events' });
+			expect(logger.of('warn')).to.deep.equal(['WebSocket event listener failed: listener bug']);
+			expect(counts).to.deep.equal({ open: 1, close: 0 });
 		});
 	});
 
@@ -171,7 +253,12 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			clock.tick(1);
 			await waitFor(() => mock.wsPingCount === 1, { description: 'first ping' });
 
-			clock.tick(60_000);
+			// one period at a time: each ping has to be answered before the next tick
+			await delay(30);
+			clock.tick(30_000);
+			await waitFor(() => mock.wsPingCount === 2, { description: 'second ping' });
+			await delay(30);
+			clock.tick(30_000);
 			await waitFor(() => mock.wsPingCount === 3, { description: 'third ping' });
 
 			socket.stop();
@@ -188,10 +275,21 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			expect(clock.countTimers()).to.equal(1);
 		});
 
-		// BUG-C-03: the heartbeat only *sends* pings. Missing pongs are never evaluated, so a dead (half-open)
-		// connection is not detected and no reconnect happens — contrary to the class documentation
-		// ("Heartbeat ping every 30s to detect dead connections that don't surface a 'close' event").
-		it.skip('BUG-C-03: drops and re-establishes a connection whose pings stay unanswered', async () => {
+		it('keeps a connection whose pings are answered', async () => {
+			clock = sinon.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+			const { counts, logger } = await startAndWaitOpen();
+			for (let i = 1; i <= 5; i++) {
+				await clock.tickAsync(30_000);
+				await waitFor(() => mock.wsPingCount === i, { description: `ping ${i}` });
+				// let the pong travel back before the next tick
+				await delay(30);
+			}
+			expect(counts).to.deep.equal({ open: 1, close: 0 });
+			expect(logger.of('info')).to.deep.equal([]);
+		});
+
+		// A dead (half-open) connection answers no ping and surfaces no "close" event by itself.
+		it('drops and re-establishes a connection whose pings stay unanswered', async () => {
 			const deaf = new MockUnifiController({ token: TOKEN, autoPong: false });
 			await deaf.start();
 			try {
@@ -204,8 +302,10 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 					await clock.tickAsync(30_000);
 					await delay(30);
 				}
-				expect(deaf.wsPingCount, 'pings sent').to.be.greaterThan(0);
-				expect(counts.close, 'dead connection closed by the client').to.be.greaterThan(0);
+				expect(deaf.wsPingCount, 'exactly one ping stays unanswered before the connection is dropped').to.equal(
+					1,
+				);
+				expect(counts.close, 'dead connection closed by the client').to.equal(1);
 				await clock.tickAsync(1000);
 				await waitFor(() => counts.open === 2, { description: 'reconnect after dead connection' });
 			} finally {
@@ -277,7 +377,9 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 			mock.wsAccepting = false;
 			const { socket, logger, counts } = create({ reconnectDelaySeconds: 5 });
-			const reconnectLog = (): string[] => logger.of('info').filter(m => m.startsWith('WebSocket reconnect'));
+			// the first attempt of an outage is logged as info, the repeats as debug
+			const reconnectLog = (): string[] =>
+				logger.messages.map(m => m.message).filter(m => m.startsWith('WebSocket reconnect'));
 			socket.start();
 
 			await waitFor(() => reconnectLog().length === 1, { description: 'first failed attempt' });
@@ -313,10 +415,10 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			const { socket, counts, logger } = await startAndWaitOpen();
 			socket.stop();
 			await waitFor(() => mock.wsClients.size === 0, { description: 'controller sees the disconnect' });
-			await waitFor(() => counts.close === 1, { description: 'close event' });
 			await delay(FAST_RECONNECT_SECONDS * 1000 * 3);
 			expect(mock.wsHandshakes).to.have.length(1);
-			expect(counts.open).to.equal(1);
+			// an explicit stop() is not reported as a connection loss
+			expect(counts).to.deep.equal({ open: 1, close: 0 });
 			expect(logger.of('info').filter(m => m.includes('reconnect'))).to.deep.equal([]);
 		});
 
@@ -355,12 +457,9 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			expect(mock.wsHandshakes).to.have.length(0);
 		});
 
-		// BUG-C-04: stop() followed by start() on the same instance — the "close" event of the old socket fires
-		// after start() already created the new one. The handler then forgets the new socket (this.socket = null),
-		// stops its heartbeat and schedules a reconnect, which opens a second, parallel connection. The first one
-		// is orphaned: a later stop() no longer terminates it. (main.ts always creates a new instance, so the
-		// adapter is not affected today.)
-		it.skip('BUG-C-04: stop() + start() on the same instance ends up with exactly one connection', async () => {
+		// The "close" event of the old socket fires after start() already created the new one; it must not
+		// make the instance forget the new socket or schedule a second, parallel connection.
+		it('stop() + start() on the same instance ends up with exactly one connection', async () => {
 			const { socket, counts } = await startAndWaitOpen();
 			socket.stop();
 			socket.start();
@@ -370,6 +469,38 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			expect(mock.wsConnectionCount, 'connections in total').to.equal(2);
 			socket.stop();
 			await waitFor(() => mock.wsClients.size === 0, { description: 'stop() closes every connection' });
+		});
+	});
+
+	describe('timers (repo checker E5004/E5005: adapter timers only)', () => {
+		it('creates heartbeat and reconnect timers exclusively through the injected timer host', async () => {
+			const { socket, timers, counts } = await startAndWaitOpen();
+			expect(timers.calls).to.deep.equal(['setInterval 30000']);
+
+			mock.dropWsConnections();
+			await waitFor(() => counts.open === 2, { description: 'reconnect' });
+			expect(timers.calls).to.deep.equal([
+				'setInterval 30000',
+				'clearInterval',
+				`setTimeout ${FAST_RECONNECT_SECONDS * 1000}`,
+				'setInterval 30000',
+			]);
+
+			socket.stop();
+			expect(timers.pending.size, 'timers still pending after stop()').to.equal(0);
+		});
+
+		it('honours a custom heartbeat interval', async () => {
+			const { timers } = await startAndWaitOpen({ heartbeatIntervalMs: 1234 });
+			expect(timers.calls).to.deep.equal(['setInterval 1234']);
+		});
+
+		it('start() on a running instance replaces the connection instead of adding one', async () => {
+			const { socket, counts } = await startAndWaitOpen();
+			socket.start();
+			await waitFor(() => counts.open === 2, { description: 'second connection' });
+			await waitFor(() => mock.wsClients.size === 1, { description: 'old connection closed' });
+			expect(mock.wsConnectionCount).to.equal(2);
 		});
 	});
 });

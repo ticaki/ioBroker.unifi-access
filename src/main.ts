@@ -11,6 +11,8 @@ import { classifyProtectError, ProtectHttp } from './lib/protectHttp';
 import { classifyStoredSecret } from './lib/secretMigration';
 import { tlsCertificateErrorCode } from './lib/tlsErrors';
 import { UnifiWebSocket } from './lib/unifiWebSocket';
+import type { TimerHost } from './lib/timerHost';
+import { asString, parseAccessEvent, type ParsedAccessEvent } from './lib/eventNormalizer';
 import { Library } from './lib/library';
 import { detectModel, featuresFor, type DeviceCapability, type UnifiDeviceModel } from './lib/deviceModels';
 import { isSafeProtectId, sanitizeStaticPath } from './lib/pathSafety';
@@ -28,7 +30,6 @@ import type {
 	GenericAlarmPayload,
 	LastError,
 	NormalizedEvent,
-	UnifiAccessEventEnvelope,
 	UnifiDeviceRaw,
 	UnifiDoorRaw,
 	UnifiLockRuleType,
@@ -101,6 +102,16 @@ class UnifiAccess extends utils.Adapter {
 	private webhookEndpointId: string | null = null;
 
 	private bootstrapRetryTimer: ioBroker.Timeout | undefined;
+	private bootstrapRunning = false;
+	private bootstrapRequestedAgain = false;
+	private bootstrapSucceededOnce = false;
+	private bootstrapFailures = 0;
+	private lastBootstrapFailureLog = '';
+	private connectionStatusWritten = false;
+	private unloading = false;
+	/** Set when the WebSocket closed: the next "open" reloads devices and doors. */
+	private wsNeedsResync = false;
+	private wsErrorLogged = false;
 	private protectRetryTimer: ioBroker.Timeout | undefined;
 
 	private devices: Map<string, DeviceCacheEntry> = new Map();
@@ -458,9 +469,14 @@ class UnifiAccess extends utils.Adapter {
 		}
 	}
 
-	private async bootstrapAndConnect(): Promise<void> {
+	/**
+	 * Load devices, doors and users from the controller and mirror them into objects and states.
+	 *
+	 * @returns false when the controller could not be queried (logged, connection status set)
+	 */
+	private async loadControllerState(): Promise<boolean> {
 		if (!this.http) {
-			return;
+			return false;
 		}
 		try {
 			const [devices, doors, users] = await Promise.all([
@@ -475,39 +491,109 @@ class UnifiAccess extends utils.Adapter {
 			}
 			await this.applyBootstrap({ devices, doors });
 			await this.refreshEmergencyStatus();
-			this.setConnectionStatus(true, null);
-			this.log.info(`Connected to UniFi Access controller. ${devices.length} devices, ${doors.length} doors.`);
-
-			this.startWebSocket();
+			if (this.bootstrapFailures > 0 || !this.bootstrapSucceededOnce) {
+				this.log.info(
+					`Connected to UniFi Access controller. ${devices.length} devices, ${doors.length} doors.`,
+				);
+			} else {
+				this.log.debug(`Controller state refreshed: ${devices.length} devices, ${doors.length} doors.`);
+			}
+			this.bootstrapSucceededOnce = true;
+			this.bootstrapFailures = 0;
+			this.lastBootstrapFailureLog = '';
+			return true;
 		} catch (err) {
 			const kind = classifyError(err);
 			this.setConnectionStatus(false, kind);
+			this.bootstrapFailures += 1;
 			const axErr = err as { response?: { status?: number }; message?: string };
 			const tlsCode = tlsCertificateErrorCode(err);
+			let text: string;
 			if (tlsCode) {
-				this.log.warn(
+				text =
 					`Bootstrap failed: the TLS certificate of the controller was rejected (${tlsCode}). ` +
-						`Either disable "Verify TLS certificate" in the connection settings or store the CA certificate of the controller there.`,
-				);
+					`Either disable "Verify TLS certificate" in the connection settings or store the CA certificate of the controller there.`;
 			} else if (axErr.response?.status === 404) {
-				this.log.warn(
-					`Bootstrap failed: 404 — verify that host and port point to a UniFi Access controller (${this.http.url}).`,
-				);
+				text = `Bootstrap failed: 404 — verify that host and port point to a UniFi Access controller (${this.http.url}).`;
 			} else {
-				this.log.warn(`Bootstrap failed (${kind}): ${(err as Error).message}`);
+				text = `Bootstrap failed (${kind}): ${errorText(err)}`;
 			}
-			this.scheduleBootstrapRetry();
+			// A controller that stays down fails the same way on every retry: warn once per distinct
+			// failure, repeat only at debug level.
+			if (text !== this.lastBootstrapFailureLog) {
+				this.lastBootstrapFailureLog = text;
+				this.log.warn(text);
+			} else {
+				this.log.debug(`${text} (attempt ${this.bootstrapFailures})`);
+			}
+			return false;
 		}
 	}
 
+	/**
+	 * (Re)load the controller state; on success make sure the WebSocket is running, on failure
+	 * schedule the next attempt. Calls are serialised — a request during a running load triggers
+	 * exactly one further load afterwards.
+	 */
+	private async bootstrapAndConnect(): Promise<void> {
+		if (!this.http || this.unloading) {
+			return;
+		}
+		if (this.bootstrapRunning) {
+			this.bootstrapRequestedAgain = true;
+			return;
+		}
+		this.bootstrapRunning = true;
+		if (this.bootstrapRetryTimer) {
+			this.clearTimeout(this.bootstrapRetryTimer);
+			this.bootstrapRetryTimer = undefined;
+		}
+		try {
+			const ok = await this.loadControllerState();
+			if (this.unloading) {
+				return;
+			}
+			if (!ok) {
+				this.scheduleBootstrapRetry();
+				return;
+			}
+			if (!this.ws) {
+				this.setConnectionStatus(true, null);
+				this.startWebSocket();
+			} else if (this.ws.isOpen) {
+				this.setConnectionStatus(true, null);
+			}
+			// else: the WebSocket is reconnecting; its "open" sets the status and triggers a resync
+		} finally {
+			this.bootstrapRunning = false;
+			if (this.bootstrapRequestedAgain && !this.unloading) {
+				this.bootstrapRequestedAgain = false;
+				this.runDetached('controller refresh', this.bootstrapAndConnect());
+			}
+		}
+	}
+
+	/** Delay before the next bootstrap attempt: 30 s, 60 s, 120 s, then every 5 min (rejected token: always 5 min). */
+	private nextBootstrapRetryDelay(): number {
+		if (this.lastErrorKind === 'unauthorized') {
+			return 5 * 60_000;
+		}
+		return Math.min(30_000 * 2 ** Math.max(0, Math.min(this.bootstrapFailures - 1, 6)), 5 * 60_000);
+	}
+
 	private scheduleBootstrapRetry(): void {
+		if (this.unloading) {
+			return;
+		}
 		if (this.bootstrapRetryTimer) {
 			this.clearTimeout(this.bootstrapRetryTimer);
 		}
+		const delayMs = this.nextBootstrapRetryDelay();
+		this.log.debug(`Next bootstrap attempt in ${Math.round(delayMs / 1000)} s.`);
 		this.bootstrapRetryTimer = this.setTimeout(() => {
 			this.bootstrapRetryTimer = undefined;
-			void this.bootstrapAndConnect();
-		}, 30_000);
+			this.runDetached('bootstrap retry', this.bootstrapAndConnect());
+		}, delayMs);
 	}
 
 	private async applyBootstrap(data: { devices: UnifiDeviceRaw[]; doors: UnifiDoorRaw[] }): Promise<void> {
@@ -549,6 +635,16 @@ class UnifiAccess extends utils.Adapter {
 		}
 	}
 
+	/** The adapter's timer functions for helper classes (tracked by js-controller, cleared on unload). */
+	private timerHost(): TimerHost {
+		return {
+			setTimeout: (callback, ms) => this.setTimeout(callback, ms),
+			clearTimeout: handle => this.clearTimeout(handle as ioBroker.Timeout | undefined),
+			setInterval: (callback, ms) => this.setInterval(callback, ms),
+			clearInterval: handle => this.clearInterval(handle as ioBroker.Interval | undefined),
+		};
+	}
+
 	private startWebSocket(): void {
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
@@ -558,33 +654,63 @@ class UnifiAccess extends utils.Adapter {
 		const caCert = cfg.caCert || undefined;
 
 		this.ws?.stop();
-		this.ws = new UnifiWebSocket({
+		this.wsNeedsResync = false;
+		this.wsErrorLogged = false;
+		const ws = new UnifiWebSocket({
 			host,
 			port,
 			token,
 			verifyTLS,
 			caCert,
 			reconnectDelaySeconds: cfg.wsReconnectDelay || 5,
+			timers: this.timerHost(),
 			logger: {
 				debug: (m: string) => this.log.debug(m),
 				info: (m: string) => this.log.info(m),
 				warn: (m: string) => this.log.warn(m),
 			},
 		});
-		this.ws.on('open', () => {
-			this.log.info('UniFi Access WebSocket open.');
+		this.ws = ws;
+		ws.on('open', () => {
+			if (this.ws !== ws || this.unloading) {
+				return;
+			}
+			this.wsErrorLogged = false;
 			this.setConnectionStatus(true, null);
+			if (this.wsNeedsResync) {
+				// Events were missed while the connection was down: reload devices and doors.
+				this.wsNeedsResync = false;
+				this.log.info('UniFi Access WebSocket reconnected — refreshing devices and doors.');
+				this.runDetached('resync after reconnect', this.bootstrapAndConnect());
+			} else {
+				this.log.info('UniFi Access WebSocket open.');
+			}
 		});
-		this.ws.on('close', () => {
-			this.log.debug('UniFi Access WebSocket closed.');
+		ws.on('close', () => {
+			if (this.ws !== ws || this.unloading) {
+				return;
+			}
+			if (this.connectedToController) {
+				this.log.info('UniFi Access WebSocket closed — connection to the controller lost.');
+			} else {
+				this.log.debug('UniFi Access WebSocket closed.');
+			}
+			this.wsNeedsResync = true;
+			this.setConnectionStatus(false, 'network');
 		});
-		this.ws.on('error', err => {
-			this.log.warn(`WebSocket error: ${err.message}`);
+		ws.on('error', err => {
+			// one warning per outage, the repeats of the reconnect attempts only at debug level
+			if (!this.wsErrorLogged) {
+				this.wsErrorLogged = true;
+				this.log.warn(`WebSocket error: ${err.message}`);
+			} else {
+				this.log.debug(`WebSocket error: ${err.message}`);
+			}
 		});
-		this.ws.on('event', msg => {
-			void this.handleAccessEvent(msg, 'ws');
+		ws.on('event', msg => {
+			this.runDetached('WebSocket event', this.handleAccessEvent(msg, 'ws'));
 		});
-		this.ws.start();
+		ws.start();
 	}
 
 	/**
@@ -617,75 +743,17 @@ class UnifiAccess extends utils.Adapter {
 		});
 	}
 
-	private async handleAccessEvent(msg: UnifiAccessEventEnvelope, source: 'ws' | 'webhook'): Promise<void> {
-		if (!msg.event) {
+	private async handleAccessEvent(msg: unknown, source: 'ws' | 'webhook'): Promise<void> {
+		// Envelopes are untrusted input (a frame may be null, fields may have any type).
+		const parsed = parseAccessEvent(msg, source, Date.now());
+		if (!parsed) {
+			this.log.debug(`Ignoring ${source} message that is not an event envelope.`);
 			return;
 		}
-		const ts =
-			typeof msg.timestamp === 'number'
-				? msg.timestamp
-				: typeof msg.timestamp === 'string'
-					? Date.parse(msg.timestamp) || Date.now()
-					: Date.now();
-
-		const data = msg.data ?? {};
-		const dataDevice = (data.device as Record<string, unknown> | undefined) ?? undefined;
-		// access.data.device.remote_unlock delivers the door's location object directly as `data`
-		// (no nested `data.location`, no `data.door_id`). Detect that shape via location_type+unique_id
-		// so doorId/doorName/thumbnail extraction below works for it.
-		const dataIsLocation = typeof data.location_type === 'string' && typeof data.unique_id === 'string';
-		const location = (data.location as Record<string, unknown> | undefined) ?? (dataIsLocation ? data : undefined);
-		const extras = (location?.extras as Record<string, unknown> | undefined) ?? undefined;
-		const actor = (data.actor as Record<string, unknown> | undefined) ?? undefined;
-		// The thumbnail path ends up in a state and in the URL of the thumbnail proxy: only a plain
-		// static-resource path is accepted, anything else is dropped here.
-		const rawThumbnailPath: unknown = extras?.door_thumbnail ?? data.door_thumbnail;
-		let thumbnailPath: string | undefined;
-		if (typeof rawThumbnailPath === 'string' && rawThumbnailPath !== '') {
-			if (sanitizeStaticPath(rawThumbnailPath) !== null) {
-				thumbnailPath = rawThumbnailPath;
-			} else {
-				this.log.warn(`Ignoring invalid thumbnail path in ${msg.event} event.`);
-			}
+		const { event } = parsed;
+		if (parsed.thumbnailPathRejected) {
+			this.log.warn(`Ignoring invalid thumbnail path in ${event.type} event.`);
 		}
-
-		const REMOTE_VIEW_CHANGE_REASONS: Record<number, string> = {
-			105: 'timeout',
-			106: 'admin_rejected',
-			107: 'admin_unlocked',
-			108: 'visitor_cancelled',
-			400: 'answered_elsewhere',
-		};
-		let subtype: string | undefined;
-		if (msg.event === 'access.remote_view.change') {
-			const code = Number(data.reason_code ?? -1);
-			subtype = REMOTE_VIEW_CHANGE_REASONS[code];
-		} else if (msg.event === 'access.device.dps_status') {
-			subtype = extractDpsStatus(data);
-		}
-
-		const event: NormalizedEvent = {
-			ts,
-			source,
-			type: msg.event,
-			subtype,
-			deviceId:
-				(data.device_id as string | undefined) ??
-				(dataDevice?.id as string | undefined) ??
-				(msg.event === 'access.data.device.remote_unlock' ? msg.event_object_id : undefined),
-			deviceName:
-				(data.device_name as string | undefined) ??
-				(dataDevice?.name as string | undefined) ??
-				(dataDevice?.alias as string | undefined),
-			doorId:
-				(data.door_id as string | undefined) ??
-				(location?.id as string | undefined) ??
-				(location?.unique_id as string | undefined),
-			doorName: (data.door_name as string | undefined) ?? (location?.name as string | undefined),
-			userName: (data.user_name as string | undefined) ?? (actor?.name as string | undefined),
-			thumbnailPath,
-			raw: msg,
-		};
 		if (USER_RELEVANT_EVENTS.has(event.type)) {
 			if (event.type === 'access.data.device.remote_unlock' && event.doorId) {
 				// Delay push: door.unlock (webhook) may follow with richer data (door name, user)
@@ -695,12 +763,12 @@ class UnifiAccess extends utils.Adapter {
 					this.clearTimeout(existing);
 				}
 				this.unlockPendingEvents.set(doorId, event);
-				const t = this.setTimeout(async () => {
+				const t = this.setTimeout(() => {
 					this.unlockPendingTimers.delete(doorId);
 					const pending = this.unlockPendingEvents.get(doorId);
 					if (pending) {
 						this.unlockPendingEvents.delete(doorId);
-						await this.library.pushEvent(pending);
+						this.runDetached('event log', this.library.pushEvent(pending));
 					}
 				}, 4000);
 				if (t) {
@@ -720,16 +788,17 @@ class UnifiAccess extends utils.Adapter {
 				await this.library.pushEvent(event);
 			}
 		}
-		await this.updateDeviceFromEventData(dataDevice, ts);
-		await this.dispatchEvent(event, msg);
+		await this.updateDeviceFromEventData(parsed.device, event.ts);
+		await this.dispatchEvent(parsed);
 		await this.applyForwardRules(event);
 	}
 
-	private async dispatchEvent(event: NormalizedEvent, raw: UnifiAccessEventEnvelope): Promise<void> {
+	private async dispatchEvent(parsed: ParsedAccessEvent): Promise<void> {
+		const { event } = parsed;
 		switch (event.type) {
 			case 'access.remote_view':
 				await this.setState('doorbell.activeCallId', {
-					val: raw.event_object_id ?? null,
+					val: asString((event.raw as Record<string, unknown>).event_object_id) ?? null,
 					ack: true,
 				});
 				await this.setState('doorbell.activeFromDevice', {
@@ -746,7 +815,7 @@ class UnifiAccess extends utils.Adapter {
 				break;
 
 			case 'access.remote_view.change': {
-				const reason = Number((raw.data?.reason_code as number | undefined) ?? -1);
+				const reason = parsed.reasonCode ?? -1;
 				// 105 timeout, 106 admin reject, 108 visitor cancel, 400 answered elsewhere → call ended
 				if (reason === 105 || reason === 106 || reason === 108 || reason === 400) {
 					await this.setState('doorbell.activeCallId', { val: null, ack: true });
@@ -798,7 +867,7 @@ class UnifiAccess extends utils.Adapter {
 				if (event.doorId) {
 					// Documented location of the sensor state is data.object.status. An event without a usable
 					// status must not overwrite the known position (it used to be set to "unknown" here).
-					const value = extractDpsStatus(raw.data);
+					const value = extractDpsStatus(parsed.data);
 					if (value !== undefined) {
 						await this.setState(`doors.${this.safeId(event.doorId)}.position`, { val: value, ack: true });
 					} else {
@@ -882,9 +951,26 @@ class UnifiAccess extends utils.Adapter {
 	}
 
 	private setConnectionStatus(connected: boolean, lastError: LastError): void {
+		const changed = this.connectedToController !== connected || !this.connectionStatusWritten;
 		this.connectedToController = connected;
 		this.lastErrorKind = lastError;
-		void this.setState('info.connection', connected, true);
+		if (changed) {
+			this.connectionStatusWritten = true;
+			this.runDetached('info.connection', this.setState('info.connection', connected, true));
+		}
+	}
+
+	/**
+	 * Let a promise run on its own while making sure a rejection is logged instead of terminating the
+	 * adapter as an unhandled rejection.
+	 *
+	 * @param what Short description for the log
+	 * @param promise The running operation
+	 */
+	private runDetached(what: string, promise: Promise<unknown>): void {
+		promise.catch((err: unknown) => {
+			this.log.warn(`${what} failed: ${errorText(err)}`);
+		});
 	}
 
 	private safeId(raw: string): string {
@@ -1388,6 +1474,7 @@ class UnifiAccess extends utils.Adapter {
 	}
 
 	private async onUnload(callback: () => void): Promise<void> {
+		this.unloading = true;
 		try {
 			this.ws?.stop();
 			this.ws = null;

@@ -21,6 +21,7 @@ import {
 	isPortFree,
 	MockUnifiController,
 	ProtectStub,
+	sendWebhook,
 	waitFor,
 	type FakeAdapter,
 } from '../test/mock';
@@ -86,6 +87,8 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 	async function startConnected(overrides: Record<string, unknown> = {}): Promise<FakeAdapter> {
 		const instance = await start(overrides);
 		await mock.waitForWsClients(1);
+		// the client side of the WebSocket is open once the heartbeat interval runs
+		await waitFor(() => instance.intervals.size === 1, { description: 'WebSocket open in the adapter' });
 		return instance;
 	}
 
@@ -188,15 +191,61 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(await instance.request('getConnectionStatus')).to.include({ connected: true, lastError: null });
 		});
 
-		it('keeps retrying every 30 s while the controller stays down', async () => {
+		it('keeps retrying with growing distance while the controller stays down (30 s, 60 s, 120 s, 240 s, then every 5 min)', async () => {
 			mock.failNext({ status: 500, times: Number.POSITIVE_INFINITY });
-			await start({ enableWebhooks: false });
-			for (let attempt = 2; attempt <= 4; attempt++) {
-				await clock.tickAsync(30_000);
+			const instance = await start({ enableWebhooks: false });
+			let attempt = 1;
+			for (const wait of [30_000, 60_000, 120_000, 240_000, 300_000, 300_000]) {
+				await clock.tickAsync(wait - 1);
+				await delay(30);
+				expect(mock.findRequests({ path: '/devices' }), `before ${wait} ms`).to.have.length(attempt);
+				attempt += 1;
+				await clock.tickAsync(1);
 				await waitFor(() => mock.findRequests({ path: '/devices' }).length === attempt, {
 					description: `bootstrap attempt ${attempt}`,
 				});
+				// let the failed attempt schedule its successor
+				await waitFor(() => instance.timers.size === 1, { description: 'next retry scheduled' });
 			}
+		});
+
+		it('warns once for a failure that repeats on every retry (no log flood) and again when the failure changes', async () => {
+			mock.failNext({ status: 500, times: Number.POSITIVE_INFINITY });
+			const instance = await start({ enableWebhooks: false });
+			for (const wait of [30_000, 60_000, 120_000]) {
+				const before = mock.findRequests({ path: '/devices' }).length;
+				await clock.tickAsync(wait);
+				await waitFor(() => mock.findRequests({ path: '/devices' }).length === before + 1, {
+					description: 'retry',
+				});
+				await waitFor(() => instance.timers.size === 1, { description: 'next retry scheduled' });
+			}
+			expect(instance.log.of('warn')).to.deep.equal([
+				'Bootstrap failed (network): Request failed with status code 500',
+			]);
+
+			mock.clearFaults();
+			mock.token = 'rotated-token';
+			await clock.tickAsync(240_000);
+			await waitFor(() => instance.log.of('warn').length === 2, { description: 'second warning' });
+			expect(instance.log.of('warn')[1]).to.contain('Bootstrap failed (unauthorized)');
+			expect(await instance.request('getConnectionStatus')).to.include({
+				connected: false,
+				lastError: 'unauthorized',
+			});
+		});
+
+		it('a rejected token is retried only every 5 minutes', async () => {
+			mock.token = 'another-token';
+			const instance = await start({ enableWebhooks: false });
+			expect(await instance.request('getConnectionStatus')).to.include({ lastError: 'unauthorized' });
+			const attempts = mock.findRequests({ path: '/devices' }).length;
+			await clock.tickAsync(5 * 60_000 - 1);
+			await delay(30);
+			expect(mock.findRequests({ path: '/devices' })).to.have.length(attempts);
+			mock.token = TOKEN;
+			await clock.tickAsync(1);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'connected' });
 		});
 
 		// BUG-C-14: the webhook endpoint is registered exactly once, right after the first bootstrap attempt.
@@ -855,6 +904,174 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		});
 	});
 
+	describe('connection state and resync (R-02)', () => {
+		it('info.connection turns false when the WebSocket is lost and true again after the reconnect', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			expect(instance.val('info.connection')).to.equal(true);
+
+			mock.wsAccepting = false;
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			expect(await instance.request('getConnectionStatus')).to.include({
+				connected: false,
+				lastError: 'network',
+			});
+
+			// reconnect attempts keep failing while the controller refuses the WebSocket
+			await clock.tickAsync(200);
+			await delay(30);
+			expect(instance.val('info.connection')).to.equal(false);
+
+			mock.wsAccepting = true;
+			await clock.tickAsync(200);
+			await mock.waitForWsClients(1);
+			await waitFor(() => instance.val('info.connection') === true, { description: 'connection back' });
+			expect(await instance.request('getConnectionStatus')).to.include({ connected: true, lastError: null });
+		});
+
+		it('reloads devices and doors after a reconnect so changes missed during the outage show up', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			expect(instance.val(`doors.${DOOR_3855}.locked`)).to.equal(true);
+			expect(instance.val(`doors.${DOOR_3855}.position`)).to.equal('close');
+			const devicesBefore = mock.findRequests({ path: '/devices' }).length;
+			const doorsBefore = mock.findRequests({ path: '/doors' }).length;
+
+			mock.wsAccepting = false;
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			// meanwhile the door is unlocked and opened without the adapter hearing about it
+			const changed = mock.findDoor(DOOR_3855)!;
+			changed.door_lock_relay_status = 'unlock';
+			changed.door_position_status = 'open';
+			mock.wsAccepting = true;
+			await clock.tickAsync(200);
+			await mock.waitForWsClients(1);
+
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.locked`) === false, { description: 'resync locked' });
+			expect(instance.val(`doors.${DOOR_3855}.position`)).to.equal('open');
+			expect(mock.findRequests({ path: '/devices' })).to.have.length(devicesBefore + 1);
+			expect(mock.findRequests({ path: '/doors' })).to.have.length(doorsBefore + 1);
+			expect(mock.wsClients.size, 'the resync does not open a second WebSocket').to.equal(1);
+		});
+
+		it('logs one warning per outage, not one per reconnect attempt', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			mock.wsAccepting = false;
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			const handshakes = mock.wsHandshakes.length;
+			for (let i = 0; i < 6; i++) {
+				await clock.tickAsync(100);
+				await delay(20);
+			}
+			expect(mock.wsHandshakes.length, 'several reconnect attempts').to.be.greaterThan(handshakes + 2);
+			expect(instance.log.of('warn')).to.have.length(1);
+			expect(instance.log.of('warn')[0]).to.match(/^WebSocket error: /);
+			expect(instance.log.of('info').filter(m => m.includes('reconnect in'))).to.have.length(1);
+		});
+
+		it('runs the WebSocket heartbeat and reconnect on adapter timers and stops them on unload', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			expect(instance.intervals.size, 'heartbeat interval').to.equal(1);
+			mock.wsAccepting = false;
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			await waitFor(() => instance.timers.size === 1, { description: 'reconnect timer' });
+			expect(instance.intervals.size).to.equal(0);
+			await instance.fireUnload();
+			expect(clock.countTimers()).to.equal(0);
+		});
+
+		it('drops a dead WebSocket whose pings stay unanswered and reconnects (R-03)', async () => {
+			const deaf = new MockUnifiController({ token: TOKEN, autoPong: false });
+			await deaf.start();
+			try {
+				adapter = createAdapterWithFakeCore(MAIN, {
+					controllerHost: '127.0.0.1',
+					controllerPort: deaf.port,
+					apiToken: TOKEN,
+					wsReconnectDelay: 0.05,
+					listenPort,
+					listenIp: '127.0.0.1',
+				});
+				await adapter.fireReady();
+				await deaf.waitForWsClients(1);
+				await waitFor(() => adapter!.intervals.size === 1, { description: 'WebSocket open in the adapter' });
+				await clock.tickAsync(30_000);
+				await waitFor(() => deaf.wsPingCount === 1, { description: 'ping' });
+				expect(adapter.val('info.connection')).to.equal(true);
+				await clock.tickAsync(30_000);
+				await waitFor(() => adapter!.val('info.connection') === false, {
+					description: 'dead connection detected',
+				});
+				await clock.tickAsync(100);
+				await deaf.waitForWsConnectionCount(2);
+				await waitFor(() => adapter!.val('info.connection') === true, { description: 'reconnected' });
+			} finally {
+				await adapter?.fireUnload();
+				adapter = undefined;
+				await deaf.stop();
+			}
+		});
+	});
+
+	describe('malformed events never terminate the adapter (R-08)', () => {
+		// test/mocha.setup.js turns every unhandled rejection into a test failure
+		it('ignores WebSocket frames that are no event envelopes or carry fields of the wrong type', async () => {
+			const instance = await startConnected({ enableWebhooks: false });
+			for (const frame of [
+				'null',
+				'[]',
+				'"text"',
+				'17',
+				'{"event":null}',
+				'{"event":"access.data.device.remote_unlock","data":null}',
+				'{"event":"access.data.device.remote_unlock","event_object_id":{"a":1},"data":{"location_type":"door","unique_id":"x","extras":7}}',
+				'{"event":"access.remote_view","event_object_id":5,"data":{"device_id":{"x":1},"door_name":[1,2]}}',
+				'{"event":"access.remote_view.change","data":{"reason_code":{"nested":true}}}',
+				'{"event":"access.door.unlock","data":{"door_id":5,"device":{"id":{}},"location":"nowhere","actor":3}}',
+				'{"event":"access.device.dps_status","data":{"location":{"id":["a"]},"object":"open"}}',
+			]) {
+				mock.sendRaw(frame);
+			}
+			// a regular event afterwards proves the frames above have been processed
+			const ring = mock.emitRemoteView();
+			await waitFor(() => instance.val('doorbell.activeCallId') === ring.event_object_id, {
+				description: 'regular event after the malformed frames',
+			});
+			expect(mock.wsClients.size).to.equal(1);
+			expect(instance.val('info.connection')).to.equal(true);
+			expect(instance.log.of('error')).to.deep.equal([]);
+			// no state was written with a non-string id in its path
+			expect(instance.stateWrites.filter(w => /\[object|undefined|NaN/.test(w.id))).to.deep.equal([]);
+		});
+
+		it('answers 200 for signed webhooks with fields of the wrong type and keeps running', async () => {
+			const instance = await startConnected();
+			const endpoint = mock.webhookEndpoints[0];
+			for (const body of [
+				'null',
+				'[]',
+				'{"event":7}',
+				'{"event":"access.door.unlock","data":"text"}',
+				'{"event":"access.door.unlock","data":{"location":{"id":5,"extras":{"door_thumbnail":{"a":1}}},"device":{"id":9,"firmware":{},"online":"yes"}}}',
+				`{"event":"access.device.dps_status","data":{"location":{"id":"${DOOR_3855}"},"object":{"status":{"x":1}}}}`,
+				'{"event":"access.doorbell.completed","data":{"object":{"reason_code":"abc","request_id":4}}}',
+			]) {
+				const response = await sendWebhook({ url: endpoint.endpoint, secret: endpoint.secret, body });
+				expect(response.status, body).to.equal(200);
+			}
+			const [result] = await mock.deliverWebhook(
+				fixtures.webhookEvents.dpsStatus({ door: door(DOOR_3855), device: hub(), status: 'open' }),
+			);
+			expect(result.status).to.equal(200);
+			await waitFor(() => instance.val(`doors.${DOOR_3855}.position`) === 'open', {
+				description: 'regular event',
+			});
+			expect(instance.log.of('error')).to.deep.equal([]);
+		});
+	});
+
 	describe('unlock event de-duplication (WebSocket remote_unlock vs. webhook door.unlock)', () => {
 		it('logs access.data.device.remote_unlock 4 s later when no door.unlock webhook follows', async () => {
 			const instance = await startConnected();
@@ -973,8 +1190,11 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				type: 'access.remote_view',
 				source: 'ws',
 				deviceId: DEVICE_G2_PRO,
-				raw: ring,
 			});
+			// the WebRTC credentials of the call are not forwarded (R-19)
+			const { channel, token, ...data } = ring.data;
+			expect(JSON.parse(forwarded.val as string).raw).to.deep.equal({ ...ring, data });
+			expect(forwarded.val).to.not.contain(channel).and.not.contain(token);
 			expect(instance.states.has('0_userdata.0.other')).to.equal(false);
 			expect(instance.states.has('0_userdata.0.change')).to.equal(false);
 		});
