@@ -890,6 +890,25 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(clock.countTimers(), 'no re-lock timer').to.equal(timersBefore);
 		});
 
+		it('an invalid value for a door the controller does not know is ignored without writing a state that has no object', async () => {
+			const instance = await startConnected();
+			const writes = instance.stateWrites.length;
+			instance.fireStateChange('doors.unknown-door.unlock_duration', 'abc');
+			instance.fireStateChange('doors.unknown-door.lock_rule', 99);
+			instance.fireStateChange('doors.unknown-door.unlock', 'yes');
+			instance.fireStateChange('doors.emergency.unlock', true);
+			instance.fireStateChange(`doors.${DOOR_A2}.lock_rule`, 2);
+			await waitFor(() => instance.states.get(`${NS}.doors.${DOOR_A2}.lock_rule`)?.ack === true, {
+				description: 'lock_rule ack',
+			});
+			expect(
+				instance.stateWrites
+					.slice(writes)
+					.filter(w => w.id.includes('unknown-door') || w.id.includes('emergency.unlock')),
+			).to.deep.equal([]);
+			expect(instance.log.of('warn')).to.deep.equal([]);
+		});
+
 		it('ignores commands for doors the controller does not know', async () => {
 			const instance = await startConnected();
 			const before = mock.requests.length;
@@ -1508,6 +1527,42 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			expect(await instance.request('getConnectionStatus')).to.include({ connected: true, lastError: null });
 		});
 
+		it('a reload after a reconnect keeps what was learned from events and does not rewrite unchanged door states', async () => {
+			const instance = await startConnected();
+			await mock.deliverWebhook(
+				fixtures.webhookEvents.doorUnlock({
+					door: door(DOOR_A2),
+					device: hub(),
+					deviceOverrides: { firmware: 'v7.7.7' },
+				}),
+			);
+			await waitFor(() => instance.val(`devices.${DEVICE_HUB}.firmware`) === 'v7.7.7', {
+				description: 'firmware',
+			});
+			const lastSeen = instance.val(`devices.${DEVICE_HUB}.lastSeenAt`);
+			const writes = instance.stateWrites.length;
+			const reloads = mock.findRequests({ path: '/devices' }).length;
+
+			mock.dropWsConnections();
+			await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+			await clock.tickAsync(200);
+			await waitFor(() => mock.findRequests({ path: '/devices' }).length === reloads + 1, {
+				description: 'reload',
+			});
+			await waitFor(() => instance.val('info.connection') === true, { description: 'reconnected' });
+			await delay(50);
+
+			const hubEntry = (await instance.request('listDevices')).devices.find(
+				(d: { id: string }) => d.id === DEVICE_HUB,
+			);
+			expect(hubEntry).to.include({ firmware: 'v7.7.7', lastSeenAt: lastSeen });
+			expect(instance.val(`devices.${DEVICE_HUB}.firmware`)).to.equal('v7.7.7');
+			const doorWrites = instance.stateWrites
+				.slice(writes)
+				.filter(w => /\.doors\.[^.]+\.(locked|position)$/.test(w.id) && !w.id.includes(DOOR_A2));
+			expect(doorWrites, 'unchanged doors are not written again').to.deep.equal([]);
+		});
+
 		it('reloads devices and doors after a reconnect so changes missed during the outage show up', async () => {
 			const instance = await startConnected({ enableWebhooks: false });
 			expect(instance.val(`doors.${DOOR_3855}.locked`)).to.equal(true);
@@ -1592,6 +1647,65 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				await deaf.stop();
 			}
 		});
+	});
+
+	describe('robust start (R-08)', () => {
+		it('a failure during start is logged as error instead of escaping as unhandled rejection', async () => {
+			adapter = createAdapterWithFakeCore(MAIN, {
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				listenPort,
+				listenIp: '127.0.0.1',
+			});
+			adapter.setObjectNotExistsAsync = async () => {
+				throw new Error('objects db not reachable');
+			};
+			await adapter.fireReady();
+			await waitFor(() => adapter!.log.of('error').length === 1, { description: 'error log' });
+			expect(adapter.log.of('error')).to.deep.equal(['Adapter start failed: objects db not reachable']);
+		});
+
+		it('skips records without a usable id in the device, door and user lists instead of failing the whole load', async () => {
+			mock.doors.push(
+				{ id: 42 as unknown as string, name: 'numeric id' },
+				{ name: 'no id' } as never,
+				null as never,
+			);
+			(mock.devices as unknown[][])[0].push({ name: 'no id' }, { id: '' }, null, 'text');
+			mock.users.push({ first_name: 'No', last_name: 'Id' } as never);
+			const instance = await startConnected({ enableWebhooks: false });
+			expect(instance.val('info.connection')).to.equal(true);
+			expect(instance.obj(`doors.${DOOR_3855}`)?.type).to.equal('channel');
+			expect((await instance.request('listDevices')).devices).to.have.length(
+				fixtures.DEFAULT_DEVICES.flat().length,
+			);
+			expect(instance.log.of('warn')).to.deep.equal([]);
+			expect([...instance.objects.keys()].filter(id => /undefined|null|\[object/.test(id))).to.deep.equal([]);
+		});
+
+		for (const [label, value] of [
+			['0', 0],
+			['a negative number', -5],
+			['not a number', 'fast'],
+			['NaN', Number.NaN],
+		] as [string, unknown][]) {
+			it(`wsReconnectDelay = ${label} falls back to 5 s instead of reconnecting in a tight loop`, async () => {
+				const instance = await startConnected({ enableWebhooks: false, wsReconnectDelay: value });
+				mock.wsAccepting = false;
+				mock.dropWsConnections();
+				await waitFor(() => instance.val('info.connection') === false, { description: 'connection lost' });
+				const handshakes = mock.wsHandshakes.length;
+				// back-off 2 s, 4 s, 5 s (cap) → after 1.9 s nothing happened yet
+				await clock.tickAsync(1900);
+				await delay(30);
+				expect(mock.wsHandshakes).to.have.length(handshakes);
+				await clock.tickAsync(100);
+				await waitFor(() => mock.wsHandshakes.length === handshakes + 1, {
+					description: 'first retry after 2 s',
+				});
+			});
+		}
 	});
 
 	describe('malformed events never terminate the adapter (R-08)', () => {

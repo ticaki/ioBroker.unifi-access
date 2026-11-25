@@ -132,6 +132,26 @@ unverändert – für Pfad-Traversal-Tests), `createSelfSignedCert()`, `computeS
 `FakeAdapter` / `createAdapterWithFakeCore()` (In-Prozess-Ersatz für `@iobroker/adapter-core`,
 genutzt von `src/main.test.ts` und `src/lib/library.test.ts`). Typen: `test/mock/index.d.ts`.
 
+### FakeAdapter (In-Prozess-Adapter-Core)
+
+Bildet nur die Adapter-API nach, die der Adapter tatsächlich nutzt: Objekte/States in Maps
+(`objects`, `states`, `stateWrites`), `setTimeout`/`clearTimeout`/`setInterval`/`clearInterval`/`delay`
+über die (fake-baren) globalen Timer (`timers`, `intervals` zeigen, was noch läuft; `fireUnload()` räumt
+sie wie js-controller ab), `host` (`test-host`), `encrypt`/`decrypt` (austauschbar, um AES- bzw.
+Alt-Verschlüsselung nachzustellen), `getCertificatesAsync()` aus dem Zertifikatsspeicher `certificates`
+(Name → PEM; unbekannter Name → Fehler), `getForeignObjectAsync`, `delObjectAsync`, `delStateAsync`.
+`info.connection` ist ein `instanceObject` aus `io-package.json` und existiert im Fake nicht als Objekt.
+
+### ProtectStub (UniFi-OS-/Protect-Stand-in)
+
+`new ProtectStub({ username, password })` → `start()` / `stop()`, `port`, `cert` (als `caCert`
+nutzbar), `logins` (jeder Login-Versuch mit Zugangsdaten und Status), `requests`, `failLogins(status, n)`,
+`snapshot`, `clip`, `events` (Event-ID → Metadaten mit `clipUrl`). Er bildet **keine** dokumentierte API
+nach, sondern genau das, was `src/lib/protectHttp.ts` von der privaten UniFi-OS-/Protect-API verwendet
+(Cookie-Login mit CSRF-Token, Snapshot, Event-Metadaten, Clip). Tests damit belegen die Verdrahtung im
+Adapter, nicht das Verhalten einer echten Konsole. Der Adapter erreicht den Stub über den versteckten
+native-Key `protectPort`.
+
 ## Annahmen, wo die Doku schweigt
 
 Die Doku nennt Fehler-Codes und HTTP-Statuscodes getrennt, ordnet sie einander aber nicht zu.
@@ -140,8 +160,12 @@ Der Mock legt deshalb fest (und ist an den genannten Stellen umstellbar):
 | Thema | Verhalten des Mocks |
 |---|---|
 | Status zu Fehler-Codes | `CODE_PARAMS_INVALID`/`CODE_NOT_EXISTS` → 400, Auth-Fehler → 401, `CODE_RESOURCE_NOT_FOUND` → 404 |
-| `CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED` | HTTP **200** mit Fehler-Code (so erwartet es `registration.ts`); umstellbar über `duplicateEndpointHttpStatus` / `--duplicate-status` |
-| System-Log-Topic `all` | wird akzeptiert, obwohl es nicht im dokumentierten Enum steht – der Adapter fragt es ab |
+| `CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED` | HTTP **200** mit Fehler-Code; umstellbar über `duplicateEndpointHttpStatus` / `--duplicate-status` (der Adapter verarbeitet beide Varianten) |
+| Fehler-Code bei HTTP 200 | per `failNext({ status: 200, code: 'CODE_…' })` – der Adapter wertet `code` unabhängig vom HTTP-Status aus |
+| System-Log-Topic `all` | wird akzeptiert, obwohl es nicht im dokumentierten Enum steht – der Adapter fragt es nur noch als Rückfall nach `door_openings` ab |
+| Lock-Rule ohne aktive Regel (7.11) | `GET …/lock_rule` liefert `{type:"schedule", ended_time:0}` |
+| Relay-Status nach `PUT …/unlock` | bleibt unverändert (`lock`); nach `PUT …/lock_rule` siehe Tabelle oben |
+| Pagination von `GET /users` | `page_num`/`page_size` werden ausgewertet, Antwort enthält `pagination.total`; ohne Parameter kommt alles auf einer Seite |
 | `online` in Webhook-Geräteblöcken | Default `true` (die Doku-Beispiele zeigen durchgehend `false`); pro Event überschreibbar |
 | Webhook-Events ohne Payload-Beispiel | `unlock_schedule.*`, `temporary_unlock.*`, `visitor.status.changed` nutzen das Layout der dokumentierten Beispiele |
 | Nicht-JSON-Frames auf dem WebSocket | sendet der Mock nur auf Anforderung (`sendRaw` / `/__mock/ws/raw`) |

@@ -201,8 +201,9 @@ export class Library {
 
 		await this.adapter.setState(`${channelId}.name`, { val: door.name ?? door.id, ack: true });
 		await this.adapter.setState(`${channelId}.fullName`, { val: door.full_name ?? '', ack: true });
-		await this.writeState(`${channelId}.locked`, doorLocked(door));
-		await this.writeState(`${channelId}.position`, doorPosition(door));
+		// a reload (reconnect) must not produce state updates for doors whose status did not change
+		await this.writeState(`${channelId}.locked`, doorLocked(door), true);
+		await this.writeState(`${channelId}.position`, doorPosition(door), true);
 		await this.adapter.setState(`${channelId}.isBindHub`, { val: door.is_bind_hub === true, ack: true });
 	}
 

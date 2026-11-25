@@ -98,6 +98,17 @@ function errorText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Upper limit (seconds) of the WebSocket reconnect back-off from the configuration. Anything that is
+ * not a positive number falls back to 5 s — a zero or negative delay would reconnect in a tight loop.
+ *
+ * @param value Raw `wsReconnectDelay`
+ */
+function normalizeReconnectDelay(value: unknown): number {
+	const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+	return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.min(n, 3600) : 5;
+}
+
 class UnifiAccess extends utils.Adapter {
 	private http: UnifiHttp | null = null;
 	private protectHttp: ProtectHttp | null = null;
@@ -174,7 +185,12 @@ class UnifiAccess extends utils.Adapter {
 			...options,
 			name: 'unifi-access',
 		});
-		this.on('ready', this.onReady.bind(this));
+		// a failure during start is logged — it must not end as an unhandled rejection (restart loop)
+		this.on('ready', () =>
+			this.onReady().catch((err: unknown) => {
+				this.log.error(`Adapter start failed: ${errorText(err)}`);
+			}),
+		);
 		this.on('stateChange', this.onStateChange.bind(this));
 		this.on('message', this.onMessage.bind(this));
 		this.on('unload', this.onUnload.bind(this));
@@ -188,7 +204,7 @@ class UnifiAccess extends utils.Adapter {
 
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
-		const port = cfg.controllerPort || 12_445;
+		const port = normalizePort(cfg.controllerPort, 12_445);
 		const token = cfg.apiToken ?? '';
 		const verifyTLS = cfg.verifyTLS === true;
 		const caCert = cfg.caCert || undefined;
@@ -636,11 +652,17 @@ class UnifiAccess extends utils.Adapter {
 			return false;
 		}
 		try {
-			const [devices, doors, users] = await Promise.all([
+			const [allDevices, allDoors, allUsers] = await Promise.all([
 				this.http.listDevices(),
 				this.http.listDoors(),
 				this.http.listUsers().catch(() => []),
 			]);
+			// records without a usable id cannot be mapped to objects — skip them instead of failing the whole load
+			const hasId = (entry: { id?: unknown } | null | undefined): boolean =>
+				typeof entry?.id === 'string' && entry.id !== '';
+			const devices = allDevices.filter(hasId);
+			const doors = allDoors.filter(hasId);
+			const users = allUsers.filter(hasId);
 			this.userNameCache.clear();
 			for (const u of users) {
 				const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.user_email || u.id;
@@ -761,6 +783,8 @@ class UnifiAccess extends utils.Adapter {
 
 	private async applyBootstrap(data: { devices: UnifiDeviceRaw[]; doors: UnifiDoorRaw[] }): Promise<void> {
 		await this.library.applyBootstrap(data);
+		// firmware and last-seen time are learned from events; keep them across a reload
+		const previous = new Map(this.devices);
 		this.devices.clear();
 		this.doorNameCache.clear();
 		for (const d of data.doors) {
@@ -778,12 +802,12 @@ class UnifiAccess extends utils.Adapter {
 				alias: d.alias,
 				type: d.type,
 				model,
-				firmware: d.firmware,
+				firmware: (typeof d.firmware === 'string' && d.firmware) || previous.get(d.id)?.firmware,
 				// Only an explicit `online: false` means offline; if the field is missing the
 				// device is at least known to the controller, so default to online.
 				online: d.online !== false,
 				capabilities: featuresFor(model),
-				lastSeenAt: undefined,
+				lastSeenAt: previous.get(d.id)?.lastSeenAt,
 			});
 		}
 		// Pick a friendly controller name for the admin UI: prefer the alias of any UAH-like
@@ -811,7 +835,7 @@ class UnifiAccess extends utils.Adapter {
 	private startWebSocket(): void {
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
-		const port = cfg.controllerPort || 12_445;
+		const port = normalizePort(cfg.controllerPort, 12_445);
 		const token = cfg.apiToken ?? '';
 		const verifyTLS = cfg.verifyTLS === true;
 		const caCert = cfg.caCert || undefined;
@@ -825,7 +849,7 @@ class UnifiAccess extends utils.Adapter {
 			token,
 			verifyTLS,
 			caCert,
-			reconnectDelaySeconds: cfg.wsReconnectDelay || 5,
+			reconnectDelaySeconds: normalizeReconnectDelay(cfg.wsReconnectDelay),
 			timers: this.timerHost(),
 			logger: {
 				debug: (m: string) => this.log.debug(m),
@@ -1463,6 +1487,11 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		const [, doorId, control] = match;
+		if (!this.doorNameCache.has(doorId)) {
+			// not a door of the controller (no objects): nothing to do and nothing to reset
+			this.log.debug(`[${control}] ignoring write for unknown door id: ${doorId}`);
+			return;
+		}
 
 		// A control state opens or locks a real door: only values of exactly the expected type and
 		// range are acted upon. Everything else is rejected with a warning and the state is put back
