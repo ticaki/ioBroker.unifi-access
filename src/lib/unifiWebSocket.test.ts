@@ -65,6 +65,13 @@ interface Harness {
 	timers: ReturnType<typeof recordingTimers>;
 }
 
+/**
+ * Whether the socket still waits for the answer to its last ping (internal state, read for exact waits).
+ *
+ * @param socket The socket under test
+ */
+const awaitingPong = (socket: UnifiWebSocket): boolean => (socket as unknown as { awaitingPong: boolean }).awaitingPong;
+
 describe('UnifiWebSocket (against the mock controller)', () => {
 	let mock: MockUnifiController;
 	let clock: sinon.SinonFakeTimers | undefined;
@@ -279,11 +286,11 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 			clock.tick(1);
 			await waitFor(() => mock.wsPingCount === 1, { description: 'first ping' });
 
-			// one period at a time: each ping has to be answered before the next tick
-			await delay(30);
+			// one period at a time: each ping has to be answered before the next tick (T-05: wait for the pong)
+			await waitFor(() => !awaitingPong(socket), { description: 'first pong' });
 			clock.tick(30_000);
 			await waitFor(() => mock.wsPingCount === 2, { description: 'second ping' });
-			await delay(30);
+			await waitFor(() => !awaitingPong(socket), { description: 'second pong' });
 			clock.tick(30_000);
 			await waitFor(() => mock.wsPingCount === 3, { description: 'third ping' });
 
@@ -303,12 +310,12 @@ describe('UnifiWebSocket (against the mock controller)', () => {
 
 		it('keeps a connection whose pings are answered', async () => {
 			clock = sinon.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
-			const { counts, logger } = await startAndWaitOpen();
+			const { counts, logger, socket } = await startAndWaitOpen();
 			for (let i = 1; i <= 5; i++) {
 				await clock.tickAsync(30_000);
 				await waitFor(() => mock.wsPingCount === i, { description: `ping ${i}` });
-				// let the pong travel back before the next tick
-				await delay(30);
+				// the pong has to be back before the next tick — wait for it instead of a fixed time (T-05)
+				await waitFor(() => !awaitingPong(socket), { description: `pong ${i}` });
 			}
 			expect(counts).to.deep.equal({ open: 1, close: 0 });
 			expect(logger.of('info')).to.deep.equal([]);

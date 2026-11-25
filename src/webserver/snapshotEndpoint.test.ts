@@ -1,13 +1,6 @@
 import { expect } from 'chai';
 
-import {
-	createTestLogger,
-	fixtures,
-	getFreePort,
-	httpRequest,
-	MockUnifiController,
-	type TestLogger,
-} from '../../test/mock';
+import { createTestLogger, fixtures, httpRequest, MockUnifiController, type TestLogger } from '../../test/mock';
 import { UnifiHttp } from '../lib/unifiHttp';
 import { SharedHttpServer } from './sharedHttpServer';
 import { ThumbnailHandler } from './snapshotEndpoint';
@@ -47,9 +40,7 @@ describe('ThumbnailHandler (thumbnail proxy on the shared HTTP server)', () => {
 			lookups.push(deviceId);
 			return paths.get(deviceId) ?? null;
 		};
-		const port = await getFreePort();
-		baseUrl = `http://127.0.0.1:${port}`;
-		server = new SharedHttpServer({ port, ip: '127.0.0.1', logger });
+		server = new SharedHttpServer({ port: 0, ip: '127.0.0.1', logger });
 		const handler = new ThumbnailHandler({
 			pathPrefix: PREFIX,
 			http: () => http,
@@ -58,6 +49,7 @@ describe('ThumbnailHandler (thumbnail proxy on the shared HTTP server)', () => {
 		});
 		server.registerHandler('thumbnail', handler.matches, handler.handle);
 		await server.start();
+		baseUrl = `http://127.0.0.1:${server.port}`;
 	});
 
 	afterEach(async () => {

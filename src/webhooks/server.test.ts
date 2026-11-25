@@ -4,7 +4,6 @@ import {
 	computeSignature,
 	createTestLogger,
 	fixtures,
-	getFreePort,
 	httpRequest,
 	sendWebhook,
 	signatureHeader,
@@ -39,9 +38,7 @@ describe('WebhookHandler (UniFi Access webhook receiver)', () => {
 		onEvent = event => {
 			received.push(event);
 		};
-		const port = await getFreePort();
-		url = `http://127.0.0.1:${port}${PATH}`;
-		server = new SharedHttpServer({ port, ip: '127.0.0.1', logger });
+		server = new SharedHttpServer({ port: 0, ip: '127.0.0.1', logger });
 		const handler = new WebhookHandler({
 			path: PATH,
 			secret: () => secret,
@@ -50,6 +47,7 @@ describe('WebhookHandler (UniFi Access webhook receiver)', () => {
 		});
 		server.registerHandler('unifi-webhook', handler.matches, handler.handle);
 		await server.start();
+		url = `http://127.0.0.1:${server.port}${PATH}`;
 	});
 
 	afterEach(async () => {

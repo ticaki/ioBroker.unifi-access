@@ -46,6 +46,31 @@ interface LoggedEvent {
 	[key: string]: unknown;
 }
 
+/**
+ * Keep the listen port of the adapter apart from a port a stub was given by the OS in the meantime.
+ *
+ * @param current Listen port picked before the stub started
+ * @param taken Port the stub listens on
+ */
+async function portOtherThan(current: number, taken: number): Promise<number> {
+	let port = current;
+	while (port === taken) {
+		port = await getFreePort();
+	}
+	return port;
+}
+
+/**
+ * After a fake-time step: wait until the WebSocket heartbeat got its pong (real network time), instead of
+ * sleeping a fixed time and hoping it was enough (T-05). Returns at once without an open socket.
+ *
+ * @param instance The adapter
+ */
+async function heartbeatAnswered(instance: FakeAdapter): Promise<void> {
+	const ws = (instance as unknown as { ws?: { awaitingPong?: boolean } | null }).ws;
+	await waitFor(() => !ws?.awaitingPong, { description: 'pong of the WebSocket heartbeat' });
+}
+
 describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 	let mock: MockUnifiController;
 	let clock: sinon.SinonFakeTimers;
@@ -102,6 +127,8 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 	beforeEach(async () => {
 		mock = new MockUnifiController({ token: TOKEN });
 		await mock.start();
+		// The adapter binds the configured port itself, so the test has to pick one beforehand. Stubs that
+		// start later bind port 0 and could be handed the same port — see portOtherThan (T-05).
 		listenPort = await getFreePort();
 		clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 	});
@@ -417,7 +444,7 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			async function advance(ms: number): Promise<void> {
 				for (let done = 0; done < ms; done += 20_000) {
 					await clock.tickAsync(Math.min(20_000, ms - done));
-					await delay(5);
+					await heartbeatAnswered(adapter!);
 				}
 			}
 			const listings = (): number => mock.findRequests({ method: 'GET', path: '/webhooks/endpoints' }).length;
@@ -718,7 +745,7 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			setRelay(DOOR_3855, 'lock');
 			for (const step of [22_000, 29_000]) {
 				await clock.tickAsync(step);
-				await delay(40);
+				await heartbeatAnswered(instance);
 			}
 			expect(doorReads(DOOR_3855), 'no polling in between').to.equal(2);
 			await clock.tickAsync(2100);
@@ -2122,6 +2149,7 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		beforeEach(async () => {
 			protect = new ProtectStub();
 			await protect.start();
+			listenPort = await portOtherThan(listenPort, protect.port);
 		});
 
 		afterEach(async () => {
@@ -2865,6 +2893,7 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			beforeEach(async () => {
 				protect = new ProtectStub();
 				await protect.start();
+				listenPort = await portOtherThan(listenPort, protect.port);
 			});
 
 			afterEach(async () => {
@@ -4126,6 +4155,7 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		beforeEach(async () => {
 			protect = new ProtectStub();
 			await protect.start();
+			listenPort = await portOtherThan(listenPort, protect.port);
 		});
 
 		afterEach(async () => {

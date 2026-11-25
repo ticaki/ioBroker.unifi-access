@@ -137,6 +137,19 @@ describe('SharedHttpServer', () => {
 		]);
 	});
 
+	// T-05: tests bind to port 0 and read the port instead of probing for a free one
+	it('port 0: the OS picks a port and the server reports it', async () => {
+		const picked = new SharedHttpServer({ port: 0, ip: '127.0.0.1', logger: createTestLogger() });
+		expect(picked.port).to.equal(0);
+		await picked.start();
+		try {
+			expect(picked.port).to.be.greaterThan(0);
+			expect((await httpRequest({ url: `http://127.0.0.1:${picked.port}/` })).status).to.equal(404);
+		} finally {
+			await picked.stop();
+		}
+	});
+
 	it('start() rejects when the port is already in use', async () => {
 		await server!.start();
 		const second = new SharedHttpServer({ port, ip: '127.0.0.1', logger: createTestLogger() });

@@ -3,7 +3,7 @@ import type { ServerResponse } from 'node:http';
 import { connect } from 'node:net';
 import { Readable } from 'node:stream';
 
-import { createTestLogger, getFreePort, httpRequest, type TestLogger, waitFor } from '../../test/mock';
+import { createTestLogger, httpRequest, type TestLogger, waitFor } from '../../test/mock';
 import { ProtectMediaHandler } from './protectSnapshotEndpoint';
 import { SharedHttpServer } from './sharedHttpServer';
 
@@ -37,9 +37,7 @@ describe('ProtectMediaHandler (Protect snapshot / clip proxy)', () => {
 			calls.push(`fetchClip ${clipPath}`);
 			return Buffer.from(`clip-${clipPath}`);
 		};
-		const port = await getFreePort();
-		baseUrl = `http://127.0.0.1:${port}`;
-		server = new SharedHttpServer({ port, ip: '127.0.0.1', logger });
+		server = new SharedHttpServer({ port: 0, ip: '127.0.0.1', logger });
 		const handler = new ProtectMediaHandler({
 			snapshotPathPrefix: SNAPSHOT_PREFIX,
 			videoPathPrefix: VIDEO_PREFIX,
@@ -55,6 +53,7 @@ describe('ProtectMediaHandler (Protect snapshot / clip proxy)', () => {
 			return handler.handle(req, res);
 		});
 		await server.start();
+		baseUrl = `http://127.0.0.1:${server.port}`;
 	});
 
 	afterEach(async () => {

@@ -1,6 +1,6 @@
 import { expect } from 'chai';
 
-import { createTestLogger, getFreePort, httpRequest, type TestLogger } from '../../test/mock';
+import { createTestLogger, httpRequest, type TestLogger } from '../../test/mock';
 import { SharedHttpServer } from '../webserver/sharedHttpServer';
 import { GenericWebhookHandler, normalizeWebhookPath, type GenericWebhookHandlerOptions } from './genericWebhookServer';
 
@@ -21,9 +21,7 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 	): Promise<void> {
 		logger = createTestLogger();
 		captured = [];
-		const port = await getFreePort();
-		url = `http://127.0.0.1:${port}${PATH}`;
-		server = new SharedHttpServer({ port, ip: '127.0.0.1', logger });
+		server = new SharedHttpServer({ port: 0, ip: '127.0.0.1', logger });
 		const handler = new GenericWebhookHandler({
 			path: PATH,
 			auth: 'none',
@@ -35,6 +33,7 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 		});
 		server.registerHandler('generic-webhook', handler.matches, handler.handle);
 		await server.start();
+		url = `http://127.0.0.1:${server.port}${PATH}`;
 	}
 
 	const post = (headers: Record<string, string> = {}, body = '{"alarm_id":"a1"}'): ReturnType<typeof httpRequest> =>
@@ -285,8 +284,7 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 		it('a path set without leading slash is answered at /<path>', async () => {
 			logger = createTestLogger();
 			captured = [];
-			const port = await getFreePort();
-			server = new SharedHttpServer({ port, ip: '127.0.0.1', logger });
+			server = new SharedHttpServer({ port: 0, ip: '127.0.0.1', logger });
 			const handler = new GenericWebhookHandler({
 				path: 'alarm',
 				auth: 'none',
@@ -297,6 +295,7 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 			});
 			server.registerHandler('generic-webhook', handler.matches, handler.handle);
 			await server.start();
+			const port = server.port;
 			const response = await httpRequest({
 				url: `http://127.0.0.1:${port}/alarm?src=x`,
 				method: 'POST',
@@ -312,8 +311,7 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 		it('a percent-encoded request path matches the literal setting', async () => {
 			logger = createTestLogger();
 			captured = [];
-			const port = await getFreePort();
-			server = new SharedHttpServer({ port, ip: '127.0.0.1', logger });
+			server = new SharedHttpServer({ port: 0, ip: '127.0.0.1', logger });
 			const handler = new GenericWebhookHandler({
 				path: '/alarm~1',
 				auth: 'none',
@@ -322,6 +320,7 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 			});
 			server.registerHandler('generic-webhook', handler.matches, handler.handle);
 			await server.start();
+			const port = server.port;
 			const response = await httpRequest({
 				url: `http://127.0.0.1:${port}`,
 				rawPath: '/alarm%7E1',

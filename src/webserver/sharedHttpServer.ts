@@ -58,6 +58,15 @@ export class SharedHttpServer {
 		return this.handlers.length;
 	}
 
+	/**
+	 * The port the server listens on — the one the OS picked when it was configured as 0 (tests bind
+	 * to port 0 instead of probing for a free port and hoping it stays free).
+	 */
+	get port(): number {
+		const address = this.server?.address();
+		return address && typeof address === 'object' ? address.port : this.options.port;
+	}
+
 	/** Whether the server is listening. */
 	get listening(): boolean {
 		return this.server !== null;
@@ -92,7 +101,7 @@ export class SharedHttpServer {
 					this.options.logger.debug(`Shared ${this.scheme} server: client error: ${err.message}`);
 				});
 				this.server = server;
-				const where = this.options.ip ? `${this.options.ip}:${this.options.port}` : `:${this.options.port}`;
+				const where = this.options.ip ? `${this.options.ip}:${this.port}` : `:${this.port}`;
 				this.options.logger.info(`Shared ${this.scheme} server listening on ${where}`);
 				resolve();
 			};
