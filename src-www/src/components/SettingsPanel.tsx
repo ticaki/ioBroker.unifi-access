@@ -42,6 +42,7 @@ export function SettingsPanel(): JSX.Element {
                         max={200}
                         step={8}
                         value={settings.thumbWidth}
+                        aria-label="Event thumbnail width"
                         onChange={(_, v) => update({ thumbWidth: v as number }, false)}
                         onChangeCommitted={(_, v) => update({ thumbWidth: v as number })}
                         marks={[
@@ -64,6 +65,7 @@ export function SettingsPanel(): JSX.Element {
                         max={600}
                         step={20}
                         value={settings.snapshotHeight}
+                        aria-label="Last event image height"
                         onChange={(_, v) => update({ snapshotHeight: v as number }, false)}
                         onChangeCommitted={(_, v) => update({ snapshotHeight: v as number })}
                         marks={[
@@ -85,6 +87,7 @@ export function SettingsPanel(): JSX.Element {
                         max={2000}
                         step={50}
                         value={settings.maxWidth}
+                        aria-label="Max. width"
                         onChange={(_, v) => update({ maxWidth: v as number }, false)}
                         onChangeCommitted={(_, v) => update({ maxWidth: v as number })}
                         marks={[
