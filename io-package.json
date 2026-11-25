@@ -88,7 +88,7 @@
 			"config": "json"
 		},
 		"localLinks": {
-			"_default": "%web_protocol%://%ip%:%web_port%/unifi-access/index.html"
+			"_default": "%web_protocol%://%ip%:%web_port%/unifi-access/index.html?instance=%instance%"
 		},
 		"dependencies": [
 			{
@@ -131,8 +131,6 @@
 		"certPrivate": "",
 		"certChained": "",
 		"enableWebhooks": false,
-		"webhookPath": "/unifi-access-webhook",
-		"webhookPublicUrl": "",
 		"enableThumbnailServer": false,
 		"webhookEndpointId": "",
 		"webhookSecret": "",

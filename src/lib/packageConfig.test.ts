@@ -48,6 +48,13 @@ function collectAttributes(node: unknown, found = new Map<string, string>()): Ma
 }
 
 describe('adapter configuration metadata (io-package.json / admin/jsonConfig.json)', () => {
+	it('the link to the www panel carries the instance number (admin replaces %instance% in localLinks)', () => {
+		const common = readJson<{ common: { localLinks: Record<string, string> } }>('io-package.json').common;
+		expect(common.localLinks._default).to.equal(
+			'%web_protocol%://%ip%:%web_port%/unifi-access/index.html?instance=%instance%',
+		);
+	});
+
 	const ioPackage = readJson<IoPackage>('io-package.json');
 	const attributes = collectAttributes(readJson<unknown>('admin', 'jsonConfig.json'));
 	const encrypted = ioPackage.encryptedNative ?? [];
