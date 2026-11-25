@@ -19,11 +19,13 @@ class ProtectStub {
 	 * @param {string} [options.username] Accepted user name (default `viewer`)
 	 * @param {string} [options.password] Accepted password (default `protect-secret`)
 	 * @param {string[]} [options.altNames] subjectAltName entries of the generated certificate
+	 * @param {number} [options.port] Port to listen on (default 0 = let the OS pick)
 	 */
 	constructor(options = {}) {
 		this.username = options.username ?? 'viewer';
 		this.password = options.password ?? 'protect-secret';
 		this.altNames = options.altNames;
+		this.requestedPort = options.port ?? 0;
 		/** @type {{ method: string, url: string, headers: import('node:http').IncomingHttpHeaders, body: string, status: number }[]} */
 		this.requests = [];
 		/** @type {{ username?: string, password?: string, status: number }[]} every login attempt */
@@ -59,7 +61,13 @@ class ProtectStub {
 			req.on('data', chunk => chunks.push(chunk));
 			req.on('end', () => this.handle(req, res, Buffer.concat(chunks).toString('utf8')));
 		});
-		await new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+		await new Promise((resolve, reject) => {
+			server.once('error', reject);
+			server.listen(this.requestedPort, '127.0.0.1', () => {
+				server.removeListener('error', reject);
+				resolve(undefined);
+			});
+		});
 		this.server = server;
 		const address = server.address();
 		this.port = typeof address === 'object' && address ? address.port : 0;

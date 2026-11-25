@@ -341,7 +341,7 @@ export function createAdapterWithFakeCore(mainFile: string, config: Record<strin
  * UniFi Access developer API): cookie login with CSRF token, camera snapshot, event metadata, clip.
  */
 export class ProtectStub {
-	constructor(options?: { username?: string; password?: string; altNames?: string[] });
+	constructor(options?: { username?: string; password?: string; altNames?: string[]; port?: number });
 
 	username: string;
 	password: string;
