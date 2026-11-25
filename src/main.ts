@@ -476,12 +476,23 @@ class UnifiAccess extends utils.Adapter {
 		this.protectLoginRunning = true;
 		try {
 			await protect.login();
-			this.log.info(attempt === 1 ? 'UniFi Protect API client initialized' : 'Protect login retry succeeded.');
 			this.protectLoginRunning = false;
+			if (this.unloading) {
+				// answered after the stop: the stopped instance must not report "Protect connected" —
+				// js-controller does not reset that state — and the session is dropped with the client
+				this.protectHttp = null;
+				return;
+			}
+			this.log.info(attempt === 1 ? 'UniFi Protect API client initialized' : 'Protect login retry succeeded.');
 			await this.setState('info.protectConnected', { val: true, ack: true });
 			return;
 		} catch (err) {
 			this.protectLoginRunning = false;
+			if (this.unloading) {
+				// a failure answered after the stop is neither reported nor retried
+				this.protectHttp = null;
+				return;
+			}
 			const kind = classifyProtectError(err);
 			if (kind === 'tls') {
 				// A configuration problem: retrying cannot help, so say exactly once what to do.
@@ -501,11 +512,7 @@ class UnifiAccess extends utils.Adapter {
 				);
 				this.protectHttp = null;
 			} else {
-				// rate limit / console not reachable (yet): try again with growing distance — unless the
-				// instance stopped meanwhile (a login answered after the unload must not schedule a retry)
-				if (this.unloading) {
-					return;
-				}
+				// rate limit / console not reachable (yet): try again with growing distance
 				const delayMs = Math.min(30_000 * 2 ** Math.min(attempt - 1, 10), 10 * 60_000);
 				const text = `Protect login failed (${kind}): ${errorText(err)} — retrying in ${Math.round(delayMs / 1000)} s.`;
 				if (attempt === 1) {

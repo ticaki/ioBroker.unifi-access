@@ -4850,6 +4850,36 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				await delay(30);
 				expect(protect.logins, 'no login retry after the stop').to.have.length(logins);
 			});
+
+			/** Stops the instance as soon as the Protect login has been sent. */
+			function stopDuringProtectLogin(_inst: FakeAdapter, stop: () => void): void {
+				const original = ProtectHttp.prototype.login;
+				stubs.push(
+					sinon.stub(ProtectHttp.prototype, 'login').callsFake(async function (this: ProtectHttp) {
+						stop();
+						await original.call(this);
+					}),
+				);
+			}
+
+			it('stopped during a Protect login that succeeds: "Protect connected" is not reported (R2K-02)', async () => {
+				const instance = await stopDuringStart(stopDuringProtectLogin);
+				await waitFor(() => protect.logins.length === 1, { description: 'login answered' });
+				await delay(50);
+				expect(protect.logins.map(l => l.status)).to.deep.equal([200]);
+				expect(instance.val('info.protectConnected')).to.equal(false);
+				expect(instance.log.of('info').filter(m => m.includes('Protect'))).to.deep.equal([]);
+				expect((instance as unknown as { protectHttp: unknown }).protectHttp, 'session dropped').to.equal(null);
+			});
+
+			it('stopped during a Protect login with rejected credentials: nothing is reported (R2K-02)', async () => {
+				protect.failLogins(401, 1);
+				const instance = await stopDuringStart(stopDuringProtectLogin);
+				await waitFor(() => protect.logins.length === 1, { description: 'login answered' });
+				await delay(50);
+				expect(instance.log.of('warn').filter(w => w.includes('Protect'))).to.deep.equal([]);
+				expect(instance.val('info.protectConnected')).to.equal(false);
+			});
 		});
 
 		it('cancels a pending bootstrap retry', async () => {
