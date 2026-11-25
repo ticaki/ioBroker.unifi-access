@@ -844,7 +844,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					token: TOKEN,
 					verifyTLS: false,
 				});
-				expect(answer).to.deep.equal({ ok: true, controllerName: 'UNVR - Main Floor' });
+				expect(answer).to.deep.equal({ ok: true, deviceCount: 4 });
 				const probe = mock.requests.slice(before);
 				expect(probe.map(r => `${r.method} ${r.url}`)).to.deep.equal([
 					'GET /api/v1/developer/devices?refresh=true',
@@ -870,14 +870,25 @@ function defineAdapterTests({ suite, describe, it }) {
 				expect(answer).to.deep.equal({ ok: false, error: 'network' });
 			});
 
-			it('verifyToken: "network" when TLS verification is requested for the self-signed certificate', async () => {
+			it('verifyToken: "tls" with the certificate error when TLS verification is requested for the self-signed certificate', async () => {
 				const answer = await tools.sendTo(harness, 'verifyToken', {
 					host: '127.0.0.1',
 					port: mock.port,
 					token: TOKEN,
 					verifyTLS: true,
 				});
-				expect(answer).to.deep.equal({ ok: false, error: 'network' });
+				expect(answer).to.deep.equal({ ok: false, error: 'tls', detail: 'DEPTH_ZERO_SELF_SIGNED_CERT' });
+			});
+
+			it('verifyToken: uses the CA certificate of the form (not saved yet)', async () => {
+				const answer = await tools.sendTo(harness, 'verifyToken', {
+					host: '127.0.0.1',
+					port: mock.port,
+					token: TOKEN,
+					verifyTLS: true,
+					caCert: mock.cert,
+				});
+				expect(answer).to.deep.equal({ ok: true, deviceCount: 4 });
 			});
 
 			it('verifyToken: "missing-fields" without host or token', async () => {
@@ -1141,7 +1152,7 @@ function defineAdapterTests({ suite, describe, it }) {
 					port: mock.port,
 					token: TOKEN,
 				});
-				expect(answer).to.deep.equal({ ok: true, controllerName: 'UNVR - Main Floor' });
+				expect(answer).to.deep.equal({ ok: true, deviceCount: 4 });
 				expect(harness.isAdapterRunning()).to.equal(true);
 			});
 		});

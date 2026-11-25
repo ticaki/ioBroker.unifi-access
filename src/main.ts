@@ -2091,22 +2091,37 @@ class UnifiAccess extends utils.Adapter {
 		});
 	}
 
+	/**
+	 * "Test connection" of the admin: probe the controller with the values of the form (not saved yet).
+	 * `verifyTLS` and `caCert` of the form win over the stored configuration; without them in the
+	 * payload the stored values apply. The token is never logged.
+	 *
+	 * @param msg Message with `{host, port, token, verifyTLS?, caCert?}`
+	 * @returns `{ok:true, deviceCount}` or `{ok:false, error}` with error `missing-fields`, `unauthorized`,
+	 * `network` or `tls` (then with `detail`: the OpenSSL / Node.js code of the certificate failure)
+	 */
 	private async handleVerifyToken(msg: ioBroker.Message): Promise<Record<string, unknown>> {
 		const payload = asRecord(msg.message) ?? {};
 		const host = asString(payload.host) ?? '';
 		const port = normalizePort(payload.port, 12_445);
 		const token = asString(payload.token) ?? '';
-		const verifyTLS = payload.verifyTLS === true;
+		const verifyTLS = typeof payload.verifyTLS === 'boolean' ? payload.verifyTLS : this.config.verifyTLS === true;
+		// an empty string from the form means "no CA certificate" — only a missing field falls back
+		const caCert = typeof payload.caCert === 'string' ? payload.caCert : this.config.caCert;
 		if (!host || !token) {
 			return { ok: false, error: 'missing-fields' };
 		}
 		// A probe with its own client: nothing of the running connection is touched.
-		const probe = new UnifiHttp({ host, port, token, verifyTLS, caCert: this.config.caCert || undefined });
+		const probe = new UnifiHttp({ host, port, token, verifyTLS, caCert: caCert || undefined });
 		try {
 			const devices = await probe.listDevices();
-			const first = devices[0];
-			return { ok: true, controllerName: first?.alias ?? first?.name ?? null };
+			// The API has no endpoint that names the controller — the answer only says what was found.
+			return { ok: true, deviceCount: devices.length };
 		} catch (err) {
+			const tlsCode = tlsCertificateErrorCode(err);
+			if (tlsCode) {
+				return { ok: false, error: 'tls', detail: tlsCode };
+			}
 			return { ok: false, error: classifyError(err) };
 		}
 	}

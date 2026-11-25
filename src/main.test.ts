@@ -2876,9 +2876,107 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			).to.include({ ok: false });
 			expect(
 				await instance.request('verifyToken', { host: '127.0.0.1', port: mock.port, token: TOKEN }),
-			).to.deep.equal({
-				ok: true,
-				controllerName: 'UNVR - Main Floor',
+			).to.deep.equal({ ok: true, deviceCount: 4 });
+		});
+
+		describe('verifyToken (K-13, U-04, U-06, U-13)', () => {
+			const probe = { host: '127.0.0.1', token: TOKEN };
+
+			it('answers with the number of devices found — no device name posing as "controller"', async () => {
+				const instance = await startConnected({ enableWebhooks: false });
+				expect(await instance.request('verifyToken', { ...probe, port: mock.port })).to.deep.equal({
+					ok: true,
+					deviceCount: 4,
+				});
+				mock.devices = [[]];
+				expect(await instance.request('verifyToken', { ...probe, port: mock.port })).to.deep.equal({
+					ok: true,
+					deviceCount: 0,
+				});
+			});
+
+			it('a certificate failure is reported as "tls" with the OpenSSL code, not as "network"', async () => {
+				const instance = await startConnected({ enableWebhooks: false });
+				expect(
+					await instance.request('verifyToken', { ...probe, port: mock.port, verifyTLS: true }),
+				).to.deep.equal({ ok: false, error: 'tls', detail: 'DEPTH_ZERO_SELF_SIGNED_CERT' });
+
+				const other = new MockUnifiController({ token: TOKEN, altNames: ['other.example'] });
+				await other.start();
+				try {
+					expect(
+						await instance.request('verifyToken', {
+							...probe,
+							port: other.port,
+							verifyTLS: true,
+							caCert: other.cert,
+						}),
+					).to.deep.equal({ ok: false, error: 'tls', detail: 'ERR_TLS_CERT_ALTNAME_INVALID' });
+				} finally {
+					await other.stop();
+				}
+			});
+
+			it('uses verifyTLS and caCert of the form, not the stored ones', async () => {
+				// stored: no verification, no CA — the form asks for verification with the right CA
+				const instance = await startConnected({ enableWebhooks: false, verifyTLS: false, caCert: '' });
+				expect(
+					await instance.request('verifyToken', {
+						...probe,
+						port: mock.port,
+						verifyTLS: true,
+						caCert: mock.cert,
+					}),
+				).to.deep.equal({ ok: true, deviceCount: 4 });
+			});
+
+			it('an emptied CA field in the form is not replaced by the stored CA certificate', async () => {
+				const instance = await startConnected({ enableWebhooks: false, verifyTLS: true, caCert: mock.cert });
+				expect(
+					await instance.request('verifyToken', { ...probe, port: mock.port, verifyTLS: true, caCert: '' }),
+				).to.deep.equal({ ok: false, error: 'tls', detail: 'DEPTH_ZERO_SELF_SIGNED_CERT' });
+			});
+
+			it('without verifyTLS / caCert in the payload the stored values apply', async () => {
+				const instance = await startConnected({ enableWebhooks: false, verifyTLS: true, caCert: mock.cert });
+				expect(await instance.request('verifyToken', { ...probe, port: mock.port })).to.deep.equal({
+					ok: true,
+					deviceCount: 4,
+				});
+				expect(
+					await instance.request('verifyToken', { ...probe, port: mock.port, verifyTLS: false }),
+					'the form switched verification off',
+				).to.deep.equal({ ok: true, deviceCount: 4 });
+			});
+
+			// K-03: some other HTTPS service on host and port is not "connection successful"
+			it('an answer without the UniFi Access envelope is not a success', async () => {
+				const instance = await startConnected({ enableWebhooks: false });
+				mock.failNext({ path: '/devices', status: 200, body: '<html>router login</html>' });
+				expect(await instance.request('verifyToken', { ...probe, port: mock.port })).to.deep.equal({
+					ok: false,
+					error: 'network',
+				});
+			});
+
+			// T-02: the admin sends the token in clear text — it must not reach any log level
+			it('the API token of the payload appears in no log line, whatever the outcome', async () => {
+				const secretToken = 'probe-token-that-must-not-be-logged';
+				const instance = await startConnected({ enableWebhooks: false });
+				instance.log.messages.length = 0;
+				await instance.request('verifyToken', { ...probe, port: mock.port, token: secretToken });
+				mock.token = secretToken;
+				await instance.request('verifyToken', { ...probe, port: mock.port, token: secretToken });
+				await instance.request('verifyToken', {
+					...probe,
+					port: mock.port,
+					token: secretToken,
+					verifyTLS: true,
+				});
+				mock.failNext({ path: '/devices', status: 500 });
+				await instance.request('verifyToken', { ...probe, port: mock.port, token: secretToken });
+				expect(instance.log.messages.length, 'something was logged at all').to.be.greaterThan(0);
+				expect(instance.log.messages.filter(m => m.message.includes(secretToken))).to.deep.equal([]);
 			});
 		});
 
