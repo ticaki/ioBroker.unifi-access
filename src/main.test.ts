@@ -4400,6 +4400,7 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				expect(await isPortFree(listenPort)).to.equal(true);
 				expect(protect.logins).to.deep.equal([]);
 				expect(clock.countTimers()).to.equal(0);
+				expect(instance.timers.size + instance.intervals.size).to.equal(0);
 			});
 
 			it('stopped during a failing Protect login: no retry is planned and nothing is reported', async () => {
