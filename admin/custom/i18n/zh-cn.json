@@ -39,7 +39,8 @@
     "generic_webhook_copy": "复制到剪贴板",
     "generic_webhook_copied": "已复制!",
     "generic_webhook_server_not_running": "适配器的 HTTP 服务器当前未运行, 因此该 URL 暂时无法访问. 请保存设置; 如果仍未启动, 请检查实例日志 (端口被占用?).",
-    "generic_webhook_tls_inactive": "已启用 TLS, 但无法加载证书 (%s). 在问题解决之前, 服务器通过未加密的 http 应答.",
+    "generic_webhook_tls_inactive": "已启用 TLS, 但无法加载证书 (%s). 在问题解决之前, 内置服务器不会启动.",
+    "generic_webhook_public_base_unsaved": "表单中的公共基础 URL 与已保存的不同. 显示的 URL 以表单为准; 请保存设置以使其生效.",
 
     "adapter_not_running": "适配器实例未运行。请启动后重试。",
     "adapter_no_response": "适配器未及时响应。",

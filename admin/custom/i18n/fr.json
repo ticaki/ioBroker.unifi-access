@@ -39,7 +39,8 @@
     "generic_webhook_copy": "Copier dans le presse-papiers",
     "generic_webhook_copied": "Copié !",
     "generic_webhook_server_not_running": "Le serveur HTTP de l'adaptateur ne fonctionne pas pour le moment, cette URL ne répond donc pas encore. Enregistrez les paramètres et, s'il ne démarre toujours pas, consultez le journal de l'instance (port déjà utilisé ?).",
-    "generic_webhook_tls_inactive": "TLS est activé, mais les certificats n'ont pas pu être chargés (%s). Le serveur répond en http non chiffré jusqu'à ce que ce soit corrigé.",
+    "generic_webhook_tls_inactive": "TLS est activé, mais les certificats n'ont pas pu être chargés (%s). Le serveur intégré ne démarre pas tant que ce n'est pas corrigé.",
+    "generic_webhook_public_base_unsaved": "L'URL de base publique du formulaire diffère de celle enregistrée. L'URL affichée suit le formulaire ; enregistrez les paramètres pour l'appliquer.",
 
     "adapter_not_running": "L'instance de l'adaptateur n'est pas en cours d'exécution. Démarrez-la et réessayez.",
     "adapter_no_response": "L'adaptateur n'a pas répondu à temps.",

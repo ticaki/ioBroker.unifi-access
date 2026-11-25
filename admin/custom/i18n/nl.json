@@ -39,7 +39,8 @@
     "generic_webhook_copy": "Naar klembord kopiëren",
     "generic_webhook_copied": "Gekopieerd!",
     "generic_webhook_server_not_running": "De HTTP-server van de adapter draait op dit moment niet, deze URL antwoordt dus nog niet. Sla de instellingen op en controleer het log van de instantie als hij daarna nog niet start (poort in gebruik?).",
-    "generic_webhook_tls_inactive": "TLS is ingeschakeld, maar de certificaten konden niet worden geladen (%s). De server antwoordt onversleuteld via http totdat dit is opgelost.",
+    "generic_webhook_tls_inactive": "TLS is ingeschakeld, maar de certificaten konden niet worden geladen (%s). De ingebouwde server wordt pas gestart als dit is opgelost.",
+    "generic_webhook_public_base_unsaved": "De openbare basis-URL in het formulier wijkt af van de opgeslagen waarde. De getoonde URL volgt het formulier; sla de instellingen op om hem toe te passen.",
 
     "adapter_not_running": "De adapterinstantie draait niet. Start deze en probeer het opnieuw.",
     "adapter_no_response": "De adapter heeft niet op tijd gereageerd.",

@@ -39,7 +39,8 @@
     "generic_webhook_copy": "Copy to clipboard",
     "generic_webhook_copied": "Copied!",
     "generic_webhook_server_not_running": "The HTTP server of the adapter is not running at the moment, so this URL does not answer yet. Save the settings and check the log of the instance if it still does not start (port in use?).",
-    "generic_webhook_tls_inactive": "TLS is enabled, but the certificates could not be loaded (%s). The server answers via plain http until this is fixed.",
+    "generic_webhook_tls_inactive": "TLS is enabled, but the certificates could not be loaded (%s). The built-in server is not started until this is fixed.",
+    "generic_webhook_public_base_unsaved": "The public base URL in the form differs from the saved one. The URL shown follows the form; save the settings to apply it.",
 
     "adapter_not_running": "The adapter instance is not running. Start it and try again.",
     "adapter_no_response": "The adapter did not respond in time.",
