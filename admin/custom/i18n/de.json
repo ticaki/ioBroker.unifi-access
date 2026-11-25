@@ -41,6 +41,8 @@
     "generic_webhook_server_not_running": "Der HTTP-Server des Adapters läuft momentan nicht, diese URL antwortet daher noch nicht. Einstellungen speichern und, falls er danach nicht startet, das Log der Instanz prüfen (Port belegt?).",
     "generic_webhook_tls_inactive": "TLS ist aktiviert, aber die Zertifikate konnten nicht geladen werden (%s). Der eingebaute Server startet erst, wenn das behoben ist.",
     "generic_webhook_public_base_unsaved": "Die öffentliche Basis-URL im Formular weicht von der gespeicherten ab. Die angezeigte URL folgt dem Formular; zum Übernehmen die Einstellungen speichern.",
+    "generic_webhook_unsaved": "Port oder Listen-Pfad im Formular weichen von den gespeicherten Einstellungen ab. Die angezeigte URL folgt dem Formular; zum Übernehmen die Einstellungen speichern.",
+    "generic_webhook_public_base_invalid": "Die gespeicherte öffentliche Basis-URL \"%s\" ist nicht nutzbar (erwartet http(s)://host[:port][/pfad], ohne Benutzername oder Passwort, Port 1-65535). Der Adapter bildet die URLs stattdessen aus der Listen-Adresse; bitte auf dem Reiter \"HTTP-Server\" korrigieren.",
 
     "adapter_not_running": "Die Adapter-Instanz läuft nicht. Bitte starten und erneut versuchen.",
     "adapter_no_response": "Der Adapter hat nicht rechtzeitig geantwortet.",
