@@ -45,6 +45,10 @@ export function normalizePublicBaseUrl(raw: unknown): NormalizedPublicBaseUrl {
 	if (parsed.username || parsed.password) {
 		return { url: null, problem: 'credentials in the URL are not allowed' };
 	}
+	if (parsed.port === '0') {
+		// accepted by the URL parser, but nothing can be reached there
+		return { url: null, problem: 'port 0 is not a usable port (1-65535)' };
+	}
 	const path = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/+$/, '');
 	return { url: `${parsed.protocol}//${parsed.host}${path}` };
 }

@@ -32,6 +32,9 @@ describe('publicBaseUrl (U-10)', () => {
 		'https://user:pw@host',
 		'https://host/%2e%2e',
 		'https://',
+		// R3F-02: the parser takes port 0, but nothing listens there
+		'https://proxy.example.com:0',
+		'https://proxy.example.com:00/iob',
 	]) {
 		it(`refuses ${JSON.stringify(raw)} with a reason`, () => {
 			const result = normalizePublicBaseUrl(raw);

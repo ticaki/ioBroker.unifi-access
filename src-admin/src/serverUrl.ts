@@ -40,7 +40,8 @@ export function normalizePublicBaseUrl(raw: unknown): string | null {
 	} catch {
 		return null;
 	}
-	if (parsed.username || parsed.password) {
+	// port 0: accepted by the URL parser, but nothing can be reached there
+	if (parsed.username || parsed.password || parsed.port === '0') {
 		return null;
 	}
 	const path = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/+$/, '');

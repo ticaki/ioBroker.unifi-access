@@ -27,6 +27,8 @@ describe('normalizePublicBaseUrl', () => {
 			'https://proxy.example.com/a b',
 			'https://user:secret@proxy.example.com',
 			'https://proxy.example.com:99999',
+			'https://proxy.example.com:0',
+			'http://203.0.113.4:00/iob',
 			null,
 			undefined,
 			42,
