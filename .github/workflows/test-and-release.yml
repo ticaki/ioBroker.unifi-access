@@ -54,10 +54,39 @@ jobs:
           # install-command: 'npm install'
           build: true
 
+  # Type-checks, lints, tests and builds the admin custom components and the www panel.
+  # Both have their own package.json and are not covered by the ioBroker testing actions.
+  frontend-tests:
+    if: contains(github.event.head_commit.message, '[skip ci]') == false
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [src-admin, src-www]
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.x'
+          cache: npm
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run lint --if-present
+      - run: npm test
+      - run: npm run build
+
   # Deploys the final package to NPM. Requires npm trusted publishing to be set up
   # for the package — see https://docs.npmjs.com/trusted-publishers.
   deploy:
-    needs: [check-and-lint, adapter-tests]
+    needs: [check-and-lint, adapter-tests, frontend-tests]
 
     # Trigger this step only when a commit on any branch is tagged with a version number
     if: |
