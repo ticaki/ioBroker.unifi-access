@@ -109,6 +109,14 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 			expect(captured).to.have.length(1);
 		});
 
+		// the scheme name is case-insensitive (RFC 7235 section 2.1)
+		for (const scheme of ['basic', 'BASIC', 'bAsIc']) {
+			it(`accepts the scheme written as "${scheme}"`, async () => {
+				const header = basic('alarm', 'p:ss:word').replace('Basic', scheme);
+				expect((await post({ Authorization: header })).status).to.equal(200);
+			});
+		}
+
 		const denied: [string, Record<string, string>][] = [
 			['no Authorization header', {}],
 			['wrong password', { Authorization: basic('alarm', 'wrong') }],
@@ -156,8 +164,16 @@ describe('GenericWebhookHandler (alarm manager webhook)', () => {
 			expect(captured).to.have.length(1);
 		});
 
+		// the scheme name is case-insensitive (RFC 7235 section 2.1)
+		for (const header of ['bearer s3cr3t-token', 'BEARER s3cr3t-token', 'Bearer  s3cr3t-token']) {
+			it(`accepts "${header}"`, async () => {
+				expect((await post({ Authorization: header })).status).to.equal(200);
+			});
+		}
+
 		const denied: [string, Record<string, string>][] = [
 			['no Authorization header', {}],
+			['scheme glued to the token', { Authorization: 'Bearers3cr3t-token' }],
 			['wrong token', { Authorization: 'Bearer other-token' }],
 			['token prefix only', { Authorization: 'Bearer s3cr3t' }],
 			['token with suffix', { Authorization: 'Bearer s3cr3t-token-and-more' }],

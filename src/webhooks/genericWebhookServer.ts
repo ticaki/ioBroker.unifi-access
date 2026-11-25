@@ -161,11 +161,12 @@ export class GenericWebhookHandler {
 		if (!authHeader) {
 			return false;
 		}
+		const credentials = credentialsOf(authHeader, auth);
+		if (credentials === undefined) {
+			return false;
+		}
 		if (auth === 'basic') {
-			if (!authHeader.startsWith('Basic ')) {
-				return false;
-			}
-			const decoded = Buffer.from(authHeader.slice('Basic '.length), 'base64').toString('utf8');
+			const decoded = Buffer.from(credentials, 'base64').toString('utf8');
 			const colonIdx = decoded.indexOf(':');
 			const u = colonIdx >= 0 ? decoded.slice(0, colonIdx) : decoded;
 			const p = colonIdx >= 0 ? decoded.slice(colonIdx + 1) : '';
@@ -175,13 +176,23 @@ export class GenericWebhookHandler {
 			return userOk && passwordOk;
 		}
 		if (auth === 'bearer') {
-			if (!authHeader.startsWith('Bearer ')) {
-				return false;
-			}
-			return safeEqual(authHeader.slice('Bearer '.length), token ?? '');
+			return safeEqual(credentials, token ?? '');
 		}
 		return false;
 	}
+}
+
+/**
+ * The credentials of an `Authorization` header for the expected scheme. The scheme name is compared
+ * without regard to case and may be followed by more than one space (RFC 7235 section 2.1).
+ *
+ * @param header Value of the `Authorization` header
+ * @param scheme Expected scheme
+ * @returns The part after the scheme, or `undefined` for another scheme
+ */
+function credentialsOf(header: string, scheme: 'basic' | 'bearer'): string | undefined {
+	const match = /^([^\s]+) +(.*)$/s.exec(header);
+	return match && match[1].toLowerCase() === scheme ? match[2] : undefined;
 }
 
 /**
