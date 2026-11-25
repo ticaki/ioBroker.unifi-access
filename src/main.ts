@@ -273,6 +273,11 @@ class UnifiAccess extends utils.Adapter {
 		// a call that was ringing when the adapter stopped has ended since — its end event is lost
 		await this.clearActiveDoorbellCall();
 		await this.loadInstallationId();
+		// Stopped while starting (settings saved twice, stop during start): nothing may be started any
+		// more — onUnload has already run and would not clean it up (the process lives on in compact mode).
+		if (this.unloading) {
+			return;
+		}
 
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
@@ -314,14 +319,23 @@ class UnifiAccess extends utils.Adapter {
 		} catch {
 			// not valid JSON: the panel falls back to its defaults, an invalid write is reset to "{}"
 		}
+		if (this.unloading) {
+			return;
+		}
 
 		// The receivers listen before the controller is contacted: the webhook endpoint is registered
 		// at the end of a successful bootstrap and events may arrive right away.
 		await this.startSharedHttpServer();
+		if (this.unloading) {
+			return;
+		}
 		this.startWebhookRegistrationCheck();
 		await this.bootstrapAndConnect();
 		// sendTo requests that arrived meanwhile are answered now, with what was loaded
 		this.finishStartup();
+		if (this.unloading) {
+			return;
+		}
 		// Last: the Protect login may take long when the console does not answer; door control and
 		// events must not wait for it.
 		await this.initProtect(host, caCert);
@@ -380,6 +394,9 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		const password = await this.resolveProtectPassword();
+		if (this.unloading) {
+			return;
+		}
 		this.protectHttp = new ProtectHttp({
 			host,
 			port: normalizePort(cfg.protectPort, 443),
@@ -439,7 +456,7 @@ class UnifiAccess extends utils.Adapter {
 
 	private async tryProtectLogin(attempt: number): Promise<void> {
 		const protect = this.protectHttp;
-		if (!protect || this.protectLoginRunning) {
+		if (!protect || this.protectLoginRunning || this.unloading) {
 			return;
 		}
 		this.protectLoginRunning = true;
@@ -470,7 +487,11 @@ class UnifiAccess extends utils.Adapter {
 				);
 				this.protectHttp = null;
 			} else {
-				// rate limit / console not reachable (yet): try again with growing distance
+				// rate limit / console not reachable (yet): try again with growing distance — unless the
+				// instance stopped meanwhile (a login answered after the unload must not schedule a retry)
+				if (this.unloading) {
+					return;
+				}
 				const delayMs = Math.min(30_000 * 2 ** Math.min(attempt - 1, 10), 10 * 60_000);
 				const text = `Protect login failed (${kind}): ${errorText(err)} — retrying in ${Math.round(delayMs / 1000)} s.`;
 				if (attempt === 1) {
@@ -586,6 +607,9 @@ class UnifiAccess extends utils.Adapter {
 		const port = normalizePort(cfg.listenPort, 8095);
 		const ip = cfg.listenIp && cfg.listenIp !== '0.0.0.0' ? cfg.listenIp : undefined;
 		const tls = await this.loadTlsOptions();
+		if (this.unloading) {
+			return;
+		}
 		if (cfg.enableTls === true && !tls) {
 			// fail closed: credentials of the generic webhook and the webhook payloads must not travel in
 			// clear text because a certificate expired or was deleted (reason logged in loadTlsOptions)
@@ -698,6 +722,11 @@ class UnifiAccess extends utils.Adapter {
 
 		try {
 			await server.start();
+			if (this.unloading) {
+				// the instance stopped while the port was being bound: onUnload did not see this server
+				await server.stop();
+				return;
+			}
 			this.httpServer = server;
 			this.webhookReceiverActive = webhookHandlerMounted;
 		} catch (err) {
@@ -804,7 +833,12 @@ class UnifiAccess extends utils.Adapter {
 	 * can never cause a restart loop.
 	 */
 	private startWebhookRegistrationCheck(): void {
-		if (this.config.enableWebhooks !== true || !this.webhookReceiverActive || this.webhookCheckInterval) {
+		if (
+			this.config.enableWebhooks !== true ||
+			!this.webhookReceiverActive ||
+			this.webhookCheckInterval ||
+			this.unloading
+		) {
 			return;
 		}
 		this.webhookCheckInterval = this.setInterval(() => {

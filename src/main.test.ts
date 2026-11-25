@@ -28,6 +28,8 @@ import {
 	waitFor,
 	type FakeAdapter,
 } from '../test/mock';
+import { ProtectHttp } from './lib/protectHttp';
+import { SharedHttpServer } from './webserver/sharedHttpServer';
 
 const TOKEN = 'main-test-token';
 const MAIN = join(__dirname, 'main');
@@ -4245,6 +4247,179 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			await delay(50);
 			expect(mock.wsHandshakes, 'no reconnect after unload').to.have.length(handshakes);
 			expect(mock.requests, 'no API calls after unload').to.have.length(requests);
+		});
+
+		describe('stopped while the start is still running (RK-01)', () => {
+			let protect: ProtectStub;
+			const stubs: sinon.SinonStub[] = [];
+
+			beforeEach(async () => {
+				protect = new ProtectStub();
+				await protect.start();
+				listenPort = await portOtherThan(listenPort, protect.port);
+			});
+
+			afterEach(async () => {
+				for (const stub of stubs.splice(0)) {
+					stub.restore();
+				}
+				await protect.stop();
+			});
+
+			const config = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+				controllerHost: '127.0.0.1',
+				controllerPort: mock.port,
+				apiToken: TOKEN,
+				wsReconnectDelay: 0.05,
+				listenPort,
+				listenIp: '127.0.0.1',
+				enableWebhooks: true,
+				enableThumbnailServer: true,
+				forwardEvents: [],
+				enableProtect: true,
+				protectUsername: 'viewer',
+				protectPassword: 'protect-secret',
+				protectPort: protect.port,
+				...overrides,
+			});
+
+			/**
+			 * Start an instance and stop it at the point `arm` picks; afterwards nothing may be left running.
+			 *
+			 * @param arm Installs the trigger; calls `stop()` at the moment the instance is to be stopped
+			 * @param overrides Config overrides
+			 */
+			async function stopDuringStart(
+				arm: (instance: FakeAdapter, stop: () => void) => void,
+				overrides: Record<string, unknown> = {},
+			): Promise<FakeAdapter> {
+				const instance = createAdapterWithFakeCore(MAIN, config(overrides));
+				let unloaded: Promise<void> | undefined;
+				arm(instance, () => {
+					unloaded ??= instance.fireUnload();
+				});
+				const ready = instance.fireReady();
+				await ready;
+				expect(unloaded, 'the stop was triggered during the start').to.not.equal(undefined);
+				await unloaded;
+				await delay(50);
+				return instance;
+			}
+
+			/**
+			 * Stop the instance right before the given method of the fake core runs with matching arguments.
+			 *
+			 * @param inst The adapter
+			 * @param method Method of the fake core
+			 * @param when Decides by the arguments whether this call is the trigger
+			 * @param stop Stops the instance
+			 */
+			function stopBefore(
+				inst: FakeAdapter,
+				method: string,
+				when: (args: unknown[]) => boolean,
+				stop: () => void,
+			): void {
+				const target = inst as unknown as Record<string, (...args: unknown[]) => unknown>;
+				const original = target[method].bind(inst);
+				target[method] = (...args: unknown[]) => {
+					if (when(args)) {
+						stop();
+					}
+					return original(...args);
+				};
+			}
+
+			async function expectNothingRunning(instance: FakeAdapter): Promise<void> {
+				expect(await isPortFree(listenPort), 'HTTP port released').to.equal(true);
+				expect(protect.logins, 'no Protect login after the stop').to.deep.equal([]);
+				expect(mock.wsHandshakes, 'no WebSocket after the stop').to.have.length(0);
+				expect(clock.countTimers(), 'no timer after the stop').to.equal(0);
+				expect(instance.timers.size + instance.intervals.size).to.equal(0);
+				const requests = mock.requests.length;
+				await clock.tickAsync(20 * 60_000);
+				await delay(30);
+				expect(mock.requests, 'no API call after the stop').to.have.length(requests);
+				expect(protect.logins).to.deep.equal([]);
+			}
+
+			it('stopped right at the beginning: no server, no WebSocket, no Protect login', async () => {
+				const instance = await stopDuringStart((inst, stop) => {
+					// the first await of the start: the stop arrives before anything was set up
+					stopBefore(inst, 'setState', () => true, stop);
+				});
+				expect(mock.requests).to.have.length(0);
+				await expectNothingRunning(instance);
+			});
+
+			it('stopped while the TLS certificates are loaded: the server is not started', async () => {
+				const pair = createSelfSignedCert();
+				const instance = await stopDuringStart(
+					(inst, stop) => {
+						inst.certificates = { defaultPublic: pair.cert, defaultPrivate: pair.key };
+						stopBefore(inst, 'getCertificatesAsync', () => true, stop);
+					},
+					{ enableTls: true, certPublic: 'defaultPublic', certPrivate: 'defaultPrivate' },
+				);
+				await expectNothingRunning(instance);
+			});
+
+			it('stopped while the port is being bound: the server is closed again at once', async () => {
+				const instance = await stopDuringStart((_inst, stop) => {
+					const original = SharedHttpServer.prototype.start;
+					stubs.push(
+						sinon.stub(SharedHttpServer.prototype, 'start').callsFake(async function (
+							this: SharedHttpServer,
+						) {
+							stop();
+							await original.call(this);
+						}),
+					);
+				});
+				await expectNothingRunning(instance);
+			});
+
+			it('stopped while the controller state is loaded: no WebSocket, no Protect login', async () => {
+				const instance = await stopDuringStart((inst, stop) => {
+					stopBefore(
+						inst,
+						'setObjectNotExistsAsync',
+						([id]) => String(id).includes(`doors.${DOOR_A2}`),
+						stop,
+					);
+				});
+				await expectNothingRunning(instance);
+			});
+
+			it('stopped while the Protect password is read: no Protect login', async () => {
+				const instance = await stopDuringStart((inst, stop) => {
+					stopBefore(inst, 'getForeignObjectAsync', ([id]) => id === INSTANCE_OBJECT, stop);
+				});
+				// the controller was reached before the stop; the WebSocket it opened is closed again
+				await waitFor(() => mock.wsClients.size === 0, { description: 'WebSocket closed' });
+				expect(await isPortFree(listenPort)).to.equal(true);
+				expect(protect.logins).to.deep.equal([]);
+				expect(clock.countTimers()).to.equal(0);
+			});
+
+			it('stopped during a failing Protect login: no retry is planned and nothing is reported', async () => {
+				protect.failLogins(503, 5);
+				const instance = await stopDuringStart((_inst, stop) => {
+					const original = ProtectHttp.prototype.login;
+					stubs.push(
+						sinon.stub(ProtectHttp.prototype, 'login').callsFake(async function (this: ProtectHttp) {
+							stop();
+							await original.call(this);
+						}),
+					);
+				});
+				expect(protect.logins.map(l => l.status)).to.deep.equal([503]);
+				expect(instance.log.of('warn').filter(w => w.includes('Protect login failed'))).to.deep.equal([]);
+				const logins = protect.logins.length;
+				await clock.tickAsync(20 * 60_000);
+				await delay(30);
+				expect(protect.logins, 'no login retry after the stop').to.have.length(logins);
+			});
 		});
 
 		it('cancels a pending bootstrap retry', async () => {
