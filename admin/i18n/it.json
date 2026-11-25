@@ -14,7 +14,7 @@
 	"listenIp_help": "Indirizzo IP su cui mettersi in ascolto. 0.0.0.0 ascolta su tutte le interfacce.",
 	"publicBaseUrl": "URL di base pubblico (facoltativo)",
 	"publicBaseUrl_help": "Indirizzo con cui il controller e i browser raggiungono questo server HTTP, ad es. https://iobroker.example.com dietro un reverse proxy o un port forwarding. Usato per l'URL del webhook registrato e per tutti gli URL di miniature e telecamere. Vuoto = composto da IP di ascolto (o primo indirizzo di rete) e porta.",
-	"publicBaseUrl_invalid": "Atteso http(s)://host[:porta][/percorso], senza query, frammento o spazi.",
+	"publicBaseUrl_invalid": "Atteso http(s)://host[:porta][/percorso], senza query, frammento, spazi, nome utente o password; porta 1-65535.",
 	"tls_server_header": "TLS per le connessioni in entrata",
 	"tls_server_info": "Attivare solo se non è presente un reverse proxy con terminazione TLS davanti. I certificati provengono dall'archivio certificati di ioBroker (Impostazioni di sistema → Certificati).",
 	"enableTls": "Attiva TLS",

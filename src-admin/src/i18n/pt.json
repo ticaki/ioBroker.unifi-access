@@ -41,6 +41,8 @@
     "generic_webhook_server_not_running": "O servidor HTTP do adaptador não está em execução neste momento, pelo que este URL ainda não responde. Guarde as definições e, se continuar sem iniciar, verifique o registo da instância (porta em uso?).",
     "generic_webhook_tls_inactive": "O TLS está ativado, mas não foi possível carregar os certificados (%s). O servidor integrado só é iniciado depois de isto ser corrigido.",
     "generic_webhook_public_base_unsaved": "O URL base público no formulário difere do guardado. O URL apresentado segue o formulário; guarde as definições para o aplicar.",
+    "generic_webhook_unsaved": "A porta ou o caminho no formulário diferem das definições guardadas. O URL mostrado segue o formulário; guarde as definições para o aplicar.",
+    "generic_webhook_public_base_invalid": "O URL de base público guardado \"%s\" não é utilizável (esperado http(s)://host[:port][/path], sem utilizador nem palavra-passe, porta 1-65535). O adaptador constrói os URLs a partir do endereço de escuta; corrija-o no separador \"HTTP server\".",
 
     "adapter_not_running": "A instância do adaptador não está em execução. Inicie-a e tente novamente.",
     "adapter_no_response": "O adaptador não respondeu a tempo.",

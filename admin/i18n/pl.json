@@ -14,7 +14,7 @@
 	"listenIp_help": "Adres IP, na którym ma nasłuchiwać. 0.0.0.0 oznacza wszystkie interfejsy.",
 	"publicBaseUrl": "Publiczny bazowy URL (opcjonalnie)",
 	"publicBaseUrl_help": "Adres, pod którym kontroler i przeglądarki osiągają ten serwer HTTP, np. https://iobroker.example.com za reverse proxy lub przekierowaniem portów. Używany dla zarejestrowanego adresu URL webhooka oraz wszystkich adresów URL miniatur i kamer. Puste = tworzony z adresu IP nasłuchu (lub pierwszego adresu sieciowego) i portu.",
-	"publicBaseUrl_invalid": "Oczekiwano http(s)://host[:port][/ścieżka] – bez zapytania, fragmentu i spacji.",
+	"publicBaseUrl_invalid": "Oczekiwano http(s)://host[:port][/ścieżka] – bez zapytania, fragmentu, spacji, nazwy użytkownika i hasła; port 1-65535.",
 	"tls_server_header": "TLS dla połączeń przychodzących",
 	"tls_server_info": "Włącz tylko jeśli przed adapterem nie ma odwrotnego proxy z terminacją TLS. Certyfikaty pobierane są z magazynu certyfikatów ioBroker (Ustawienia systemowe → Certyfikaty).",
 	"enableTls": "Włącz TLS",

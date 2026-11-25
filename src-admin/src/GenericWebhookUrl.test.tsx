@@ -211,6 +211,7 @@ describe('parseServerInfo', () => {
 		expect(parseServerInfo(TLS_FAILED)).toEqual({
 			running: false,
 			scheme: null,
+			port: 8095,
 			tlsEnabled: true,
 			tlsActive: false,
 			tlsError: 'certificate or private key is empty',
@@ -455,5 +456,88 @@ describe('GenericWebhookUrl with a public base URL', () => {
 		expect(await screen.findByText('Webhook URL(s)')).toBeTruthy();
 		expect(urls()).toEqual(['https://proxy.example.com/iob/alarm']);
 		expect(ALERTS()).toEqual(['The adapter instance is not running. Start it and try again.']);
+	});
+});
+
+describe('GenericWebhookUrl: hints about the shown URL (RF-05, RF-06)', () => {
+	const DATA = {
+		enableGenericWebhook: true,
+		listenIp: '0.0.0.0',
+		listenPort: 8095,
+		genericWebhookPath: '/alarm',
+		publicBaseUrl: '',
+	};
+	const ALERTS = (): string[] => screen.queryAllByRole('alert').map(alert => alert.textContent ?? '');
+	const UNSAVED =
+		'Port or listen path in the form differ from the saved settings. The URL shown follows the form; save the settings to apply it.';
+	const answers = { getNetworkInterfaces: { addresses: ['192.0.2.5'] }, getServerInfo: HTTP_SERVER };
+
+	it('parseServerInfo takes the port of the running configuration', () => {
+		expect(parseServerInfo(HTTP_SERVER)?.port).toBe(8095);
+		expect(parseServerInfo({ ...HTTP_SERVER, port: '8095' })?.port).toBeNull();
+		expect(parseServerInfo({ ...HTTP_SERVER, port: 70_000 })?.port).toBeNull();
+	});
+
+	it('an unsaved port: the URL follows the form and the page says it is not saved yet', async () => {
+		const { props } = makeHarness({ data: { ...DATA, listenPort: 9000 }, originalData: DATA, answers });
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.5:9000/alarm']));
+		await waitFor(() => expect(ALERTS()).toEqual([UNSAVED]));
+	});
+
+	it('an unsaved listen path as well', async () => {
+		const { props } = makeHarness({
+			data: { ...DATA, genericWebhookPath: 'door/bell' },
+			originalData: DATA,
+			answers,
+		});
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.5:8095/door/bell']));
+		await waitFor(() => expect(ALERTS()).toEqual([UNSAVED]));
+	});
+
+	it('no hint for the same port and a path that normalises to the saved one', async () => {
+		const { props, socket } = makeHarness({
+			data: { ...DATA, listenPort: '8095', genericWebhookPath: ' //alarm ' },
+			originalData: DATA,
+			answers,
+		});
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(socket.sendTo).toHaveBeenCalledWith('unifi-access.0', 'getServerInfo', {}));
+		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.5:8095/alarm']));
+		expect(ALERTS()).toEqual([]);
+	});
+
+	it('the port of the running server counts: saved but not yet running with it is "not saved"', async () => {
+		const { props } = makeHarness({
+			data: { ...DATA, listenPort: 9000 },
+			originalData: { ...DATA, listenPort: 9000 },
+			answers,
+		});
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(ALERTS()).toEqual([UNSAVED]));
+	});
+
+	it.each(['https://user:pw@proxy.example.com', 'https://proxy.example.com:99999', 'https://%zz'])(
+		'a saved public base URL the adapter cannot use (%s) is named instead of silently showing the listen URL',
+		async saved => {
+			const data = { ...DATA, publicBaseUrl: saved };
+			const { props } = makeHarness({ data, answers });
+			render(<GenericWebhookUrl {...props} />);
+			await waitFor(() => expect(urls()).toEqual(['http://192.0.2.5:8095/alarm']));
+			await waitFor(() =>
+				expect(ALERTS()).toEqual([
+					`The saved public base URL "${saved}" is not usable (expected http(s)://host[:port][/path], no user name or password, port 1-65535). The adapter builds the URLs from the listen address instead; correct it on the "HTTP server" tab.`,
+				]),
+			);
+		},
+	);
+
+	it('no such hint for an empty or usable saved value', async () => {
+		const { props, socket } = makeHarness({ data: { ...DATA, publicBaseUrl: '  /  ' }, answers });
+		render(<GenericWebhookUrl {...props} />);
+		await waitFor(() => expect(socket.sendTo).toHaveBeenCalledWith('unifi-access.0', 'getServerInfo', {}));
+		await waitFor(() => expect(urls()).toEqual(['http://192.0.2.5:8095/alarm']));
+		expect(ALERTS()).toEqual([]);
 	});
 });

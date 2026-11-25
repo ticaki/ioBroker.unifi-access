@@ -14,7 +14,7 @@
 	"listenIp_help": "IP address to bind to. 0.0.0.0 listens on all interfaces.",
 	"publicBaseUrl": "Public base URL (optional)",
 	"publicBaseUrl_help": "Address under which the controller and browsers reach this HTTP server, e.g. https://iobroker.example.com behind a reverse proxy or port forwarding. Used for the registered webhook URL and all thumbnail and camera URLs. Empty = built from listen IP (or the first network address) and port.",
-	"publicBaseUrl_invalid": "Expected http(s)://host[:port][/path] — no query, fragment or blanks.",
+	"publicBaseUrl_invalid": "Expected http(s)://host[:port][/path] — no query, fragment, blanks, user name or password; port 1-65535.",
 	"tls_server_header": "TLS for incoming connections",
 	"tls_server_info": "Enable only if you do not have a TLS-terminating reverse proxy in front. Certificates are taken from the ioBroker certificate store (System settings → Certificates).",
 	"enableTls": "Enable TLS",

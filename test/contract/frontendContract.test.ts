@@ -29,6 +29,7 @@ import {
 } from '../mock';
 import { featuresFor, type UnifiDeviceModel } from '../../src/lib/deviceModels';
 import { normalizePort } from '../../src/lib/controlValues';
+import { DOORBELL_REASONS } from '../../src/lib/eventNormalizer';
 import { normalizePublicBaseUrl } from '../../src/lib/publicBaseUrl';
 import { normalizeWebhookPath, reservedWebhookPathOwner } from '../../src/webhooks/genericWebhookServer';
 
@@ -379,6 +380,59 @@ describe('contract adapter ↔ frontend (sendTo answers, error codes, state ids)
 			}
 		});
 
+		it('the validator of publicBaseUrl accepts exactly what the adapter uses (RF-05)', () => {
+			const validator = jsonConfigValidator('_serverTab', 'publicBaseUrl');
+			const values = [
+				'',
+				'   ',
+				'/',
+				'https://proxy.example.com',
+				' https://proxy.example.com/iob/// ',
+				'HTTP://Proxy.Example.COM:80/a/b',
+				'https://proxy.example.com:443',
+				'http://203.0.113.4:18095',
+				'http://[2001:db8::1]:8095/x',
+				'https://proxy.example.com:65535',
+				'https://proxy.example.com:65536',
+				'https://proxy.example.com:99999',
+				'https://user:pw@proxy.example.com',
+				'https://user@proxy.example.com',
+				'https://:pw@proxy.example.com',
+				'https://proxy.example.com/?a=1',
+				'https://proxy.example.com/#x',
+				'https://proxy.example.com/a b',
+				'https://proxy.example.com/a%20b',
+				'ftp://proxy.example.com',
+				'proxy.example.com',
+				'https://',
+				'https://%zz',
+				'https://exa mple.com',
+				'https://[::1',
+			];
+			for (const value of values) {
+				// a value the adapter ignores without a warning (empty after trimming) can be saved as well
+				expect(validator({ publicBaseUrl: value }), JSON.stringify(value)).to.equal(
+					normalizePublicBaseUrl(value).problem === undefined,
+				);
+			}
+			// and the admin page applies the same rule (shown URL ↔ validator)
+			const frontend = loadFrontendModule<FrontendServerUrl>('src-admin', 'src', 'serverUrl.ts');
+			for (const value of values) {
+				const usable = frontend.normalizePublicBaseUrl(value) !== null;
+				if (usable) {
+					expect(validator({ publicBaseUrl: value }), JSON.stringify(value)).to.equal(true);
+				}
+			}
+		});
+
+		it('getServerInfo.port is the port the admin page compares the form with (RF-06)', async () => {
+			const frontend = loadFrontendModule<FrontendServerUrl>('src-admin', 'src', 'serverUrl.ts');
+			expect([...interfaceFields(adminWebhookUrl, 'ServerInfo').keys()]).to.include('port');
+			const instance = await start({ listenPort: ` ${listenPort} ` });
+			const info = await instance.request('getServerInfo');
+			expect(info.port).to.equal(frontend.normalizePort(` ${listenPort} `));
+		});
+
 		it('the path validator refuses exactly the paths the adapter does not start the generic webhook on (RK-03)', () => {
 			const validator = jsonConfigValidator('_genericWebhookTab', 'genericWebhookPath');
 			const FORMAT = /^\/?(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]*$/;
@@ -593,6 +647,98 @@ describe('contract adapter ↔ frontend (sendTo answers, error codes, state ids)
 			];
 			const adapter = models.filter(model => featuresFor(model).includes('event-thumbnail')).sort();
 			expect(panel).to.deep.equal(adapter);
+		});
+
+		describe('event log ↔ events the adapter writes (RF contract)', () => {
+			const card = source('src-www', 'src', 'components', 'EventLogCard.tsx');
+			const mainSource = source('src', 'main.ts');
+
+			it('every event type the adapter logs has a label in the panel', () => {
+				const set = /const USER_RELEVANT_EVENTS = new Set\(\[([^\]]*)\]\)/.exec(mainSource);
+				expect(set, 'USER_RELEVANT_EVENTS').to.not.equal(null);
+				const logged = [...set![1].matchAll(/'([\w.]+)'/g)].map(m => m[1]).sort();
+				expect(logged.length).to.be.greaterThan(10);
+				const block = /const EVENT_LABELS[^=]*=\s*\{([\s\S]*?)\n\};/.exec(card);
+				expect(block, 'EVENT_LABELS').to.not.equal(null);
+				const labels = [...block![1].matchAll(/^\s*'([\w.]+)'\s*:/gm)].map(m => m[1]).sort();
+				expect(labels).to.deep.equal(logged);
+			});
+
+			it('every subtype of a doorbell end and of the door sensor has a label', () => {
+				const labels = new Set(objectLiteralKeys(card, 'SUBTYPE_LABELS'));
+				for (const reason of Object.values(DOORBELL_REASONS)) {
+					expect(labels.has(reason), reason).to.equal(true);
+				}
+				for (const status of ['open', 'close']) {
+					expect(labels.has(status), status).to.equal(true);
+				}
+			});
+
+			for (const [result, granted] of [
+				['Access Granted', true],
+				['BLOCKED', false],
+				['Access Denied', false],
+			] as [string, boolean][]) {
+				it(`access.door.unlock with result "${result}" reaches the panel with granted ${granted}`, async () => {
+					const instance = await start({ enableThumbnailServer: false });
+					await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+					const [answer] = await mock.deliverWebhook(
+						fixtures.webhookEvents.doorUnlock({
+							door: mock.findDoor(DOOR_3855)!,
+							device: mock.findDevice(fixtures.IDS.DEVICE_HUB)!,
+							object: { result },
+						}),
+					);
+					expect(answer.status).to.equal(200);
+					await waitFor(() => typeof instance.val('events.last') === 'string', { description: 'logged' });
+					const [entry] = JSON.parse(instance.val('events.last') as string) as Record<string, unknown>[];
+					expect(entry).to.include({ type: 'access.door.unlock', granted, subtype: result });
+				});
+			}
+
+			it('the panel decides "Access denied" by the field granted, not by its own copy of the result rule', () => {
+				expect(card).to.match(/e\.type === 'access\.door\.unlock' && e\.granted === false/);
+				// the rule itself lives in the adapter (isAccessGranted), not in a copy in the panel
+				expect(card).to.not.match(/denied\|blocked/i);
+				expect(card).to.not.contain("'BLOCKED'");
+				expect(interfaceFields(source('src', 'lib', 'types.ts'), 'NormalizedEvent').get('granted')).to.equal(
+					true,
+				);
+			});
+
+			it('ts of events.last is the time of its last write; the panel adds the alive state of the instance (RF-02)', async () => {
+				const instance = await start();
+				await waitFor(() => instance.val('info.webhookRegistered') === true, { description: 'registered' });
+				const before = Date.now();
+				await mock.deliverWebhook(
+					fixtures.webhookEvents.doorUnlock({
+						door: mock.findDoor(DOOR_3855)!,
+						device: mock.findDevice(fixtures.IDS.DEVICE_HUB)!,
+					}),
+				);
+				await waitFor(() => typeof instance.val('events.last') === 'string', { description: 'logged' });
+				const state = instance.states.get(`${NS}.events.last`)!;
+				expect(state.ts).to.be.at.least(before).and.at.most(Date.now());
+				// every new event and every attached snapshot rewrites the list: a list arriving while the page is
+				// open was just written, an old one is recognised by the alive state (renewed by js-controller)
+				expect(card).to.contain('system.adapter.${ADAPTER_NAMESPACE}.alive');
+				expect(card).to.match(/timeEvents\(parseEvents\(last\?\.val\), last\?\.ts, receivedAt, alive\?\.ts\)/);
+			});
+
+			it('the lock rule types the panel describes are the documented ones (schedule on purpose not)', () => {
+				const libraryText = source('src', 'lib', 'library.ts');
+				const documented = /Active temporary lock rule \(([^;]+);/.exec(libraryText);
+				expect(documented).to.not.equal(null);
+				const types = documented![1]
+					.split(',')
+					.map(t => t.trim())
+					.sort();
+				expect(types).to.deep.equal(['custom', 'keep_lock', 'keep_unlock', 'lock_early', 'schedule']);
+				const doorCard = source('src-www', 'src', 'components', 'DoorCard.tsx');
+				const body = /function describeLockRule[\s\S]*?\n\}/.exec(doorCard)![0];
+				const cases = [...body.matchAll(/case '([\w]+)':/g)].map(m => m[1]).sort();
+				expect([...cases, 'schedule'].sort()).to.deep.equal(types);
+			});
 		});
 
 		it('the event fields the event log reads are fields of the events the adapter writes', () => {

@@ -41,6 +41,8 @@
     "generic_webhook_server_not_running": "Serwer HTTP adaptera obecnie nie działa, więc ten adres URL jeszcze nie odpowiada. Zapisz ustawienia, a jeśli nadal się nie uruchamia, sprawdź log instancji (port zajęty?).",
     "generic_webhook_tls_inactive": "TLS jest włączony, ale nie udało się wczytać certyfikatów (%s). Wbudowany serwer nie zostanie uruchomiony, dopóki nie zostanie to naprawione.",
     "generic_webhook_public_base_unsaved": "Publiczny bazowy URL w formularzu różni się od zapisanego. Wyświetlany URL odpowiada formularzowi; zapisz ustawienia, aby go zastosować.",
+    "generic_webhook_unsaved": "Port lub ścieżka w formularzu różnią się od zapisanych ustawień. Pokazany URL odpowiada formularzowi; zapisz ustawienia, aby go zastosować.",
+    "generic_webhook_public_base_invalid": "Zapisany publiczny bazowy URL \"%s\" jest nieużyteczny (oczekiwano http(s)://host[:port][/path], bez nazwy użytkownika i hasła, port 1-65535). Adapter buduje adresy URL z adresu nasłuchu; popraw go na karcie \"HTTP server\".",
 
     "adapter_not_running": "Instancja adaptera nie jest uruchomiona. Uruchom ją i spróbuj ponownie.",
     "adapter_no_response": "Adapter nie odpowiedział na czas.",

@@ -14,7 +14,7 @@
 	"listenIp_help": "IP-Adresse, auf der gelauscht wird. 0.0.0.0 = alle Interfaces.",
 	"publicBaseUrl": "Öffentliche Basis-URL (optional)",
 	"publicBaseUrl_help": "Adresse, unter der Controller und Browser diesen HTTP-Server erreichen, z. B. https://iobroker.example.com hinter einem Reverse-Proxy oder einer Portweiterleitung. Wird für die registrierte Webhook-URL und alle Thumbnail- und Kamera-URLs verwendet. Leer = aus Listen-IP (bzw. erster Netzwerkadresse) und Port gebildet.",
-	"publicBaseUrl_invalid": "Erwartet: http(s)://host[:port][/pfad] – ohne Query, Fragment oder Leerzeichen.",
+	"publicBaseUrl_invalid": "Erwartet: http(s)://host[:port][/pfad] – ohne Query, Fragment, Leerzeichen, Benutzername oder Passwort; Port 1-65535.",
 	"tls_server_header": "TLS für eingehende Verbindungen",
 	"tls_server_info": "Nur aktivieren, wenn kein TLS-Reverse-Proxy davorgeschaltet ist. Zertifikate stammen aus der ioBroker-Zertifikatsverwaltung (Systemeinstellungen → Zertifikate).",
 	"enableTls": "TLS aktivieren",

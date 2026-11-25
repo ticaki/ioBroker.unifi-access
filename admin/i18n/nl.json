@@ -14,7 +14,7 @@
 	"listenIp_help": "IP-adres om naar te luisteren. 0.0.0.0 luistert op alle interfaces.",
 	"publicBaseUrl": "Openbare basis-URL (optioneel)",
 	"publicBaseUrl_help": "Adres waaronder de controller en browsers deze HTTP-server bereiken, bijv. https://iobroker.example.com achter een reverse proxy of port forwarding. Wordt gebruikt voor de geregistreerde webhook-URL en alle miniatuur- en camera-URL's. Leeg = samengesteld uit luister-IP (of het eerste netwerkadres) en poort.",
-	"publicBaseUrl_invalid": "Verwacht http(s)://host[:poort][/pad], zonder query, fragment of spaties.",
+	"publicBaseUrl_invalid": "Verwacht http(s)://host[:poort][/pad], zonder query, fragment, spaties, gebruikersnaam of wachtwoord; poort 1-65535.",
 	"tls_server_header": "TLS voor inkomende verbindingen",
 	"tls_server_info": "Alleen inschakelen als er geen TLS-terminerende reverse proxy ervoor staat. Certificaten komen uit het certificatenarchief van ioBroker (Systeeminstellingen → Certificaten).",
 	"enableTls": "TLS inschakelen",

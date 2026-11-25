@@ -14,7 +14,7 @@
 	"listenIp_help": "Adresse IP sur laquelle écouter. 0.0.0.0 écoute sur toutes les interfaces.",
 	"publicBaseUrl": "URL de base publique (facultatif)",
 	"publicBaseUrl_help": "Adresse sous laquelle le contrôleur et les navigateurs atteignent ce serveur HTTP, p. ex. https://iobroker.example.com derrière un proxy inverse ou une redirection de port. Utilisée pour l'URL du webhook enregistrée et pour toutes les URL de miniatures et de caméras. Vide = construite à partir de l'IP d'écoute (ou de la première adresse réseau) et du port.",
-	"publicBaseUrl_invalid": "Attendu : http(s)://hôte[:port][/chemin], sans requête, fragment ni espaces.",
+	"publicBaseUrl_invalid": "Attendu : http(s)://hôte[:port][/chemin], sans requête, fragment, espaces, nom d'utilisateur ni mot de passe ; port 1-65535.",
 	"tls_server_header": "TLS pour les connexions entrantes",
 	"tls_server_info": "À activer uniquement s'il n'y a pas de proxy inverse avec terminaison TLS en amont. Les certificats proviennent du magasin de certificats de ioBroker (Paramètres système → Certificats).",
 	"enableTls": "Activer TLS",

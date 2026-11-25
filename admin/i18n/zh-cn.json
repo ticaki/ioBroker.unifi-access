@@ -14,7 +14,7 @@
 	"listenIp_help": "要监听的 IP 地址。0.0.0.0 表示监听所有接口。",
 	"publicBaseUrl": "公共基础 URL（可选）",
 	"publicBaseUrl_help": "控制器和浏览器访问此 HTTP 服务器所用的地址，例如反向代理或端口转发后的 https://iobroker.example.com。用于注册的 Webhook URL 以及所有缩略图和摄像头 URL。留空 = 由监听 IP（或第一个网络地址）和端口生成。",
-	"publicBaseUrl_invalid": "应为 http(s)://主机[:端口][/路径]，不含查询、片段或空格。",
+	"publicBaseUrl_invalid": "应为 http(s)://主机[:端口][/路径]，不含查询、片段、空格、用户名或密码；端口 1-65535。",
 	"tls_server_header": "传入连接的 TLS",
 	"tls_server_info": "仅在前端没有 TLS 终止反向代理时启用。证书取自 ioBroker 证书库(系统设置 → 证书)。",
 	"enableTls": "启用 TLS",

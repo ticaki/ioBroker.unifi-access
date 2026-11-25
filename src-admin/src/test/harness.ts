@@ -26,6 +26,8 @@ export interface HarnessOptions {
 	instance?: number;
 	/** Answer of the adapter per command */
 	answers?: Record<string, unknown>;
+	/** `native` as it is saved (default: the same as `data`, i.e. nothing changed in the form) */
+	originalData?: Record<string, unknown>;
 }
 
 /** Load the real English texts, so a test fails if a component uses a key that does not exist */
@@ -65,7 +67,7 @@ export function makeHarness(options: HarnessOptions = {}): Harness {
 		attr: options.attr,
 		changed: false,
 		data,
-		originalData: { ...data },
+		originalData: { ...(options.originalData ?? data) },
 		onChange,
 		onError: vi.fn(),
 		schema: { type: 'custom', name: 'test', url: 'custom/customComponents.js', guiApi: 2 },
