@@ -177,6 +177,8 @@ Der Mock legt deshalb fest (und ist an den genannten Stellen umstellbar):
 | `online` in Webhook-Geräteblöcken | Default `true` (die Doku-Beispiele zeigen durchgehend `false`); pro Event überschreibbar |
 | Webhook-Events ohne Payload-Beispiel | `unlock_schedule.*`, `temporary_unlock.*`, `visitor.status.changed` nutzen das Layout der dokumentierten Beispiele |
 | Nicht-JSON-Frames auf dem WebSocket | sendet der Mock nur auf Anforderung (`sendRaw` / `/__mock/ws/raw`) |
+| Protect-Verknüpfung im System-Log | **nicht dokumentiert:** Treffer mit Ziel `{type: "camera event", id: "protect_<cameraId>_<eventId>"}` (in 9.1.1 stehen nur `UAH`, `device_config`, `door`, `floor`, `building`). Der Adapter ordnet ein solches Ziel nur zu, wenn derselbe Treffer auch `{type: "door", id: <Tür des Ereignisses>}` enthält. Die Tests (`systemLogHits` in `src/main.test.ts`) belegen die Verdrahtung, nicht das Verhalten einer echten Konsole |
+| Gerätetyp der UA Ultra | **nicht dokumentiert:** die Fixture nutzt `type: "UA-ULTRA"` (dokumentiert sind nur `UAH`, `UDA-LITE`, `UA-G2-PRO`, `UGT`); die Erkennung in `deviceModels.ts` beruht auf `includes('ultra')` |
 
 Nicht nachgebildet: alle Endpoints, die der Adapter nicht nutzt (Benutzer-/Besucher-Verwaltung,
 Zutrittsrichtlinien, NFC/PIN, Identity, Zertifikats-Upload), Rate-Limiting (429) und Berechtigungs-Scopes

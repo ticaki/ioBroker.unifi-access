@@ -2576,6 +2576,9 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 		describe('with the Protect integration', () => {
 			let protect: ProtectStub;
 			const CAMERA = '66a1b2c3d4e5f60718293a4b';
+			// ASSUMPTION (T-06): the target type "camera event" with the id "protect_<camera>_<event>" is not part
+			// of the API reference (9.1.1 lists UAH, device_config, door, floor, building). These tests prove the
+			// adapter's wiring, not the behaviour of a real console — see test/mock/README.md, "Annahmen".
 			const cameraHit = (eventId = 'evt_77'): unknown => ({
 				_source: {
 					target: [
@@ -2638,6 +2641,94 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				const response = await httpRequest({ url: events()[0].protectSnapshotUrl as string });
 				expect(response.status).to.equal(200);
 				expect(response.body.equals(protect.snapshot)).to.equal(true);
+			});
+
+			// K-05: two doors opened within seconds — the lookup window contains the entries of both
+			describe('camera events belong to the door of the event', () => {
+				const OTHER_CAMERA = '77b2c3d4e5f60718293a4b5c';
+				const hitFor = (doorId: string, camera: string, eventId: string, published?: number): unknown => ({
+					_source: {
+						event: published === undefined ? undefined : { published },
+						target: [
+							{ type: 'door', id: doorId },
+							{ type: 'camera event', id: `protect_${camera}_${eventId}` },
+						],
+					},
+				});
+				const snapshotRequests = (): string[] =>
+					protect.requests.filter(r => r.url.includes('/snapshot')).map(r => r.url);
+
+				async function unlockAndLookUp(doorId: string): Promise<number> {
+					await mock.deliverWebhook(fixtures.webhookEvents.doorUnlock({ door: door(doorId), device: hub() }));
+					await waitFor(() => events().length === 1, { description: 'event logged' });
+					const ts = events()[0].ts;
+					mock.systemLogHits = mock.systemLogHits.map(h =>
+						JSON.parse(
+							JSON.stringify(h).replace(
+								/"published":"TS([+-]\d+)"/g,
+								(_m, d) => `"published":${ts + Number(d)}`,
+							),
+						),
+					);
+					await clock.tickAsync(3000);
+					await waitFor(() => mock.findRequests({ path: '/system/logs' }).length >= 1, {
+						description: 'query',
+					});
+					return ts;
+				}
+
+				it('the event of door B gets the camera of door B and exactly one snapshot is fetched', async () => {
+					await startWithProtect();
+					mock.systemLogHits = [hitFor(DOOR_A2, OTHER_CAMERA, 'evt_a'), hitFor(DOOR_3855, CAMERA, 'evt_b')];
+					const before = snapshotRequests().length;
+					await unlockAndLookUp(DOOR_3855);
+					await waitFor(() => events()[0].protectSnapshotUrl !== undefined, {
+						description: 'snapshot attached',
+					});
+					expect(events()[0]).to.include({ protectCameraId: CAMERA, protectEventId: 'evt_b' });
+					expect(snapshotRequests().slice(before)).to.deep.equal([
+						`/proxy/protect/api/cameras/${CAMERA}/snapshot`,
+					]);
+				});
+
+				it('only the entry of another door: nothing is attached (rather none than a wrong picture)', async () => {
+					await startWithProtect();
+					mock.systemLogHits = [hitFor(DOOR_A2, OTHER_CAMERA, 'evt_a')];
+					const before = snapshotRequests().length;
+					await unlockAndLookUp(DOOR_3855);
+					await waitFor(() => mock.findRequests({ path: '/system/logs' }).length === 2, {
+						description: 'both topics asked',
+					});
+					await delay(50);
+					expect(events()[0].protectCameraId).to.equal(undefined);
+					expect(snapshotRequests().slice(before)).to.deep.equal([]);
+				});
+
+				it('a camera entry without any door target is not attached either', async () => {
+					await startWithProtect();
+					mock.systemLogHits = [
+						{ _source: { target: [{ type: 'camera event', id: `protect_${CAMERA}_evt_x` }] } },
+					];
+					await unlockAndLookUp(DOOR_3855);
+					await waitFor(() => mock.findRequests({ path: '/system/logs' }).length === 2, {
+						description: 'both topics asked',
+					});
+					await delay(50);
+					expect(events()[0].protectCameraId).to.equal(undefined);
+				});
+
+				it('several entries of the same door: the one closest in time wins', async () => {
+					await startWithProtect();
+					mock.systemLogHits = [
+						hitFor(DOOR_3855, OTHER_CAMERA, 'evt_far', 'TS-9000' as unknown as number),
+						hitFor(DOOR_3855, CAMERA, 'evt_near', 'TS+1000' as unknown as number),
+					];
+					await unlockAndLookUp(DOOR_3855);
+					await waitFor(() => events()[0].protectSnapshotUrl !== undefined, {
+						description: 'snapshot attached',
+					});
+					expect(events()[0]).to.include({ protectCameraId: CAMERA, protectEventId: 'evt_near' });
+				});
 			});
 
 			it('falls back to the topic "all" only when door_openings carries no camera event', async () => {

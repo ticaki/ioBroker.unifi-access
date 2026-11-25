@@ -56,6 +56,9 @@ const DEFAULT_DEVICES = [
 		{ alias: 'UNVR - Main Floor', id: DEVICE_LITE, name: 'UA-LITE-8CED', type: 'UDA-LITE' },
 		{ alias: 'UNVR - Main Floor', id: DEVICE_G2_PRO, name: 'UA-G2-PRO-BB7A', type: 'UA-G2-PRO' },
 	],
+	// ASSUMPTION (T-06): "UA-ULTRA" is not a documented device type (the reference lists UAH, UDA-LITE,
+	// UA-G2-PRO and UGT). Tests with this device prove the adapter's model detection, not what a real
+	// UA Ultra reports — see test/mock/README.md, "Annahmen".
 	[{ alias: 'Garden Gate', id: DEVICE_ULTRA, name: 'UA-ULTRA-AA01', type: 'UA-ULTRA' }],
 ];
 

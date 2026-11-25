@@ -1177,7 +1177,7 @@ class UnifiAccess extends utils.Adapter {
 					}
 				}
 				await this.storeEventThumbnail(event);
-				this.logSystemLogs(event.ts);
+				this.logSystemLogs(event.ts, event.doorId);
 				break;
 
 			case 'access.device.dps_status':
@@ -1199,7 +1199,7 @@ class UnifiAccess extends utils.Adapter {
 				break;
 
 			case 'access.temporary_unlock.start':
-				this.logSystemLogs(event.ts);
+				this.logSystemLogs(event.ts, event.doorId);
 				this.requestDoorRefresh(true);
 				break;
 
@@ -2319,19 +2319,25 @@ class UnifiAccess extends utils.Adapter {
 	 * token permission `view:system_log` and has no other use.
 	 *
 	 * @param ts Event time (ms epoch)
+	 * @param doorId Door of the event — camera events are only attached when they belong to it
 	 */
-	private logSystemLogs(ts: number): void {
+	private logSystemLogs(ts: number, doorId: string | undefined): void {
 		if (!this.http || !this.protectReady()) {
 			this.recoverProtectSession();
 			return;
 		}
+		if (!doorId) {
+			// without the door the camera event cannot be told apart from those of other doors
+			this.log.debug('[protect] door event without door id — no camera lookup');
+			return;
+		}
 		const http = this.http;
 		this.setTimeout(() => {
-			this.runDetached('system log lookup', this.lookupSystemLogs(http, ts));
+			this.runDetached('system log lookup', this.lookupSystemLogs(http, ts, doorId));
 		}, 3000);
 	}
 
-	private async lookupSystemLogs(http: UnifiHttp, ts: number): Promise<void> {
+	private async lookupSystemLogs(http: UnifiHttp, ts: number, doorId: string): Promise<void> {
 		if (this.unloading || !this.protectReady()) {
 			return;
 		}
@@ -2358,20 +2364,24 @@ class UnifiAccess extends utils.Adapter {
 			if (this.log.level === 'debug' || this.log.level === 'silly') {
 				this.log.debug(`[system-logs:${topic}] ${JSON.stringify(raw)}`);
 			}
-			if (await this.processSystemLogForProtect(raw, ts)) {
+			if (await this.processSystemLogForProtect(raw, ts, doorId)) {
 				return;
 			}
 		}
 	}
 
 	/**
-	 * Scan a system log response for Protect camera events and attach snapshot/clip URLs to the door event.
+	 * Scan a system log response for the Protect camera event of a door event and attach snapshot and
+	 * clip URLs to it. Only log entries whose targets name the door of the event are considered — with
+	 * two doors opened within seconds the window also contains the entry of the other door. Of these the
+	 * one closest in time wins; exactly one snapshot is fetched.
 	 *
 	 * @param raw Response of POST /system/logs
 	 * @param eventTs Time of the door event (ms epoch)
-	 * @returns true when at least one camera event was found
+	 * @param doorId Door of the event
+	 * @returns true when a camera event of this door was found
 	 */
-	private async processSystemLogForProtect(raw: unknown, eventTs: number): Promise<boolean> {
+	private async processSystemLogForProtect(raw: unknown, eventTs: number, doorId: string): Promise<boolean> {
 		const protect = this.protectHttp;
 		if (!protect || !this.protectReady()) {
 			return false;
@@ -2381,70 +2391,91 @@ class UnifiAccess extends utils.Adapter {
 			this.log.debug('[protect] no hits array in system log response');
 			return false;
 		}
-		this.log.debug(`[protect] scanning ${hits.length} system log hit(s) for camera events`);
-		let found = false;
-
+		this.log.debug(`[protect] scanning ${hits.length} system log hit(s) for camera events of door ${doorId}`);
+		let best: { cameraId: string; eventId?: string; distance: number } | undefined;
 		for (const hit of hits) {
-			const targets = (hit as { _source?: { target?: unknown[] } } | undefined)?._source?.target;
+			const source = (hit as { _source?: { target?: unknown[]; event?: { published?: unknown } } } | undefined)
+				?._source;
+			const targets = source?.target;
 			if (!Array.isArray(targets)) {
 				continue;
 			}
-
-			for (const target of targets) {
-				const t = target as { type?: string; id?: string };
-				if (t?.type !== 'camera event') {
-					continue;
-				}
-				const id = t.id;
-				if (typeof id !== 'string' || !id.startsWith('protect_')) {
-					this.log.debug(`[protect] camera event with unexpected id format: ${String(id)}`);
-					continue;
-				}
-
-				// Format: "protect_<cameraId>_<eventId>"
-				const parts = id.split('_');
-				if (parts.length < 2) {
-					continue;
-				}
-				const cameraId = parts[1];
-				const rawEventId = parts.length >= 3 ? parts.slice(2).join('_') : undefined;
-				// both ids become part of request paths and of the media URLs handed to clients
-				if (!/^[A-Za-z0-9]{1,64}$/.test(cameraId)) {
-					this.log.debug('[protect] camera event with unusable camera id — skipped');
-					continue;
-				}
-				const eventId = isSafeProtectId(rawEventId) ? rawEventId : undefined;
-				this.log.debug(`[protect] camera event found: cameraId=${cameraId}, eventId=${eventId ?? 'none'}`);
-				found = true;
-
-				try {
-					const buf = await protect.getSnapshot(cameraId);
-					const cacheKey = `${cameraId}:${eventTs}`;
-					this.cacheProtectSnapshot(cacheKey, buf);
-
-					const base = this.buildServerBaseUrl();
-					if (base === null) {
-						this.log.debug('[protect] built-in HTTP server not running — no media URLs for this event');
-						continue;
-					}
-					const snapshotUrl = `${base}/unifi-access/${this.instance}/protect-snapshot/${encodeURIComponent(cameraId)}/${eventTs}.jpg`;
-					const videoUrl = eventId
-						? `${base}/unifi-access/${this.instance}/protect-video/${encodeURIComponent(eventId)}.mp4`
-						: undefined;
-
-					await this.library.updateEventProtectData(eventTs, {
-						protectCameraId: cameraId,
-						protectEventId: eventId,
-						protectSnapshotUrl: snapshotUrl,
-						protectVideoUrl: videoUrl,
-					});
-					this.log.debug(`[protect] snapshot cached for camera ${cameraId} (${buf.length} bytes)`);
-				} catch (err) {
-					this.log.warn(`[protect] snapshot fetch for camera ${cameraId} failed: ${(err as Error).message}`);
-				}
+			const forThisDoor = targets.some(target => {
+				const t = target as { type?: unknown; id?: unknown } | null;
+				return t?.type === 'door' && t.id === doorId;
+			});
+			const camera = targets
+				.map(target => this.parseCameraTarget(target))
+				.find((c): c is { cameraId: string; eventId?: string } => c !== undefined);
+			if (!camera) {
+				continue;
+			}
+			if (!forThisDoor) {
+				this.log.debug(`[protect] camera event ${camera.cameraId} belongs to another door — skipped`);
+				continue;
+			}
+			const published = source?.event?.published;
+			const distance = typeof published === 'number' ? Math.abs(published - eventTs) : Number.MAX_SAFE_INTEGER;
+			if (!best || distance < best.distance) {
+				best = { ...camera, distance };
 			}
 		}
-		return found;
+		if (!best) {
+			return false;
+		}
+		const { cameraId, eventId } = best;
+		this.log.debug(`[protect] camera event found: cameraId=${cameraId}, eventId=${eventId ?? 'none'}`);
+		try {
+			const buf = await protect.getSnapshot(cameraId);
+			this.cacheProtectSnapshot(`${cameraId}:${eventTs}`, buf);
+			const base = this.buildServerBaseUrl();
+			if (base === null) {
+				this.log.debug('[protect] built-in HTTP server not running — no media URLs for this event');
+				return true;
+			}
+			const snapshotUrl = `${base}/unifi-access/${this.instance}/protect-snapshot/${encodeURIComponent(cameraId)}/${eventTs}.jpg`;
+			const videoUrl = eventId
+				? `${base}/unifi-access/${this.instance}/protect-video/${encodeURIComponent(eventId)}.mp4`
+				: undefined;
+			await this.library.updateEventProtectData(eventTs, {
+				protectCameraId: cameraId,
+				protectEventId: eventId,
+				protectSnapshotUrl: snapshotUrl,
+				protectVideoUrl: videoUrl,
+			});
+			this.log.debug(`[protect] snapshot cached for camera ${cameraId} (${buf.length} bytes)`);
+		} catch (err) {
+			this.log.warn(`[protect] snapshot fetch for camera ${cameraId} failed: ${(err as Error).message}`);
+		}
+		return true;
+	}
+
+	/**
+	 * Camera and Protect event id from a system log target `{type: "camera event", id: "protect_<camera>_<event>"}`.
+	 * This format is not part of the documented API (observed on consoles with Protect).
+	 *
+	 * @param target One entry of `_source.target`
+	 * @returns undefined for any other target or an id that cannot be used safely
+	 */
+	private parseCameraTarget(target: unknown): { cameraId: string; eventId?: string } | undefined {
+		const t = target as { type?: unknown; id?: unknown } | null;
+		if (t?.type !== 'camera event') {
+			return undefined;
+		}
+		const id = t.id;
+		if (typeof id !== 'string' || !id.startsWith('protect_')) {
+			this.log.debug(`[protect] camera event with unexpected id format: ${String(id)}`);
+			return undefined;
+		}
+		const parts = id.split('_');
+		const cameraId = parts[1] ?? '';
+		const rawEventId = parts.length >= 3 ? parts.slice(2).join('_') : undefined;
+		// both ids become part of request paths and of the media URLs handed to clients
+		if (!/^[A-Za-z0-9]{1,64}$/.test(cameraId)) {
+			this.log.debug('[protect] camera event with unusable camera id — skipped');
+			return undefined;
+		}
+		return { cameraId, eventId: isSafeProtectId(rawEventId) ? rawEventId : undefined };
 	}
 
 	/**
