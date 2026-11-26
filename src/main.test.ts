@@ -2671,9 +2671,9 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 			});
 
 			it('verification on with the console certificate as CA: logs in', async () => {
-				// one CA setting for both: trust the Access mock and the Protect stub
+				// one CA setting for both: trust the Access mock and the Protect stub (the matching one second)
 				const instance = await startConnected(
-					protectConfig({ protectVerifyTLS: true, caCert: `${protect.cert}\n${mock.cert}` }),
+					protectConfig({ protectVerifyTLS: true, caCert: `${mock.cert}\n${protect.cert}` }),
 				);
 				expect(protect.logins.map(l => l.status)).to.deep.equal([200]);
 				expect(instance.val('info.protectConnected')).to.equal(true);
