@@ -7,7 +7,7 @@ on:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]'
 
     # Hard stop a little above max-wait-time, so a hanging run cannot block a runner for the 6 h default.
     timeout-minutes: 195
