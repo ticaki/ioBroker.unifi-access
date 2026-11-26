@@ -1510,6 +1510,87 @@ describe('adapter main.ts (in-process, fake timers, mock controller)', () => {
 				await lateWebhooksOfA(instance, String(b.event_object_id));
 			});
 
+			// R3T-02: bounds of the memory of finished calls
+			describe('memory of finished calls (R3T-02)', () => {
+				const finished = (instance: FakeAdapter): Map<string, number> =>
+					(instance as unknown as { finishedDoorbellCalls: Map<string, number> }).finishedDoorbellCalls;
+				const overLog = (instance: FakeAdapter, id: string): boolean =>
+					instance.log.of('debug').some(m => m.includes(`webhook for call ${id}, which is already over`));
+
+				it('keeps the 20 most recent calls: the oldest of 21 is forgotten (published again), the newest refused', async () => {
+					const instance = await startConnected();
+					for (let i = 0; i <= 20; i++) {
+						await completed(`C${i}`);
+						await waitFor(() => logged('access.doorbell.completed') === i + 1, {
+							description: `end of C${i}`,
+						});
+					}
+					expect(finished(instance).size).to.equal(20);
+					expect([...finished(instance).keys()][0]).to.equal('C1');
+					await incoming('C0');
+					await waitFor(() => instance.val('doorbell.activeCallId') === 'C0', {
+						description: 'C0 published',
+					});
+					expect(overLog(instance, 'C0')).to.equal(false);
+					await incoming('C20');
+					await waitFor(() => overLog(instance, 'C20'), { description: 'C20 refused' });
+					expect(instance.val('doorbell.activeCallId')).to.equal('C0');
+				});
+
+				it('a call ended more than 3 minutes ago (DOORBELL_CALL_MAX_MS) counts as unknown again', async () => {
+					const instance = await startConnected();
+					await completed('OLD');
+					await waitFor(() => logged('access.doorbell.completed') === 1, { description: 'end of OLD' });
+					// the memory goes by wall-clock time (Date.now), which the fake timers of this suite leave alone
+					// shifted, not frozen: waitFor measures its timeout with Date.now as well
+					const realNow = Date.now.bind(Date);
+					const now = sinon.stub(Date, 'now').callsFake(() => realNow() + 3 * 60_000 + 1000);
+					try {
+						await incoming('OLD');
+						await waitFor(() => instance.val('doorbell.activeCallId') === 'OLD', {
+							description: 'published',
+						});
+					} finally {
+						now.restore();
+					}
+					expect(overLog(instance, 'OLD')).to.equal(false);
+				});
+
+				it('a call ended less than 3 minutes ago is still refused', async () => {
+					const instance = await startConnected();
+					await completed('RECENT');
+					await waitFor(() => logged('access.doorbell.completed') === 1, { description: 'end of RECENT' });
+					// shifted, not frozen: waitFor measures its timeout with Date.now as well
+					const realNow = Date.now.bind(Date);
+					const now = sinon.stub(Date, 'now').callsFake(() => realNow() + 3 * 60_000 - 1000);
+					try {
+						await incoming('RECENT');
+						await waitFor(() => overLog(instance, 'RECENT'), { description: 'refused' });
+					} finally {
+						now.restore();
+					}
+					expect(instance.val('doorbell.activeCallId')).to.equal(null);
+				});
+
+				// Not observable from outside on its own: the memory is only asked for a call that is not published,
+				// and every way a published call stops being published (end with or without id, time limit,
+				// replacement) notes it again. Hence the check of the memory itself.
+				it('the WebSocket ringing a noted call again removes the note; the late webhook of that call is not refused', async () => {
+					const instance = await startConnected();
+					await completed('request-1');
+					await waitFor(() => finished(instance).has('request-1'), { description: 'noted' });
+					mock.emitRemoteView({ data: { request_id: 'request-1' } });
+					await waitFor(() => instance.val('doorbell.activeCallId') !== null, { description: 'ws ring' });
+					expect(finished(instance).has('request-1'), 'note removed').to.equal(false);
+					const published = instance.val('doorbell.activeCallId');
+					await incoming('request-1');
+					await waitFor(() => logged('access.doorbell.incoming') === 1, { description: 'webhook logged' });
+					await delay(30);
+					expect(instance.val('doorbell.activeCallId')).to.equal(published);
+					expect(overLog(instance, 'request-1')).to.equal(false);
+				});
+			});
+
 			it('a webhook call that is not over yet still replaces a call whose end was missed', async () => {
 				const instance = await startConnected();
 				await incoming('request-1');
