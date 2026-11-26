@@ -62,7 +62,9 @@ class ProtectStub {
 	}
 
 	async start() {
-		this.tls = createSelfSignedCert({ altNames: this.altNames });
+		// A name of its own: with two self-signed certificates of the same name in one CA setting,
+		// OpenSSL can only match the issuer by name and may pick the wrong one (order differs by platform).
+		this.tls = createSelfSignedCert({ commonName: 'unifi-protect-stub', altNames: this.altNames });
 		const server = https.createServer({ key: this.tls.key, cert: this.tls.cert }, (req, res) => {
 			const chunks = [];
 			req.on('data', chunk => chunks.push(chunk));
