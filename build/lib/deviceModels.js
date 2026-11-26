@@ -19,18 +19,11 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var deviceModels_exports = {};
 __export(deviceModels_exports, {
   detectModel: () => detectModel,
-  featuresFor: () => featuresFor,
-  modelHas: () => modelHas
+  featuresFor: () => featuresFor
 });
 module.exports = __toCommonJS(deviceModels_exports);
 const FULL_CAPABILITIES = ["event-thumbnail", "doorbell", "door-unlock", "live-events"];
-const DOORBELL_CAPABILITIES = [
-  "event-thumbnail",
-  "doorbell",
-  "door-unlock",
-  "live-events"
-];
-const READER_CAPABILITIES = ["event-thumbnail", "door-unlock", "live-events"];
+const PLAIN_READER_CAPABILITIES = ["door-unlock", "live-events"];
 const HUB_CAPABILITIES = ["live-events"];
 const UNKNOWN_CAPABILITIES = ["live-events"];
 function detectModel(rawModel, deviceType) {
@@ -44,32 +37,36 @@ function detectModel(rawModel, deviceType) {
   if (value.includes("g2")) {
     return "UA-G2-Pro";
   }
-  if (value.includes("hub") || value.includes("uah")) {
+  if (value.includes("intercom")) {
+    return "UA-Intercom";
+  }
+  if (value.includes("lite")) {
+    return "UA-Lite";
+  }
+  if (/hub|uah|\bugt\b|eah/.test(value)) {
     return "UA-Hub";
   }
   return "unknown";
 }
 function featuresFor(model) {
   switch (model) {
+    // UA-G2-Pro (Reader Pro) included: the documented WebSocket sample (11.1) shows a ringing UA-G2-PRO
     case "UA-Ultra":
-      return FULL_CAPABILITIES;
     case "UA-G3-Pro":
-      return DOORBELL_CAPABILITIES;
+    case "UA-Intercom":
     case "UA-G2-Pro":
-      return READER_CAPABILITIES;
+      return FULL_CAPABILITIES;
+    case "UA-Lite":
+      return PLAIN_READER_CAPABILITIES;
     case "UA-Hub":
       return HUB_CAPABILITIES;
     default:
       return UNKNOWN_CAPABILITIES;
   }
 }
-function modelHas(model, capability) {
-  return featuresFor(model).includes(capability);
-}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   detectModel,
-  featuresFor,
-  modelHas
+  featuresFor
 });
 //# sourceMappingURL=deviceModels.js.map
