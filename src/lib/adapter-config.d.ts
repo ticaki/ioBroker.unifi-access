@@ -16,6 +16,8 @@ declare global {
 			// Shared HTTP(S) server (UniFi webhook receiver, thumbnail proxy, generic webhook)
 			listenPort: number;
 			listenIp: string;
+			/** Address clients and the controller use for the built-in server (empty = derived automatically). */
+			publicBaseUrl: string;
 			enableTls: boolean;
 			certPublic: string;
 			certPrivate: string;
@@ -41,6 +43,8 @@ declare global {
 			protectUsername: string;
 			protectPassword: string;
 			protectVerifyTLS: boolean;
+			/** HTTPS port of the UniFi OS console for the Protect API (no admin field; default 443). */
+			protectPort: number;
 
 			unlockActorId: string;
 		}

@@ -1,15 +1,31 @@
+import type { JSX } from 'react';
 import { Alert, Card, CardContent, Chip, Stack, Typography } from '@mui/material';
 import DoorbellIcon from '@mui/icons-material/Doorbell';
 import { useIobState } from '../socket';
+
+/** Text of a state; the adapter writes strings or null, anything else is not shown */
+function textOf(state: ioBroker.State | null | undefined): string | null {
+    return typeof state?.val === 'string' && state.val ? state.val : null;
+}
+
+/** Start of the call (ms epoch or ISO text) - null if it is no usable time */
+function startOf(state: ioBroker.State | null | undefined): Date | null {
+    const val = state?.val;
+    if ((typeof val !== 'number' || val <= 0) && (typeof val !== 'string' || !val)) {
+        return null;
+    }
+    const date = new Date(val);
+    return Number.isNaN(date.getTime()) ? null : date;
+}
 
 export function DoorbellCallsCard(): JSX.Element {
     const activeCallId = useIobState('doorbell.activeCallId');
     const activeFromDevice = useIobState('doorbell.activeFromDevice');
     const activeStartedAt = useIobState('doorbell.activeStartedAt');
 
-    const callId = (activeCallId?.val as string | undefined) ?? null;
-    const fromDevice = (activeFromDevice?.val as string | undefined) ?? null;
-    const startedAt = (activeStartedAt?.val as number | string | undefined) ?? null;
+    const callId = textOf(activeCallId);
+    const fromDevice = textOf(activeFromDevice);
+    const startedAt = startOf(activeStartedAt);
 
     if (!callId) {
         return (
@@ -18,7 +34,7 @@ export function DoorbellCallsCard(): JSX.Element {
                     <Stack
                         direction="row"
                         spacing={1}
-                        alignItems="center"
+                        sx={{ alignItems: 'center' }}
                     >
                         <DoorbellIcon color="disabled" />
                         <Typography
@@ -59,7 +75,7 @@ export function DoorbellCallsCard(): JSX.Element {
                             variant="caption"
                             color="text.secondary"
                         >
-                            started: {new Date(startedAt).toLocaleString()}
+                            started: {startedAt.toLocaleString()}
                         </Typography>
                     ) : null}
                 </Stack>

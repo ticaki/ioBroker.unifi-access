@@ -13,21 +13,64 @@
                     : window.location.origin;
             })();
 
+            // socket.io.js comes from the web adapter. The page lives at <web>/unifi-access/index.html, so
+            // the library is one level up - also behind a reverse proxy with a path prefix
+            // (/iob/unifi-access/ -> /iob/lib/). The root path is the second guess. If no candidate
+            // loads, the panel shows a message instead of waiting for ever (registerSocketLoadError).
             window.registerSocketOnLoad = function (cb) {
                 window.socketLoadedHandler = cb;
             };
+            window.registerSocketLoadError = function (cb) {
+                window.socketLoadErrorHandler = cb;
+                if (window.socketLoadError) {
+                    cb(window.socketLoadError);
+                }
+            };
             (function () {
-                const script = document.createElement('script');
-                script.onload = function () {
-                    if (typeof window.socketLoadedHandler === 'function') {
-                        window.socketLoadedHandler();
+                var isDev = window.location.port === '4174';
+                var candidates = isDev
+                    ? [window.location.protocol + '//' + window.location.hostname + ':8081/lib/js/socket.io.js']
+                    : ['../lib/js/socket.io.js', '/lib/js/socket.io.js'];
+                var tried = [];
+                function load(index) {
+                    var script = document.createElement('script');
+                    script.src = candidates[index];
+                    if (tried.indexOf(script.src) !== -1) {
+                        // the same URL as a candidate before (page at the root of the server)
+                        next(index);
+                        return;
                     }
-                };
-                const isDev = window.location.port === '4174';
-                script.src = isDev
-                    ? `${window.location.protocol}//${window.location.hostname}:8081/lib/js/socket.io.js`
-                    : '../../lib/js/socket.io.js';
-                document.head.appendChild(script);
+                    tried.push(script.src);
+                    script.onload = function () {
+                        // Behind a reverse proxy with a path prefix the WebSocket must use the prefix as well.
+                        // The ws client of the web adapter (io with only "connect") ignores the "path" option
+                        // of socket-client and connects to socketUrl + socketPath - so pass the prefix there.
+                        // Real socket.io (io.Manager) uses the "path" option instead and needs nothing here.
+                        var base = new URL(script.src, window.location.href).pathname.replace(/lib\/js\/socket\.io\.js$/, '');
+                        if (base !== '/' && window.io && !window.io.Manager) {
+                            window.socketPath = base;
+                        }
+                        if (typeof window.socketLoadedHandler === 'function') {
+                            window.socketLoadedHandler();
+                        }
+                    };
+                    script.onerror = function () {
+                        script.parentNode && script.parentNode.removeChild(script);
+                        next(index);
+                    };
+                    document.head.appendChild(script);
+                }
+                function next(index) {
+                    if (index + 1 < candidates.length) {
+                        load(index + 1);
+                        return;
+                    }
+                    window.socketLoadError = tried.join(', ');
+                    if (typeof window.socketLoadErrorHandler === 'function') {
+                        window.socketLoadErrorHandler(window.socketLoadError);
+                    }
+                }
+                load(0);
             })();
         </script>
     </head>

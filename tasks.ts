@@ -24,6 +24,9 @@ if (command === 'admin:copy') {
 	rmSync(customDir, { recursive: true, force: true });
 	copyGlob(resolve(buildDir, 'assets'), /\.js$/, resolve(customDir, 'assets'));
 	copyGlob(buildDir, /^customComponents\.js$/, customDir);
+	// Admin >= 8 fetches the federation manifest next to the remote entry to check which GUI API
+	// generation (React/MUI/component library) the components were built against.
+	copyGlob(buildDir, /^mf-manifest\.json$/, customDir);
 	copyGlob(resolve(__dirname, 'src-admin/src/i18n'), /\.json$/, resolve(customDir, 'i18n'));
 	console.log('admin:copy done');
 } else {

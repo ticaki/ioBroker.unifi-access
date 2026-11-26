@@ -2,6 +2,8 @@
 {
 	"extends": "./tsconfig.json",
 	"compilerOptions": {
+		// only src/ is compiled: src/main.ts => build/main.js
+		"rootDir": "./src",
 		"allowJs": false,
 		"checkJs": false,
 		"noEmit": false,

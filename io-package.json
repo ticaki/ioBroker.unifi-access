@@ -6,15 +6,15 @@
 			"0.0.2": {
 				"en": "Aligned API integration with the documented UniFi Access Developer API: removed undocumented snapshot/doorbell-call endpoints, switched timed door unlock to lock_rule, added a webhook receiver (HMAC-validated) for the full event catalogue, replaced polled snapshots with an event-driven last-thumbnail card.",
 				"de": "API-Integration an die dokumentierte UniFi-Access-Developer-API angeglichen: nicht dokumentierte Snapshot- und Doorbell-Call-Endpunkte entfernt, zeitgesteuerte Türöffnung auf lock_rule umgestellt, HMAC-validierter Webhook-Empfänger für alle dokumentierten Events ergänzt, gepollte Snapshots durch event-getriebene Last-Thumbnail-Anzeige ersetzt.",
-				"ru": "Интеграция API приведена в соответствие с документацией UniFi Access Developer API.",
-				"pt": "Integração da API alinhada com a documentação oficial do UniFi Access Developer API.",
-				"nl": "API-integratie afgestemd op de gedocumenteerde UniFi Access Developer API.",
-				"fr": "Intégration API alignée sur la documentation officielle UniFi Access Developer API.",
-				"it": "Integrazione API allineata alla documentazione UniFi Access Developer API.",
-				"es": "Integración de API alineada con la documentación oficial UniFi Access Developer API.",
-				"pl": "Integrację z API dostosowano do udokumentowanego UniFi Access Developer API.",
-				"uk": "Інтеграцію API узгоджено з документованим UniFi Access Developer API.",
-				"zh-cn": "API 接入已对齐 UniFi Access 官方开发者 API 文档。"
+				"ru": "API-интеграция приведена в соответствие с документированным UniFi Access Developer API: удалены недокументированные конечные точки снимков и вызовов дверного звонка, временное открытие двери переведено на lock_rule, добавлен приёмник вебхуков (с проверкой HMAC) для полного каталога событий, опрашиваемые снимки заменены карточкой последней миниатюры, обновляемой по событиям.",
+				"pt": "Integração da API alinhada com a UniFi Access Developer API documentada: removidos os endpoints não documentados de snapshot e de chamadas da campainha, a abertura temporizada da porta passou a usar lock_rule, adicionado um recetor de webhooks (validado por HMAC) para o catálogo completo de eventos, os snapshots consultados periodicamente foram substituídos por um cartão da última miniatura atualizado por eventos.",
+				"nl": "API-integratie afgestemd op de gedocumenteerde UniFi Access Developer API: niet-gedocumenteerde endpoints voor snapshots en deurbeloproepen verwijderd, getimede deurontgrendeling omgezet naar lock_rule, een webhook-ontvanger (HMAC-gevalideerd) voor de volledige eventcatalogus toegevoegd, gepollde snapshots vervangen door een eventgestuurde kaart met de laatste miniatuur.",
+				"fr": "Intégration de l'API alignée sur l'UniFi Access Developer API documentée : suppression des points de terminaison non documentés pour les instantanés et les appels de sonnette, déverrouillage temporisé de la porte basculé vers lock_rule, ajout d'un récepteur de webhooks (validé par HMAC) pour le catalogue complet des événements, remplacement des instantanés interrogés périodiquement par une carte de la dernière miniature pilotée par les événements.",
+				"it": "Integrazione API allineata alla UniFi Access Developer API documentata: rimossi gli endpoint non documentati per snapshot e chiamate del campanello, lo sblocco temporizzato della porta ora usa lock_rule, aggiunto un ricevitore webhook (validato con HMAC) per l'intero catalogo di eventi, gli snapshot interrogati periodicamente sono stati sostituiti da una scheda dell'ultima miniatura basata sugli eventi.",
+				"es": "Integración de la API alineada con la UniFi Access Developer API documentada: se eliminaron los endpoints no documentados de instantáneas y llamadas del timbre, el desbloqueo temporizado de la puerta pasó a lock_rule, se añadió un receptor de webhooks (validado con HMAC) para el catálogo completo de eventos y las instantáneas consultadas periódicamente se sustituyeron por una tarjeta de la última miniatura basada en eventos.",
+				"pl": "Integrację API dostosowano do udokumentowanego UniFi Access Developer API: usunięto nieudokumentowane punkty końcowe zdjęć i połączeń dzwonka, czasowe odblokowanie drzwi przełączono na lock_rule, dodano odbiornik webhooków (weryfikowany HMAC) dla pełnego katalogu zdarzeń, a odpytywane zdjęcia zastąpiono kartą ostatniej miniatury aktualizowaną przez zdarzenia.",
+				"uk": "Інтеграцію API узгоджено з документованим UniFi Access Developer API: видалено недокументовані кінцеві точки знімків і викликів дверного дзвінка, тимчасове відчинення дверей переведено на lock_rule, додано приймач вебхуків (з перевіркою HMAC) для повного каталогу подій, опитувані знімки замінено карткою останньої мініатюри, що оновлюється за подіями.",
+				"zh-cn": "API 接入已对齐 UniFi Access 官方开发者 API 文档：移除未记录的快照和门铃通话端点，定时开门改用 lock_rule，新增用于完整事件目录的 Webhook 接收器（HMAC 校验），并以事件驱动的最新缩略图卡片取代轮询快照。"
 			},
 			"0.0.1": {
 				"en": "initial release",
@@ -88,7 +88,7 @@
 			"config": "json"
 		},
 		"localLinks": {
-			"_default": "%web_protocol%://%ip%:%web_port%/unifi-access/index.html"
+			"_default": "%web_protocol%://%ip%:%web_port%/unifi-access/index.html?instance=%instance%"
 		},
 		"dependencies": [
 			{
@@ -97,7 +97,7 @@
 		],
 		"globalDependencies": [
 			{
-				"admin": ">=7.6.20"
+				"admin": ">=8.0.12"
 			}
 		]
 	},
@@ -105,13 +105,15 @@
 		"apiToken",
 		"webhookSecret",
 		"genericWebhookPassword",
-		"genericWebhookToken"
+		"genericWebhookToken",
+		"protectPassword"
 	],
 	"encryptedNative": [
 		"apiToken",
 		"webhookSecret",
 		"genericWebhookPassword",
-		"genericWebhookToken"
+		"genericWebhookToken",
+		"protectPassword"
 	],
 	"native": {
 		"controllerHost": "",
@@ -121,15 +123,15 @@
 		"caCert": "",
 		"wsReconnectDelay": 5,
 		"defaultUnlockDuration": 0,
+		"unlockActorId": "",
 		"listenPort": 8095,
 		"listenIp": "0.0.0.0",
+		"publicBaseUrl": "",
 		"enableTls": false,
 		"certPublic": "",
 		"certPrivate": "",
 		"certChained": "",
 		"enableWebhooks": false,
-		"webhookPath": "/unifi-access-webhook",
-		"webhookPublicUrl": "",
 		"enableThumbnailServer": false,
 		"webhookEndpointId": "",
 		"webhookSecret": "",
@@ -139,7 +141,12 @@
 		"genericWebhookAuth": "none",
 		"genericWebhookUsername": "",
 		"genericWebhookPassword": "",
-		"genericWebhookToken": ""
+		"genericWebhookToken": "",
+		"enableProtect": false,
+		"protectUsername": "",
+		"protectPassword": "",
+		"protectVerifyTLS": false,
+		"protectPort": 443
 	},
 	"objects": [],
 	"instanceObjects": [

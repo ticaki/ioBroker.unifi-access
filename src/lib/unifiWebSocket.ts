@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
+import type { TimerHost } from './timerHost';
 import type { UnifiWebSocketMessage } from './types';
+import { trustedCertificates } from './caCert';
 
 export interface UnifiWebSocketOptions {
 	host: string;
@@ -9,6 +11,16 @@ export interface UnifiWebSocketOptions {
 	verifyTLS?: boolean;
 	caCert?: string;
 	reconnectDelaySeconds: number;
+	/** Timer functions of the adapter (tracked and cleared by js-controller on unload). */
+	timers: TimerHost;
+	/** Heartbeat period in milliseconds (default 30 s). A connection that misses one pong is dropped. */
+	heartbeatIntervalMs?: number;
+	/**
+	 * A connection counts as stable after this time (default 30 s); only then the reconnect back-off
+	 * starts from the beginning again. A controller that accepts the upgrade and drops the connection
+	 * right away must not be reconnected to every 2 s for ever.
+	 */
+	stableAfterMs?: number;
 	logger?: { debug: (msg: string) => void; warn: (msg: string) => void; info: (msg: string) => void };
 }
 
@@ -19,6 +31,9 @@ type ListenerMap = {
 	event: (msg: UnifiWebSocketMessage) => void;
 };
 
+const DEFAULT_HEARTBEAT_MS = 30_000;
+const DEFAULT_STABLE_AFTER_MS = 30_000;
+
 /**
  * Persistent WebSocket connection to /api/v1/developer/devices/notifications.
  * Documented event types on this socket: access.remote_view (doorbell ringing,
@@ -27,16 +42,24 @@ type ListenerMap = {
  * 400 answered elsewhere), access.data.device.remote_unlock (admin remote unlock).
  * Other access.* events are delivered via the webhook channel, not this socket.
  *
- * Reconnects on close/error with exponential back-off (capped at reconnectDelaySeconds).
- * Heartbeat ping every 30s to detect dead connections that don't surface a 'close' event.
+ * Reconnects on close with exponential back-off (capped at reconnectDelaySeconds); the back-off starts
+ * from the beginning only after a connection stayed up for `stableAfterMs`.
+ * Heartbeat: a ping every 30 s; when neither the pong nor any other frame has arrived by the
+ * next tick the connection is considered dead (half-open TCP connection) and terminated,
+ * which triggers the normal reconnect.
+ *
+ * Only frames that are JSON objects with a string `event` are emitted; anything else
+ * (keep-alive text, `null`, arrays, …) is ignored.
  */
 export class UnifiWebSocket extends EventEmitter {
 	private readonly options: UnifiWebSocketOptions;
 	private socket: WebSocket | null = null;
-	private reconnectTimer: NodeJS.Timeout | null = null;
-	private heartbeatTimer: NodeJS.Timeout | null = null;
+	private reconnectTimer: unknown;
+	private heartbeatTimer: unknown;
+	private stableTimer: unknown;
+	private awaitingPong = false;
 	private retryAttempt = 0;
-	private stopped = false;
+	private stopped = true;
 
 	constructor(options: UnifiWebSocketOptions) {
 		super();
@@ -51,28 +74,40 @@ export class UnifiWebSocket extends EventEmitter {
 		return super.emit(event, ...args);
 	}
 
+	/** Whether the connection is currently established. */
+	get isOpen(): boolean {
+		return this.socket?.readyState === WebSocket.OPEN;
+	}
+
 	start(): void {
+		// start() on a running instance must not open a second connection
+		this.dropConnection();
 		this.stopped = false;
+		this.retryAttempt = 0;
 		this.connect();
 	}
 
 	stop(): void {
 		this.stopped = true;
-		if (this.reconnectTimer) {
-			clearTimeout(this.reconnectTimer);
-			this.reconnectTimer = null;
+		this.dropConnection();
+	}
+
+	/** Cancel timers and terminate the current socket without scheduling a reconnect. */
+	private dropConnection(): void {
+		if (this.reconnectTimer !== undefined) {
+			this.options.timers.clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = undefined;
 		}
-		if (this.heartbeatTimer) {
-			clearInterval(this.heartbeatTimer);
-			this.heartbeatTimer = null;
-		}
-		if (this.socket) {
+		this.stopStableTimer();
+		this.stopHeartbeat();
+		const ws = this.socket;
+		this.socket = null;
+		if (ws) {
 			try {
-				this.socket.terminate();
+				ws.terminate();
 			} catch {
 				/* ignore */
 			}
-			this.socket = null;
 		}
 	}
 
@@ -83,72 +118,138 @@ export class UnifiWebSocket extends EventEmitter {
 
 		const ws = new WebSocket(url, {
 			rejectUnauthorized: verifyTLS === true,
-			ca: caCert ? caCert : undefined,
+			ca: trustedCertificates(caCert),
 			headers: { Authorization: `Bearer ${token}` },
 			handshakeTimeout: 10_000,
 		});
 		this.socket = ws;
+		// Every handler checks that it still belongs to the current socket: events of a socket that
+		// was replaced (stop() + start()) or dropped must not touch the state of its successor.
+		const isCurrent = (): boolean => this.socket === ws;
 
 		ws.on('open', () => {
-			this.retryAttempt = 0;
-			this.startHeartbeat();
+			if (!isCurrent()) {
+				return;
+			}
+			// the back-off is reset only once the connection has proven stable (see stableAfterMs)
+			this.startStableTimer(ws);
+			this.startHeartbeat(ws);
 			this.emit('open');
 		});
 
+		ws.on('pong', () => {
+			if (isCurrent()) {
+				this.awaitingPong = false;
+			}
+		});
+
 		ws.on('message', (data: WebSocket.RawData) => {
+			if (!isCurrent()) {
+				return;
+			}
+			// Any frame proves the peer is alive — a controller that keeps the connection up with its own
+			// keep-alive frames but does not answer pings must not be dropped every minute.
+			this.awaitingPong = false;
+			let parsed: unknown;
 			try {
-				let text: string;
-				if (typeof data === 'string') {
-					text = data;
-				} else if (Buffer.isBuffer(data)) {
-					text = data.toString('utf8');
-				} else if (data instanceof ArrayBuffer) {
-					text = Buffer.from(data).toString('utf8');
-				} else if (Array.isArray(data)) {
-					text = Buffer.concat(data).toString('utf8');
-				} else {
-					text = '';
-				}
-				const parsed = JSON.parse(text) as UnifiWebSocketMessage;
-				this.emit('event', parsed);
+				parsed = JSON.parse(rawDataToString(data));
 			} catch (err) {
-				logger?.warn(`WebSocket parse error: ${(err as Error).message}`);
+				// not an event (the controller may send plain keep-alive text) — nothing to act on
+				logger?.debug(`WebSocket frame ignored (not JSON): ${(err as Error).message}`);
+				return;
+			}
+			if (
+				!parsed ||
+				typeof parsed !== 'object' ||
+				Array.isArray(parsed) ||
+				typeof (parsed as { event?: unknown }).event !== 'string'
+			) {
+				logger?.debug('WebSocket frame ignored (not an event object).');
+				return;
+			}
+			try {
+				this.emit('event', parsed as UnifiWebSocketMessage);
+			} catch (err) {
+				logger?.warn(`WebSocket event listener failed: ${(err as Error).message}`);
 			}
 		});
 
 		ws.on('close', () => {
-			this.cleanupSocket();
+			if (!isCurrent()) {
+				return;
+			}
+			this.stopStableTimer();
+			this.stopHeartbeat();
+			this.socket = null;
 			this.emit('close');
 			this.scheduleReconnect();
 		});
 
 		ws.on('error', (err: Error) => {
-			logger?.warn(`WebSocket error: ${err.message}`);
-			this.emit('error', err);
+			if (!isCurrent()) {
+				return;
+			}
+			// 'error' is always followed by 'close', which schedules the reconnect
+			if (this.listenerCount('error') > 0) {
+				this.emit('error', err);
+			} else {
+				logger?.debug(`WebSocket error: ${err.message}`);
+			}
 		});
 	}
 
-	private startHeartbeat(): void {
-		if (this.heartbeatTimer) {
-			clearInterval(this.heartbeatTimer);
-		}
-		this.heartbeatTimer = setInterval(() => {
-			if (this.socket?.readyState === WebSocket.OPEN) {
+	private startHeartbeat(ws: WebSocket): void {
+		this.stopHeartbeat();
+		this.awaitingPong = false;
+		const period = this.options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
+		this.heartbeatTimer = this.options.timers.setInterval(() => {
+			if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) {
+				return;
+			}
+			if (this.awaitingPong) {
+				// The previous ping was never answered: the peer is gone without closing the connection.
+				this.options.logger?.info(
+					`WebSocket heartbeat: no answer within ${Math.round(period / 1000)} s — dropping the connection.`,
+				);
 				try {
-					this.socket.ping();
+					ws.terminate();
 				} catch {
 					/* ignore */
 				}
+				return;
 			}
-		}, 30_000);
+			this.awaitingPong = true;
+			try {
+				ws.ping();
+			} catch {
+				/* a failing ping is caught by the pong check of the next tick */
+			}
+		}, period);
 	}
 
-	private cleanupSocket(): void {
-		if (this.heartbeatTimer) {
-			clearInterval(this.heartbeatTimer);
-			this.heartbeatTimer = null;
+	private startStableTimer(ws: WebSocket): void {
+		this.stopStableTimer();
+		this.stableTimer = this.options.timers.setTimeout(() => {
+			this.stableTimer = undefined;
+			if (this.socket === ws && ws.readyState === WebSocket.OPEN) {
+				this.retryAttempt = 0;
+			}
+		}, this.options.stableAfterMs ?? DEFAULT_STABLE_AFTER_MS);
+	}
+
+	private stopStableTimer(): void {
+		if (this.stableTimer !== undefined) {
+			this.options.timers.clearTimeout(this.stableTimer);
+			this.stableTimer = undefined;
 		}
-		this.socket = null;
+	}
+
+	private stopHeartbeat(): void {
+		if (this.heartbeatTimer !== undefined) {
+			this.options.timers.clearInterval(this.heartbeatTimer);
+			this.heartbeatTimer = undefined;
+		}
+		this.awaitingPong = false;
 	}
 
 	private scheduleReconnect(): void {
@@ -158,13 +259,35 @@ export class UnifiWebSocket extends EventEmitter {
 		this.retryAttempt += 1;
 		// Exponential back-off up to reconnectDelaySeconds.
 		const cap = this.options.reconnectDelaySeconds;
-		const wait = Math.min(cap, 2 ** Math.min(this.retryAttempt, 6));
-		this.options.logger?.info(`WebSocket reconnect in ${wait}s (attempt ${this.retryAttempt})`);
-		this.reconnectTimer = setTimeout(() => {
-			this.reconnectTimer = null;
+		const delaySeconds = Math.min(cap, 2 ** Math.min(this.retryAttempt, 6));
+		const text = `WebSocket reconnect in ${delaySeconds}s (attempt ${this.retryAttempt})`;
+		// one visible line per outage; the repeats of a longer outage only at debug level
+		if (this.retryAttempt === 1) {
+			this.options.logger?.info(text);
+		} else {
+			this.options.logger?.debug(text);
+		}
+		this.reconnectTimer = this.options.timers.setTimeout(() => {
+			this.reconnectTimer = undefined;
 			if (!this.stopped) {
 				this.connect();
 			}
-		}, wait * 1000);
+		}, delaySeconds * 1000);
 	}
+}
+
+function rawDataToString(data: WebSocket.RawData | string): string {
+	if (typeof data === 'string') {
+		return data;
+	}
+	if (Buffer.isBuffer(data)) {
+		return data.toString('utf8');
+	}
+	if (data instanceof ArrayBuffer) {
+		return Buffer.from(data).toString('utf8');
+	}
+	if (Array.isArray(data)) {
+		return Buffer.concat(data).toString('utf8');
+	}
+	return '';
 }

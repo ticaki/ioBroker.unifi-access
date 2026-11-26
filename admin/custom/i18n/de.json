@@ -1,20 +1,16 @@
 {
-    "auth_status_loading": "Adapter-Status wird geprüft…",
-    "auth_status_connected": "Mit UniFi-Access-Controller verbunden",
-    "auth_status_connected_named": "Verbunden mit %s",
-    "auth_status_missingToken": "API-Token fehlt — bitte eintragen und „Verbindung testen“ klicken",
-    "auth_status_unauthorized": "Token wurde vom Controller abgelehnt (unauthorized)",
-    "auth_status_network": "Controller nicht erreichbar (Netzwerkfehler)",
-    "auth_status_disconnected": "Nicht verbunden",
-
     "auth_test_button": "Verbindung testen",
     "auth_test_tooltip": "Prüft den Controller mit den oben eingetragenen Werten (ohne zu speichern).",
     "auth_test_running": "Prüfe Controller…",
     "auth_test_missingFields": "Bitte zuerst Host und API-Token eintragen.",
+    "auth_test_placeholder": "Das API-Token-Feld enthält noch den maskierten Platzhalter. Bitte das Feld vollständig leeren und das Token komplett neu eingeben.",
     "auth_test_success": "Verbindung erfolgreich",
-    "auth_test_success_named": "Verbindung erfolgreich — Controller: %s",
+    "auth_test_success_devices": "Verbindung erfolgreich — %s Geräte gefunden",
+    "auth_test_success_one_device": "Verbindung erfolgreich — 1 Gerät gefunden",
+    "auth_test_success_no_devices": "Verbindung erfolgreich — keine Geräte gefunden",
     "auth_test_error_unauthorized": "Token wurde abgelehnt (unauthorized).",
     "auth_test_error_network": "Controller nicht erreichbar (Netzwerkfehler).",
+    "auth_test_error_tls": "Das Zertifikat des Controllers konnte nicht geprüft werden (%s). CA-Zertifikat hinterlegen oder „TLS-Zertifikat prüfen“ ausschalten.",
     "auth_test_error_unknown": "Verbindungstest fehlgeschlagen.",
 
     "devices_title": "Erkannte UniFi-Access-Geräte",
@@ -31,8 +27,25 @@
 
     "actor_select_label": "Türöffner-Akteur (in Logs angezeigt)",
     "actor_select_none": "Keiner (API-Token-Name verwenden)",
+    "actor_select_unknown": "Benutzer nicht in der Liste (ID: %s)",
     "actor_select_loading": "Benutzer werden geladen…",
     "actor_select_error": "Benutzer konnten nicht geladen werden. Läuft der Adapter?",
     "actor_select_refresh": "Benutzerliste aktualisieren",
-    "actor_select_help": "Der gewählte Benutzer erscheint in UniFi-Access-Protokollen und Webhooks, wenn ioBroker eine Tür öffnet."
+    "actor_select_help": "Der gewählte Benutzer erscheint in UniFi-Access-Protokollen und Webhooks, wenn ioBroker eine Tür öffnet.",
+
+    "generic_webhook_urls": "Webhook-URL(s)",
+    "generic_webhook_url_loading": "Netzwerk-Interfaces werden geladen…",
+    "generic_webhook_url_no_addresses": "Keine Netzwerk-Interface-Adressen gefunden.",
+    "generic_webhook_copy": "In Zwischenablage kopieren",
+    "generic_webhook_copied": "Kopiert!",
+    "generic_webhook_server_not_running": "Der HTTP-Server des Adapters läuft momentan nicht, diese URL antwortet daher noch nicht. Einstellungen speichern und, falls er danach nicht startet, das Log der Instanz prüfen (Port belegt?).",
+    "generic_webhook_tls_inactive": "TLS ist aktiviert, aber die Zertifikate konnten nicht geladen werden (%s). Der eingebaute Server startet erst, wenn das behoben ist.",
+    "generic_webhook_public_base_unsaved": "Die öffentliche Basis-URL im Formular weicht von der gespeicherten ab. Die angezeigte URL folgt dem Formular; zum Übernehmen die Einstellungen speichern.",
+    "generic_webhook_unsaved": "Listen-Adresse, Port, TLS oder Listen-Pfad im Formular weichen von den gespeicherten Einstellungen ab. Die angezeigte URL folgt dem Formular; zum Übernehmen die Einstellungen speichern.",
+    "generic_webhook_public_base_invalid": "Die gespeicherte öffentliche Basis-URL \"%s\" ist nicht nutzbar (erwartet http(s)://host[:port][/pfad], ohne Benutzername oder Passwort, Port 1-65535). Der Adapter bildet die URLs stattdessen aus der Listen-Adresse; bitte auf dem Reiter \"HTTP-Server\" korrigieren.",
+
+    "adapter_not_running": "Die Adapter-Instanz läuft nicht. Bitte starten und erneut versuchen.",
+    "adapter_no_response": "Der Adapter hat nicht rechtzeitig geantwortet.",
+    "adapter_unknown_command": "Die laufende Adapter-Instanz kennt diese Anfrage nicht. Adapter und Einstellungsseite haben offenbar unterschiedliche Versionen — bitte die Instanz neu starten.",
+    "adapter_not_configured": "Die laufende Instanz hat noch keinen Controller-Host oder kein API-Token. Bitte beides eintragen, speichern und erneut versuchen."
 }

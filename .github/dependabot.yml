@@ -2,15 +2,20 @@
 # Cooldown delays updating normal npm dependencies by 7 days but allows security updates to be processed immediately.
 # Note: Cooldown is not supported for the github-actions ecosystem.
 # Reference: https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+#
+# Schedule: day 11 of each month, 03:17 (Europe/Berlin). Keep this slot unique among all repositories of the
+# account. Until 2026-11 this repo shared '5 4 14 * *' with ioBroker.icloud and ioBroker.nspanel-lovelace-ui:
+# the three Dependabot runs opened ~40 PRs at once, ~390 workflow jobs competed for the 20 concurrent runners of
+# the account, checks were queued for more than an hour and the auto-merge jobs ran into their timeout.
 version: 2
 updates:
 
+  # Adapter (root package)
   - package-ecosystem: 'npm'
-    directories:
-      - '**/*'
+    directory: '/'
     schedule:
       interval: 'cron'
-      cronjob: '5 4 14 * *'
+      cronjob: '17 3 11 * *'
       timezone: 'Europe/Berlin'
     open-pull-requests-limit: 15
     assignees:
@@ -23,12 +28,52 @@ updates:
       - dependency-name: '@types/node'
         update-types:
           - 'version-update:semver-major'
+      # TypeScript 7 (native compiler) ships without the JavaScript compiler API. In the root package that breaks
+      #   - eslint: "Error: typescript-eslint does not support TS 7.0." (typescript-eslint 8.x declares
+      #     peer typescript ">=4.8.4 <6.1.0", tracking: typescript-eslint/typescript-eslint#10940)
+      #   - test:ts: ts-node 10.9.2 "TypeError: Cannot read properties of undefined (reading 'fileExists')"
+      # and the documented side-by-side setup (typescript = npm:@typescript/typescript6) breaks
+      #   - build: @iobroker/adapter-dev 1.5.0 "Could not find tsc executable".
+      # Remove this entry once typescript-eslint accepts typescript 7 as its "typescript" peer.
+      - dependency-name: 'typescript'
+        versions:
+          - '7.x'
+
+  # Admin custom components and www panel (own package.json each). These PRs are NOT auto-merged
+  # (.github/workflows/automerge-dependabot.yml): most of them change the committed bundles admin/custom
+  # and www, which CI checks ("Committed bundle is up to date"). Rebuild (npm run build:admin / build:www),
+  # commit on the PR branch, merge by hand.
+  - package-ecosystem: 'npm'
+    directories:
+      - '/src-admin'
+      - '/src-www'
+    schedule:
+      interval: 'cron'
+      cronjob: '17 3 11 * *'
+      timezone: 'Europe/Berlin'
+    open-pull-requests-limit: 15
+    assignees:
+      - 'ticaki'
+    versioning-strategy: 'increase'
+    cooldown:
+      default-days: 7
+    ignore:
+      # ioBroker pins @types/node to the LTS line of the supported Node version.
+      - dependency-name: '@types/node'
+        update-types:
+          - 'version-update:semver-major'
+      # Same TypeScript 7 blocker as in the root package: src-admin lints with typescript-eslint
+      # (peer typescript ">=4.8.4 <6.1.0"); src-www is kept on the same compiler version as src-admin.
+      # Remove together with the root entry.
+      - dependency-name: 'typescript'
+        versions:
+          - '7.x'
 
   - package-ecosystem: 'github-actions'
     directory: '/'
     schedule:
       interval: 'cron'
-      cronjob: '5 4 14 * *'
+      cronjob: '17 3 11 * *'
       timezone: 'Europe/Berlin'
     open-pull-requests-limit: 15
     assignees:

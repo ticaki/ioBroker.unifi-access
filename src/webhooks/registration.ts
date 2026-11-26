@@ -1,4 +1,6 @@
 import type { UnifiHttp } from '../lib/unifiHttp';
+import type { UnifiWebhookEndpoint } from '../lib/types';
+import { isStoppedError, StoppedError, throwIfStopped } from '../lib/stopSignal';
 
 export const DEFAULT_WEBHOOK_EVENTS = [
 	'access.doorbell.incoming',
@@ -22,88 +24,98 @@ export interface RegistrationResult {
 
 export interface RegistrationOptions {
 	http: UnifiHttp;
+	/** URL the controller shall deliver events to. */
 	publicUrl: string;
+	/**
+	 * Name of this installation's endpoint. It should identify the installation (instance and host):
+	 * endpoints are only cleaned up when they carry exactly this name or the stored id, so two
+	 * installations at the same controller never remove each other's endpoint.
+	 */
 	name: string;
+	/** Id of the endpoint registered by an earlier start (from the instance configuration). */
+	storedId?: string | null;
+	/** Secret of that endpoint (from the instance configuration). */
+	storedSecret?: string | null;
 	events?: readonly string[];
 	logger: { debug: (msg: string) => void; info: (msg: string) => void; warn: (msg: string) => void };
+	/**
+	 * True once the adapter stops: {@link ensureRegistration} and {@link reregister} then send no
+	 * further PUT, DELETE or POST to the controller and fail with {@link RegistrationStoppedError}.
+	 */
+	isStopped?: () => boolean;
+}
+
+/** The registration was abandoned because the adapter stopped. */
+export class RegistrationStoppedError extends StoppedError {
+	public constructor() {
+		super('Webhook registration abandoned: the instance is stopping');
+		this.name = 'RegistrationStoppedError';
+	}
 }
 
 /**
- * Delete all webhook endpoints on the controller that match either `id` or `url`.
- * Errors are swallowed and logged as warnings so the caller can proceed to re-create.
+ * Before every request that changes something at the controller.
  *
- * @param http
- * @param url
- * @param extraId
- * @param logger
+ * @param options Registration options (stop signal)
  */
-async function deleteAllMatching(
-	http: UnifiHttp,
-	url: string,
-	extraId: string | null,
-	logger: RegistrationOptions['logger'],
-): Promise<void> {
-	let list: Awaited<ReturnType<UnifiHttp['listWebhookEndpoints']>>;
+function stopCheck(options: RegistrationOptions): void {
 	try {
-		list = await http.listWebhookEndpoints();
-	} catch (err) {
-		logger.warn(`Could not list webhook endpoints before delete: ${(err as Error).message}`);
-		return;
+		throwIfStopped(options.isStopped);
+	} catch {
+		throw new RegistrationStoppedError();
 	}
-	const toDelete = new Set<string>();
-	for (const e of list) {
-		if (e.endpoint === url || e.id === extraId) {
-			toDelete.add(e.id);
-		}
+}
+
+/**
+ * A failed step that the registration may get over (logged, next step) — but never a stop: that
+ * ends the registration at once.
+ *
+ * @param err The error of the step
+ */
+function rethrowStop(err: unknown): void {
+	if (isStoppedError(err)) {
+		throw err instanceof RegistrationStoppedError ? err : new RegistrationStoppedError();
 	}
-	for (const id of toDelete) {
+}
+
+function sameEvents(a: readonly string[] | undefined, b: readonly string[]): boolean {
+	if (!Array.isArray(a)) {
+		return false;
+	}
+	const left = new Set(a);
+	const right = new Set(b);
+	return left.size === right.size && [...left].every(event => right.has(event));
+}
+
+/**
+ * Whether an endpoint belongs to this installation: it carries this installation's name or it is the
+ * endpoint whose id is stored in the instance configuration. Endpoints of other integrations, of
+ * other ioBroker hosts or with the name scheme of earlier versions (unless it is the stored one)
+ * are never touched.
+ *
+ * @param endpoint Endpoint from the controller's list
+ * @param options Registration options (name and stored id)
+ */
+function isOwn(endpoint: UnifiWebhookEndpoint, options: RegistrationOptions): boolean {
+	return endpoint.name === options.name || (!!options.storedId && endpoint.id === options.storedId);
+}
+
+async function deleteEndpoints(options: RegistrationOptions, ids: Iterable<string>, what: string): Promise<void> {
+	const { http, logger } = options;
+	for (const id of ids) {
+		stopCheck(options);
 		try {
 			await http.deleteWebhookEndpoint(id);
-			logger.info(`Deleted webhook endpoint ${id}.`);
+			logger.info(`Deleted ${what} ${id}.`);
 		} catch (err) {
-			logger.warn(`Failed to delete webhook endpoint ${id}: ${(err as Error).message}`);
+			rethrowStop(err);
+			logger.warn(`Failed to delete ${what} ${id}: ${(err as Error).message}`);
 		}
 	}
 }
 
-/**
- * Ensure a webhook endpoint matching `publicUrl` is registered with the controller.
- * The list endpoint returns the secret for every existing endpoint, so the secret is
- * read directly from there — no delete+recreate needed just to recover it.
- * Only registers a new endpoint when none with a matching URL (and secret) is found.
- *
- * @param options
- */
-export async function ensureRegistration(options: RegistrationOptions): Promise<RegistrationResult> {
-	const events = options.events ?? DEFAULT_WEBHOOK_EVENTS;
-	const list = await options.http.listWebhookEndpoints();
-	const existing = list.find(e => e.endpoint === options.publicUrl);
-
-	// Clean up stale endpoints registered under the same name but a different URL
-	// (e.g. from a previous network config or Docker IP change).
-	for (const e of list) {
-		if (e.endpoint !== options.publicUrl && e.name === options.name) {
-			options.logger.info(`Removing stale webhook endpoint ${e.id} with outdated URL ${e.endpoint}.`);
-			try {
-				await options.http.deleteWebhookEndpoint(e.id);
-			} catch (err) {
-				options.logger.warn(`Could not remove stale endpoint ${e.id}: ${(err as Error).message}`);
-			}
-		}
-	}
-
-	if (existing?.id && existing?.secret) {
-		options.logger.debug(`Webhook endpoint already registered: ${existing.id}`);
-		return { id: existing.id, secret: existing.secret, endpoint: existing.endpoint };
-	}
-	if (existing) {
-		options.logger.info(`Webhook endpoint exists but list did not return a secret — recreating.`);
-		try {
-			await options.http.deleteWebhookEndpoint(existing.id);
-		} catch (err) {
-			options.logger.warn(`Failed to delete stale webhook endpoint: ${(err as Error).message}`);
-		}
-	}
+async function createEndpoint(options: RegistrationOptions, events: readonly string[]): Promise<RegistrationResult> {
+	stopCheck(options);
 	const result = await options.http.createWebhookEndpoint({
 		name: options.name,
 		endpoint: options.publicUrl,
@@ -126,23 +138,159 @@ export async function ensureRegistration(options: RegistrationOptions): Promise<
 	return { id: result.endpoint.id, secret: result.endpoint.secret, endpoint: result.endpoint.endpoint };
 }
 
-export async function reregister(options: RegistrationOptions, storedId: string | null): Promise<RegistrationResult> {
-	// Delete by stored ID and by URL — cleans up stale or duplicate entries.
-	await deleteAllMatching(options.http, options.publicUrl, storedId, options.logger);
-	const result = await options.http.createWebhookEndpoint({
+/**
+ * Bring an existing endpoint in line with name, URL and event list via PUT /webhooks/endpoints/:id
+ * (API reference 11.5). The endpoint keeps its id and — per the documented response — its secret.
+ *
+ * @param options Registration options
+ * @param endpoint The endpoint to update
+ * @param events Events the endpoint has to deliver
+ * @returns The secret reported by the controller for the updated endpoint, if any
+ */
+async function updateEndpoint(
+	options: RegistrationOptions,
+	endpoint: UnifiWebhookEndpoint,
+	events: readonly string[],
+): Promise<string | undefined> {
+	stopCheck(options);
+	const updated = await options.http.updateWebhookEndpoint(endpoint.id, {
 		name: options.name,
 		endpoint: options.publicUrl,
-		events: [...(options.events ?? DEFAULT_WEBHOOK_EVENTS)],
+		events: [...events],
+		...(endpoint.headers && Object.keys(endpoint.headers).length > 0 ? { headers: endpoint.headers } : {}),
 	});
+	return typeof updated?.secret === 'string' && updated.secret ? updated.secret : undefined;
+}
+
+/**
+ * Ensure a webhook endpoint for `publicUrl` is registered with the controller and delivers all
+ * required events.
+ *
+ * - An endpoint that already exists for the URL is reused; a differing event list or name is brought
+ *   in line with an update (PUT) instead of delete + create, so id and secret stay the same and
+ *   nothing has to be written to the instance configuration (no adapter restart).
+ * - An endpoint of this installation with an outdated URL (changed IP) is updated the same way.
+ * - Only endpoints of this installation are ever changed or removed (see {@link isOwn}).
+ * - The list endpoint returns the secret of every endpoint. Should a controller omit it, the secret
+ *   stored for the same endpoint id is used; only without any secret the endpoint is recreated.
+ *
+ * @param options Registration options
+ */
+export async function ensureRegistration(options: RegistrationOptions): Promise<RegistrationResult> {
+	const events = options.events ?? DEFAULT_WEBHOOK_EVENTS;
+	const { logger } = options;
+	stopCheck(options);
+	const list = await options.http.listWebhookEndpoints();
+
+	let current = list.find(e => e.endpoint === options.publicUrl);
+	const staleOwn = list.filter(e => e.endpoint !== options.publicUrl && isOwn(e, options));
+
+	if (!current && staleOwn.length > 0) {
+		// Our endpoint points to an outdated URL (e.g. the IP of this host changed): move it.
+		const candidate = staleOwn.find(e => e.id === options.storedId) ?? staleOwn[0];
+		const secret = candidate.secret || (candidate.id === options.storedId ? options.storedSecret : undefined);
+		if (secret) {
+			try {
+				const updatedSecret = await updateEndpoint(options, candidate, events);
+				logger.info(
+					`Webhook endpoint ${candidate.id} moved from outdated URL ${candidate.endpoint} to ${options.publicUrl}.`,
+				);
+				staleOwn.splice(staleOwn.indexOf(candidate), 1);
+				current = {
+					...candidate,
+					name: options.name,
+					endpoint: options.publicUrl,
+					events: [...events],
+					secret: updatedSecret ?? secret,
+				};
+			} catch (err) {
+				rethrowStop(err);
+				logger.warn(
+					`Could not update webhook endpoint ${candidate.id} (${(err as Error).message}) — registering a new one.`,
+				);
+			}
+		}
+	}
+
+	// Remove what is left of this installation's endpoints with an outdated URL.
+	for (const e of staleOwn) {
+		stopCheck(options);
+		logger.info(`Removing stale webhook endpoint ${e.id} with outdated URL ${e.endpoint}.`);
+		try {
+			await options.http.deleteWebhookEndpoint(e.id);
+		} catch (err) {
+			rethrowStop(err);
+			logger.warn(`Could not remove stale endpoint ${e.id}: ${(err as Error).message}`);
+		}
+	}
+
+	if (current) {
+		const secret = current.secret || (current.id === options.storedId ? options.storedSecret : undefined);
+		if (current.id && secret) {
+			if (!sameEvents(current.events, events) || current.name !== options.name) {
+				try {
+					const updatedSecret = await updateEndpoint(options, current, events);
+					logger.info(`Webhook endpoint ${current.id} updated (name / subscribed events).`);
+					return { id: current.id, secret: updatedSecret ?? secret, endpoint: options.publicUrl };
+				} catch (err) {
+					rethrowStop(err);
+					logger.warn(
+						`Webhook endpoint ${current.id} could not be updated: ${(err as Error).message} — some event types may not be delivered.`,
+					);
+				}
+			} else {
+				logger.debug(`Webhook endpoint already registered: ${current.id}`);
+			}
+			return { id: current.id, secret, endpoint: current.endpoint };
+		}
+		stopCheck(options);
+		logger.info(`Webhook endpoint exists but its secret is not available — recreating.`);
+		try {
+			await options.http.deleteWebhookEndpoint(current.id);
+		} catch (err) {
+			rethrowStop(err);
+			logger.warn(`Failed to delete stale webhook endpoint: ${(err as Error).message}`);
+		}
+	}
+	return createEndpoint(options, events);
+}
+
+/**
+ * Delete this installation's endpoint(s) and register a fresh one — yields a new secret.
+ * Removed are: the endpoint for `publicUrl`, the endpoint with the stored id and endpoints carrying
+ * this installation's name. Everything else on the controller is left alone.
+ *
+ * @param options Registration options
+ * @param storedId Id of the endpoint registered earlier (overrides `options.storedId`)
+ */
+export async function reregister(options: RegistrationOptions, storedId: string | null): Promise<RegistrationResult> {
+	const events = options.events ?? DEFAULT_WEBHOOK_EVENTS;
+	const scoped: RegistrationOptions = { ...options, storedId };
+	const cleanup = async (): Promise<void> => {
+		let list: UnifiWebhookEndpoint[];
+		try {
+			list = await options.http.listWebhookEndpoints();
+		} catch (err) {
+			rethrowStop(err);
+			options.logger.warn(`Could not list webhook endpoints before delete: ${(err as Error).message}`);
+			return;
+		}
+		stopCheck(options);
+		const ids = new Set(list.filter(e => e.endpoint === options.publicUrl || isOwn(e, scoped)).map(e => e.id));
+		await deleteEndpoints(options, ids, 'webhook endpoint');
+	};
+
+	stopCheck(options);
+	await cleanup();
+	stopCheck(options);
+	const payload = { name: options.name, endpoint: options.publicUrl, events: [...events] };
+	const result = await options.http.createWebhookEndpoint(payload);
 	if (result.code === 'CODE_DEVICE_WEBHOOK_ENDPOINT_DUPLICATED') {
-		// Delete failed silently above — force-delete by URL and retry once.
+		// Delete failed silently above — clean up and retry once.
 		options.logger.warn(`Webhook endpoint still duplicated after delete — retrying cleanup.`);
-		await deleteAllMatching(options.http, options.publicUrl, null, options.logger);
-		const retry = await options.http.createWebhookEndpoint({
-			name: options.name,
-			endpoint: options.publicUrl,
-			events: [...(options.events ?? DEFAULT_WEBHOOK_EVENTS)],
-		});
+		await cleanup();
+		stopCheck(options);
+		const retry = await options.http.createWebhookEndpoint(payload);
 		if (!retry.endpoint?.id || !retry.endpoint?.secret) {
 			throw new Error(
 				'Webhook endpoint re-registration failed: response did not include id/secret after duplicate cleanup.',

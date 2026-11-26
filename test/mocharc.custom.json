@@ -1,10 +1,15 @@
 {
 	"require": [
-		"test/mocha.setup.js",
-		"ts-node/register",
-		"source-map-support/register"
+		"test/mocha.setup.js"
+	],
+	"spec": [
+		"src/**/*.test.ts",
+		"test/mock/**/*.test.js",
+		"test/contract/**/*.test.ts"
 	],
 	"watch-files": [
-		"src/**/*.test.ts"
-	]
+		"src/**/*.ts",
+		"test/mock/**/*.js"
+	],
+	"timeout": 5000
 }

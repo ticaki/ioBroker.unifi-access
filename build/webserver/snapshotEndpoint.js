@@ -21,10 +21,15 @@ __export(snapshotEndpoint_exports, {
   ThumbnailHandler: () => ThumbnailHandler
 });
 module.exports = __toCommonJS(snapshotEndpoint_exports);
+var import_pathSafety = require("../lib/pathSafety");
+var import_logThrottle = require("../lib/logThrottle");
 class ThumbnailHandler {
   options;
+  /** A dashboard may poll a broken URL every few seconds: at most one warning per kind and minute. */
+  failures;
   constructor(options) {
     this.options = options;
+    this.failures = new import_logThrottle.LogThrottle(options.logger);
   }
   matches = (req) => {
     var _a, _b;
@@ -57,7 +62,7 @@ class ThumbnailHandler {
     try {
       path = await this.options.resolvePath(deviceId);
     } catch (err) {
-      this.options.logger.warn(`Thumbnail path lookup failed: ${err.message}`);
+      this.failures.warn("lookup", `Thumbnail path lookup failed: ${err.message}`);
       res.statusCode = 500;
       res.end();
       return true;
@@ -67,6 +72,15 @@ class ThumbnailHandler {
       res.end("no thumbnail seen");
       return true;
     }
+    if ((0, import_pathSafety.sanitizeStaticPath)(path) === null) {
+      this.failures.warn(
+        `path:${deviceId}`,
+        `Thumbnail for ${deviceId} not served: invalid thumbnail path stored.`
+      );
+      res.statusCode = 404;
+      res.end();
+      return true;
+    }
     try {
       const buf = await http.getStaticResource(path);
       res.statusCode = 200;
@@ -74,7 +88,10 @@ class ThumbnailHandler {
       res.setHeader("Cache-Control", "no-store");
       res.end(buf);
     } catch (err) {
-      this.options.logger.warn(`Thumbnail fetch for ${deviceId} failed: ${err.message}`);
+      this.failures.warn(
+        `fetch:${deviceId}`,
+        `Thumbnail fetch for ${deviceId} failed: ${err.message}`
+      );
       res.statusCode = 502;
       res.end();
     }

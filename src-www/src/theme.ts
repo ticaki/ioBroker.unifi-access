@@ -17,6 +17,32 @@ function systemPrefersDark(): boolean {
     return typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches;
 }
 
+/**
+ * The theme of the panel.
+ *
+ * @param mode light or dark
+ */
+export function createPanelTheme(mode: ThemeMode): Theme {
+    return createTheme({
+        palette: {
+            mode,
+            primary: { main: '#0559c9' },
+            secondary: { main: '#1e293b' },
+        },
+        shape: { borderRadius: 10 },
+    });
+}
+
+/**
+ * Colour of the keyboard focus ring: at least 3:1 against the background in both modes (WCAG 1.4.11) -
+ * the primary colour itself is too dark on the dark background.
+ *
+ * @param theme theme of the panel
+ */
+export function focusRingColor(theme: Theme): string {
+    return theme.palette.mode === 'dark' ? theme.palette.primary.light : theme.palette.primary.main;
+}
+
 export function useThemeMode(): { mode: ThemeMode; toggle: () => void; theme: Theme } {
     const [mode, setMode] = useState<ThemeMode>(() => readStoredMode() ?? (systemPrefersDark() ? 'dark' : 'light'));
 
@@ -26,24 +52,17 @@ export function useThemeMode(): { mode: ThemeMode; toggle: () => void; theme: Th
         }
         const mq = window.matchMedia('(prefers-color-scheme: dark)');
         const onChange = (e: MediaQueryListEvent): void => {
-            setMode(e.matches ? 'dark' : 'light');
+            // The user may have chosen a mode with the toggle since this listener was registered:
+            // an explicit choice wins over the system setting.
+            if (!readStoredMode()) {
+                setMode(e.matches ? 'dark' : 'light');
+            }
         };
         mq.addEventListener('change', onChange);
         return () => mq.removeEventListener('change', onChange);
     }, []);
 
-    const theme = useMemo(
-        () =>
-            createTheme({
-                palette: {
-                    mode,
-                    primary: { main: '#0559c9' },
-                    secondary: { main: '#1e293b' },
-                },
-                shape: { borderRadius: 10 },
-            }),
-        [mode],
-    );
+    const theme = useMemo(() => createPanelTheme(mode), [mode]);
 
     const toggle = (): void => {
         setMode(prev => {

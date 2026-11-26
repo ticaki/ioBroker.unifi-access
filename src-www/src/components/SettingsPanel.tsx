@@ -1,11 +1,22 @@
 import { Box, Divider, Drawer, FormControlLabel, IconButton, Slider, Stack, Switch, Tooltip, Typography } from '@mui/material';
 import SettingsIcon from '@mui/icons-material/Settings';
-import { useState } from 'react';
+import { type JSX, useEffect, useState } from 'react';
 import { useSettings } from '../settings';
+
+/**
+ * Rendered inside the drawer: its content (with the sliders) is unmounted when the drawer has closed. A
+ * slider that is still being dragged then never sends onChangeCommitted - its value is stored here.
+ *
+ * @param props.onUnmount what to run when the drawer content goes away
+ */
+function EndDragOnUnmount({ onUnmount }: { onUnmount: () => void }): null {
+    useEffect(() => onUnmount, [onUnmount]);
+    return null;
+}
 
 export function SettingsPanel(): JSX.Element {
     const [open, setOpen] = useState(false);
-    const { settings, update } = useSettings();
+    const { settings, update, endDrag } = useSettings();
 
     return (
         <>
@@ -23,6 +34,7 @@ export function SettingsPanel(): JSX.Element {
                 onClose={() => setOpen(false)}
             >
                 <Box sx={{ width: 300, p: 3 }}>
+                    <EndDragOnUnmount onUnmount={endDrag} />
                     <Typography
                         variant="h6"
                         sx={{ mb: 3 }}
@@ -42,7 +54,9 @@ export function SettingsPanel(): JSX.Element {
                         max={200}
                         step={8}
                         value={settings.thumbWidth}
-                        onChange={(_, v) => update({ thumbWidth: v as number })}
+                        aria-label="Event thumbnail width"
+                        onChange={(_, v) => update({ thumbWidth: v as number }, false)}
+                        onChangeCommitted={(_, v) => update({ thumbWidth: v as number })}
                         marks={[
                             { value: 0, label: 'Off' },
                             { value: 96, label: '96' },
@@ -63,7 +77,9 @@ export function SettingsPanel(): JSX.Element {
                         max={600}
                         step={20}
                         value={settings.snapshotHeight}
-                        onChange={(_, v) => update({ snapshotHeight: v as number })}
+                        aria-label="Last event image height"
+                        onChange={(_, v) => update({ snapshotHeight: v as number }, false)}
+                        onChangeCommitted={(_, v) => update({ snapshotHeight: v as number })}
                         marks={[
                             { value: 0, label: 'Auto' },
                             { value: 240, label: '240' },
@@ -83,7 +99,9 @@ export function SettingsPanel(): JSX.Element {
                         max={2000}
                         step={50}
                         value={settings.maxWidth}
-                        onChange={(_, v) => update({ maxWidth: v as number })}
+                        aria-label="Max. width"
+                        onChange={(_, v) => update({ maxWidth: v as number }, false)}
+                        onChangeCommitted={(_, v) => update({ maxWidth: v as number })}
                         marks={[
                             { value: 600, label: '600' },
                             { value: 1200, label: '1200' },

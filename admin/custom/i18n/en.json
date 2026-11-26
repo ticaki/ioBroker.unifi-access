@@ -1,20 +1,16 @@
 {
-    "auth_status_loading": "Checking adapter status…",
-    "auth_status_connected": "Connected to UniFi Access controller",
-    "auth_status_connected_named": "Connected to %s",
-    "auth_status_missingToken": "API token missing — fill it in and click 'Test connection'",
-    "auth_status_unauthorized": "Token rejected by controller (unauthorized)",
-    "auth_status_network": "Cannot reach controller (network error)",
-    "auth_status_disconnected": "Not connected",
-
     "auth_test_button": "Test connection",
     "auth_test_tooltip": "Probe the controller with the values entered above (does not save).",
     "auth_test_running": "Probing controller…",
     "auth_test_missingFields": "Please enter host and API token first.",
+    "auth_test_placeholder": "The API token field still contains the masked placeholder. Clear the field completely and enter the full token again.",
     "auth_test_success": "Connection successful",
-    "auth_test_success_named": "Connection successful — controller: %s",
+    "auth_test_success_devices": "Connection successful — %s devices found",
+    "auth_test_success_one_device": "Connection successful — 1 device found",
+    "auth_test_success_no_devices": "Connection successful — no devices found",
     "auth_test_error_unauthorized": "Token rejected (unauthorized).",
     "auth_test_error_network": "Cannot reach the controller (network error).",
+    "auth_test_error_tls": "The certificate of the controller could not be verified (%s). Enter the CA certificate or switch off \"Verify TLS certificate\".",
     "auth_test_error_unknown": "Connection test failed.",
 
     "devices_title": "Discovered UniFi Access devices",
@@ -31,8 +27,25 @@
 
     "actor_select_label": "Unlock actor (shown in logs)",
     "actor_select_none": "None (use API token name)",
+    "actor_select_unknown": "User not in list (ID: %s)",
     "actor_select_loading": "Loading users…",
     "actor_select_error": "Could not load users. Is the adapter running?",
     "actor_select_refresh": "Refresh user list",
-    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door."
+    "actor_select_help": "The selected user appears in UniFi Access logs and webhooks when ioBroker unlocks a door.",
+
+    "generic_webhook_urls": "Webhook URL(s)",
+    "generic_webhook_url_loading": "Loading network interfaces…",
+    "generic_webhook_url_no_addresses": "No network interface addresses found.",
+    "generic_webhook_copy": "Copy to clipboard",
+    "generic_webhook_copied": "Copied!",
+    "generic_webhook_server_not_running": "The HTTP server of the adapter is not running at the moment, so this URL does not answer yet. Save the settings and check the log of the instance if it still does not start (port in use?).",
+    "generic_webhook_tls_inactive": "TLS is enabled, but the certificates could not be loaded (%s). The built-in server is not started until this is fixed.",
+    "generic_webhook_public_base_unsaved": "The public base URL in the form differs from the saved one. The URL shown follows the form; save the settings to apply it.",
+    "generic_webhook_unsaved": "Listen address, port, TLS or listen path in the form differ from the saved settings. The URL shown follows the form; save the settings to apply it.",
+    "generic_webhook_public_base_invalid": "The saved public base URL \"%s\" is not usable (expected http(s)://host[:port][/path], no user name or password, port 1-65535). The adapter builds the URLs from the listen address instead; correct it on the \"HTTP server\" tab.",
+
+    "adapter_not_running": "The adapter instance is not running. Start it and try again.",
+    "adapter_no_response": "The adapter did not respond in time.",
+    "adapter_unknown_command": "The running adapter instance does not know this request. Adapter and settings page seem to have different versions — restart the instance.",
+    "adapter_not_configured": "The running instance has no controller host or API token yet. Enter both, save and try again."
 }

@@ -1,7 +1,10 @@
 {
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
-		"noImplicitAny": false
+		"noImplicitAny": false,
+		// the plain-JS test helpers (mock controller, integration tests) are only loosely typed via JSDoc
+		"strictNullChecks": false,
+		"useUnknownInCatchVariables": false
 	},
 	"include": [
 		"./**/*.js"

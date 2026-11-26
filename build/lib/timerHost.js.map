@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/lib/timerHost.ts"],
+  "sourcesContent": ["/**\n * The timer functions of the adapter instance (`adapter.setTimeout`, `adapter.setInterval`, \u2026),\n * reduced to what the helper classes need. js-controller tracks these timers and clears them when\n * the adapter stops; classes in `src/lib` get this interface injected instead of the whole adapter\n * so they stay testable with a small fake.\n */\nexport interface TimerHost {\n\t/** Run `callback` once after `ms` milliseconds. May return `undefined` while the adapter is stopping. */\n\tsetTimeout: (callback: () => void, ms: number) => unknown;\n\tclearTimeout: (handle: unknown) => void;\n\t/** Run `callback` every `ms` milliseconds. May return `undefined` while the adapter is stopping. */\n\tsetInterval: (callback: () => void, ms: number) => unknown;\n\tclearInterval: (handle: unknown) => void;\n}\n"],
+  "mappings": ";;;;;;;;;;;;;;AAAA;AAAA;",
+  "names": []
+}

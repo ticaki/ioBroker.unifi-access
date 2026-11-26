@@ -1,7 +1,8 @@
-import { Box, Card, CardContent, List, ListItem, ListItemText, Stack, Typography } from '@mui/material';
-import { useEffect, useMemo, useState } from 'react';
-import { useIobState } from '../socket';
+import { Box, ButtonBase, Card, CardContent, List, ListItem, ListItemText, Stack, Typography } from '@mui/material';
+import { type JSX, useEffect, useMemo, useRef, useState } from 'react';
+import { useIobState, useIobStateArrival } from '../socket';
 import { useSettings } from '../settings';
+import { focusRingColor } from '../theme';
 import { EventMediaModal } from './EventMediaModal';
 
 // Adapter triggers the Protect snapshot fetch via system-log poll for these event types only.
@@ -11,10 +12,14 @@ import { EventMediaModal } from './EventMediaModal';
 const PROTECT_SNAPSHOT_EVENTS = new Set(['access.door.unlock', 'access.temporary_unlock.start']);
 const SNAPSHOT_WAIT_MS = 4000;
 
-interface EventEntry {
+const MAX_EVENTS = 50;
+
+export interface EventEntry {
     ts: number;
     type: string;
     subtype?: string;
+    /** `access.door.unlock`: false when the attempt was refused ("BLOCKED", "Access Denied"), decided by the adapter */
+    granted?: boolean;
     deviceName?: string;
     doorName?: string;
     userName?: string;
@@ -22,6 +27,136 @@ interface EventEntry {
     protectVideoUrl?: string;
     protectCameraId?: string;
 }
+
+function text(value: unknown): string | undefined {
+    return typeof value === 'string' && value ? value : undefined;
+}
+
+/** Only absolute http(s) URLs are usable as image/video source of the panel */
+function mediaUrl(value: unknown): string | undefined {
+    return typeof value === 'string' && /^https?:\/\//i.test(value) ? value : undefined;
+}
+
+/**
+ * Reads the JSON list of `events.last`. The state can be empty, truncated or written by something else
+ * than the adapter: whatever is not a usable event is skipped instead of crashing the whole page.
+ *
+ * @param raw value of the state
+ */
+export function parseEvents(raw: unknown): EventEntry[] {
+    if (typeof raw !== 'string' || !raw) {
+        return [];
+    }
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return [];
+    }
+    if (!Array.isArray(parsed)) {
+        return [];
+    }
+    const events: EventEntry[] = [];
+    for (const item of parsed as unknown[]) {
+        if (!item || typeof item !== 'object') {
+            continue;
+        }
+        const e = item as Record<string, unknown>;
+        if (typeof e.ts !== 'number' || !Number.isFinite(e.ts) || typeof e.type !== 'string' || !e.type) {
+            continue;
+        }
+        events.push({
+            ts: e.ts,
+            type: e.type,
+            subtype: text(e.subtype),
+            granted: typeof e.granted === 'boolean' ? e.granted : undefined,
+            deviceName: text(e.deviceName),
+            doorName: text(e.doorName),
+            userName: text(e.userName),
+            protectSnapshotUrl: mediaUrl(e.protectSnapshotUrl),
+            protectVideoUrl: mediaUrl(e.protectVideoUrl),
+            protectCameraId: text(e.protectCameraId),
+        });
+        if (events.length === MAX_EVENTS) {
+            break;
+        }
+    }
+    return events;
+}
+
+/** Monotonic clock of the browser: only differences of it are used, never its absolute value */
+function browserClock(): number {
+    return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
+}
+
+/** An event together with the moment its waiting window started, on the clock of {@link browserClock} */
+interface TimedEvent {
+    event: EventEntry;
+    startedAt: number;
+}
+
+function usableTs(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Places the events of a list that arrived as a change (live) on the clock of the browser without trusting
+ * its date and time: a wall tablet whose clock is minutes off must not count down for minutes or skip the
+ * countdown.
+ *
+ * How old an event was when the list arrived is measured from the event's own `ts` on the clock of
+ * ioBroker: "now" on that clock is `ts` of the state `events.last` - the list arriving as a change was
+ * written just then. (A list read when the page opens or reconnects may be old; it is never placed here
+ * but shown as over at once, see EventLogCard.) Never negative, so an event of a controller whose clock is
+ * ahead starts its window when it arrives - every window ends at the latest {@link SNAPSHOT_WAIT_MS} after
+ * the list arrived in the browser.
+ *
+ * @param events events of the list
+ * @param stateTs `ts` of the state `events.last`
+ * @param receivedAt when the list arrived, see {@link browserClock}
+ */
+export function timeEvents(events: EventEntry[], stateTs: unknown, receivedAt: number): TimedEvent[] {
+    const serverNow = usableTs(stateTs);
+    return events.map(event => ({
+        event,
+        startedAt: receivedAt - (serverNow === undefined ? 0 : Math.max(0, serverNow - event.ts)),
+    }));
+}
+
+/** Identifies an event across lists - the snapshot URL that is added later does not change it */
+function windowKey(event: EventEntry): string {
+    return JSON.stringify([event.ts, event.type, event.doorName ?? '', event.deviceName ?? '', event.userName ?? '']);
+}
+
+/**
+ * React keys of the list entries: the same event keeps its key when a new event is put in front of it (an
+ * index key would change for every entry - the entries would be built anew and the focused snapshot button
+ * would lose the keyboard focus). Identical events are numbered in their order.
+ *
+ * @param events the events in the order shown
+ */
+export function entryKeys(events: EventEntry[]): string[] {
+    const seen = new Map<string, number>();
+    return events.map(event => {
+        const key = windowKey(event);
+        const n = seen.get(key) ?? 0;
+        seen.set(key, n + 1);
+        return n === 0 ? key : `${key}#${n}`;
+    });
+}
+
+function isSnapshotPending({ event, startedAt }: TimedEvent, now: number): boolean {
+    return PROTECT_SNAPSHOT_EVENTS.has(event.type) && !event.protectSnapshotUrl && now - startedAt < SNAPSHOT_WAIT_MS;
+}
+
+/** Label lookup that does not fall for keys like `constructor` */
+function labelOf(labels: Record<string, string>, key: string): string {
+    // not Object.hasOwn(): the build targets Chrome 89 (old wall tablets), which does not have it
+    return Object.prototype.hasOwnProperty.call(labels, key) ? labels[key] : key;
+}
+
+/** Label of a refused `access.door.unlock` (granted false) */
+export const ACCESS_DENIED_LABEL = 'Access denied';
 
 const EVENT_LABELS: Record<string, string> = {
     'access.remote_view': 'Doorbell ringing',
@@ -52,43 +187,63 @@ const SUBTYPE_LABELS: Record<string, string> = {
 };
 
 export function EventLogCard(): JSX.Element {
-    const last = useIobState('events.last');
+    // Only a list that arrives as a change while the page is open can hold an event whose snapshot is
+    // still on its way. The list read when the page opens or reconnects starts no countdown (R2F-01).
+    const { state: last, live: liveList } = useIobStateArrival('events.last');
+    // Camera snapshots only arrive while the adapter is logged in to UniFi Protect. Without it no
+    // placeholder is shown - it would count down and end in "Not available" for every door opening.
+    const protectConnected = useIobState('info.protectConnected')?.val === true;
     const { settings } = useSettings();
+    const showThumbs = settings.thumbWidth > 0;
     const [modalEvent, setModalEvent] = useState<EventEntry | null>(null);
-    const [now, setNow] = useState<number>(() => Date.now());
+    const [now, setNow] = useState<number>(browserClock);
+    const [brokenImages, setBrokenImages] = useState<ReadonlySet<string>>(() => new Set());
 
-    const events = useMemo<EventEntry[]>(() => {
-        if (typeof last?.val !== 'string' || !last.val) {
-            return [];
-        }
-        try {
-            const parsed = JSON.parse(last.val) as EventEntry[];
-            return Array.isArray(parsed) ? parsed.slice(0, 50) : [];
-        } catch {
-            return [];
-        }
-    }, [last]);
+    // a new value of the state (new event, snapshot URL added) is a new arrival
+    const receivedAt = useMemo(() => browserClock(), [last]);
+    // Waiting window of each event, kept across lists: an event keeps the window it got when it first
+    // showed up - a list written again (new event in front, snapshot URL added) neither restarts nor
+    // starts it, so an event read as "Not available" stays so.
+    const windows = useRef(new Map<string, number>());
+    const timed = useMemo<TimedEvent[]>(() => {
+        const fresh = liveList
+            ? timeEvents(parseEvents(last?.val), last?.ts, receivedAt)
+            : parseEvents(last?.val).map(event => ({ event, startedAt: Number.NEGATIVE_INFINITY }));
+        const next = new Map<string, number>();
+        const placed = fresh.map(({ event, startedAt }) => {
+            const key = windowKey(event);
+            const kept = next.get(key) ?? windows.current.get(key) ?? startedAt;
+            next.set(key, kept);
+            return { event, startedAt: kept };
+        });
+        windows.current = next;
+        return placed;
+    }, [last, receivedAt, liveList]);
+    const keys = useMemo(() => entryKeys(timed.map(t => t.event)), [timed]);
 
     useEffect(() => {
         // Tick while any access.door.unlock event is still in its waiting window.
         // Stop only once every pending event has either resolved (URL) or fully timed out —
         // otherwise the JSX never flips from countdown to "Not available" because `now` is stale.
-        const tickNow = Date.now();
-        const hasPending = events.some(
-            e =>
-                PROTECT_SNAPSHOT_EVENTS.has(e.type) &&
-                !e.protectSnapshotUrl &&
-                tickNow - e.ts < SNAPSHOT_WAIT_MS,
-        );
-        if (!hasPending) {
-            // No active waiting window — but force one render with a fresh `now` so old
-            // events (loaded already past their timeout) settle on showNoSnapshot reliably.
-            setNow(tickNow);
+        const tickNow = browserClock();
+        // Always render once with a fresh `now`, so old events (loaded already past their timeout)
+        // settle on showNoSnapshot reliably.
+        setNow(tickNow);
+        // no countdown is shown while the thumbnails are switched off: nothing to tick for
+        if (!protectConnected || !showThumbs || !timed.some(t => isSnapshotPending(t, tickNow))) {
             return;
         }
-        const id = setInterval(() => setNow(Date.now()), 250);
+        // ends on its own: every window is over SNAPSHOT_WAIT_MS after the list arrived (timeEvents)
+        const id = setInterval(() => {
+            const current = browserClock();
+            setNow(current);
+            if (!timed.some(t => isSnapshotPending(t, current))) {
+                // Every waiting window is over: this was the last render that was needed.
+                clearInterval(id);
+            }
+        }, 250);
         return () => clearInterval(id);
-    }, [events]);
+    }, [timed, protectConnected, showThumbs]);
 
     return (
         <>
@@ -100,7 +255,7 @@ export function EventLogCard(): JSX.Element {
                     >
                         Recent events
                     </Typography>
-                    {events.length === 0 ? (
+                    {timed.length === 0 ? (
                         <Typography
                             variant="body2"
                             color="text.secondary"
@@ -112,23 +267,38 @@ export function EventLogCard(): JSX.Element {
                             dense
                             disablePadding
                         >
-                            {events.map((e, i) => {
-                                const label = EVENT_LABELS[e.type] ?? e.type;
-                                const subtypeLabel = e.subtype ? (SUBTYPE_LABELS[e.subtype] ?? e.subtype) : undefined;
+                            {timed.map(({ event: e, startedAt }, i) => {
+                                const denied = e.type === 'access.door.unlock' && e.granted === false;
+                                const label = denied ? ACCESS_DENIED_LABEL : labelOf(EVENT_LABELS, e.type);
+                                // the result of an unlock is told by the label; its raw text ("Access Granted",
+                                // "BLOCKED") is only shown for entries written before the adapter reported it
+                                const subtypeLabel =
+                                    e.subtype && !(e.type === 'access.door.unlock' && e.granted !== undefined)
+                                        ? labelOf(SUBTYPE_LABELS, e.subtype)
+                                        : undefined;
                                 const context = [e.doorName, e.userName].filter(Boolean).join(' · ');
-                                const elapsed = Math.max(0, now - e.ts);
+                                const elapsed = Math.max(0, now - startedAt);
+                                const snapshotUrl =
+                                    e.protectSnapshotUrl && !brokenImages.has(e.protectSnapshotUrl)
+                                        ? e.protectSnapshotUrl
+                                        : undefined;
                                 const expectsSnapshot =
                                     !e.protectSnapshotUrl &&
+                                    protectConnected &&
                                     PROTECT_SNAPSHOT_EVENTS.has(e.type) &&
                                     settings.thumbWidth > 0;
                                 const remaining = SNAPSHOT_WAIT_MS - elapsed;
                                 const showCountdown = expectsSnapshot && remaining > 0;
-                                const showNoSnapshot = expectsSnapshot && remaining <= 0;
+                                // Also if the image exists but cannot be loaded (adapter stopped, Protect
+                                // switched off since, page served via https: mixed content).
+                                const showNoSnapshot =
+                                    (expectsSnapshot && remaining <= 0) ||
+                                    (!!e.protectSnapshotUrl && !snapshotUrl && settings.thumbWidth > 0);
                                 // 3 → 2 → 1 in the first 3s, then lingers on 1 for the remainder.
                                 const countdown = Math.max(1, 3 - Math.floor(elapsed / 1000));
                                 return (
                                     <ListItem
-                                        key={`${e.ts}-${i}`}
+                                        key={keys[i]}
                                         disableGutters
                                         sx={{ gap: 1, alignItems: 'flex-start' }}
                                     >
@@ -137,10 +307,12 @@ export function EventLogCard(): JSX.Element {
                                                 <Stack
                                                     direction="row"
                                                     spacing={1}
-                                                    alignItems="center"
-                                                    flexWrap="wrap"
+                                                    sx={{ alignItems: 'center', flexWrap: 'wrap' }}
                                                 >
-                                                    <Typography variant="body2">
+                                                    <Typography
+                                                        variant="body2"
+                                                        color={denied ? 'error' : undefined}
+                                                    >
                                                         {label}
                                                         {subtypeLabel ? (
                                                             <Typography
@@ -165,21 +337,38 @@ export function EventLogCard(): JSX.Element {
                                             }
                                             secondary={new Date(e.ts).toLocaleString()}
                                         />
-                                        {e.protectSnapshotUrl && settings.thumbWidth > 0 ? (
-                                            <Box
-                                                component="img"
-                                                src={e.protectSnapshotUrl}
-                                                alt="camera"
+                                        {snapshotUrl && settings.thumbWidth > 0 ? (
+                                            // a real button: reachable with the keyboard, opens with Enter / Space
+                                            <ButtonBase
                                                 onClick={() => setModalEvent(e)}
-                                                sx={{
-                                                    width: settings.thumbWidth,
-                                                    height: 'auto',
+                                                aria-label={`Show camera image${e.doorName ? ` of ${e.doorName}` : ''}, ${new Date(e.ts).toLocaleString()}`}
+                                                focusRipple
+                                                sx={theme => ({
                                                     borderRadius: 0.5,
-                                                    cursor: 'pointer',
                                                     flexShrink: 0,
                                                     mt: 0.5,
-                                                }}
-                                            />
+                                                    // clearly visible keyboard focus, in both themes
+                                                    '&.Mui-focusVisible, &:focus-visible': {
+                                                        outline: `3px solid ${focusRingColor(theme)}`,
+                                                        outlineOffset: '2px',
+                                                    },
+                                                })}
+                                            >
+                                                <Box
+                                                    component="img"
+                                                    src={snapshotUrl}
+                                                    alt=""
+                                                    onError={() =>
+                                                        setBrokenImages(prev => new Set(prev).add(snapshotUrl))
+                                                    }
+                                                    sx={{
+                                                        width: settings.thumbWidth,
+                                                        height: 'auto',
+                                                        borderRadius: 0.5,
+                                                        display: 'block',
+                                                    }}
+                                                />
+                                            </ButtonBase>
                                         ) : showCountdown ? (
                                             <Box
                                                 sx={{

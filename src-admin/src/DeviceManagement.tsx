@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import {
 	Alert,
 	Box,
@@ -17,7 +17,8 @@ import DoorbellIcon from '@mui/icons-material/Doorbell';
 import LockOpenIcon from '@mui/icons-material/LockOpen';
 import RssFeedIcon from '@mui/icons-material/RssFeed';
 import { ConfigGeneric, type ConfigGenericProps, type ConfigGenericState } from '@iobroker/json-config';
-import { I18n } from '@iobroker/adapter-react-v5';
+import { I18n } from '@iobroker/gui-components';
+import { describeAdapterError, describeRequestError, requestAdapter } from './adapterRequest';
 
 interface UnifiDeviceEntry {
 	id: string;
@@ -29,6 +30,26 @@ interface UnifiDeviceEntry {
 	lastSeenAt?: string;
 }
 
+function normalizeDevices(raw: unknown[]): UnifiDeviceEntry[] {
+	const devices: UnifiDeviceEntry[] = [];
+	for (const entry of raw) {
+		const device = entry as Partial<UnifiDeviceEntry> | null;
+		if (!device || typeof device.id !== 'string' || !device.id) {
+			continue;
+		}
+		devices.push({
+			...device,
+			id: device.id,
+			name: typeof device.name === 'string' && device.name ? device.name : device.id,
+			model: typeof device.model === 'string' ? device.model : '',
+			capabilities: Array.isArray(device.capabilities)
+				? device.capabilities.filter(c => typeof c === 'string')
+				: [],
+		});
+	}
+	return devices;
+}
+
 interface DeviceManagementState extends ConfigGenericState {
 	loaded: boolean;
 	loading: boolean;
@@ -38,6 +59,9 @@ interface DeviceManagementState extends ConfigGenericState {
 }
 
 class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagementState> {
+	private unmounted = false;
+	private requestCounter = 0;
+
 	constructor(props: ConfigGenericProps) {
 		super(props);
 		Object.assign(this.state, {
@@ -49,36 +73,53 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 		} satisfies Partial<DeviceManagementState>);
 	}
 
-	componentDidMount(): void {
-		super.componentDidMount();
-		void this.loadDevices();
+	async componentDidMount(): Promise<void> {
+		await super.componentDidMount();
+		await this.loadDevices();
+	}
+
+	componentDidUpdate(prevProps: ConfigGenericProps): void {
+		// The instance was started while the settings are open: fetch what could not be loaded before.
+		if (!prevProps.alive && this.props.alive && !this.state.loading && this.state.error) {
+			void this.loadDevices();
+		}
+	}
+
+	componentWillUnmount(): void {
+		this.unmounted = true;
+		super.componentWillUnmount();
 	}
 
 	private async loadDevices(): Promise<void> {
+		const requestId = ++this.requestCounter;
 		this.setState({ loading: true, error: null });
 		try {
-			const raw: unknown = await this.props.oContext.socket.sendTo(
-				`unifi-access.${this.props.oContext.instance}`,
+			const r = await requestAdapter<{ devices?: unknown; error?: string } | undefined>(
+				this.props,
 				'listDevices',
-				{},
 			);
-			const r = raw as { devices?: UnifiDeviceEntry[]; error?: string } | undefined;
-			if (r?.devices) {
+			if (this.unmounted || requestId !== this.requestCounter) {
+				return;
+			}
+			if (Array.isArray(r?.devices)) {
 				this.setState({
-					devices: r.devices,
+					devices: normalizeDevices(r.devices),
 					loaded: true,
 					loading: false,
 				});
 			} else {
 				this.setState({
-					error: r?.error ?? I18n.t('devices_error_load'),
+					error: describeAdapterError(r?.error, 'devices_error_load'),
 					loaded: true,
 					loading: false,
 				});
 			}
 		} catch (err) {
+			if (this.unmounted || requestId !== this.requestCounter) {
+				return;
+			}
 			this.setState({
-				error: (err as Error)?.message ?? I18n.t('devices_error_load'),
+				error: describeRequestError(err, 'devices_error_load'),
 				loaded: true,
 				loading: false,
 			});
@@ -86,14 +127,12 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 	}
 
 	private renderCapabilityChip(capability: string): React.JSX.Element {
-		const map: Record<
-			string,
-			{ label: string; icon: React.JSX.Element; color: 'primary' | 'secondary' | 'default' }
-		> = {
+		const map: Record<string, { label: string; icon?: React.JSX.Element; color: 'primary' | 'default' }> = {
 			'event-thumbnail': {
 				label: I18n.t('devices_cap_event_thumbnail'),
 				icon: <ImageIcon fontSize="small" />,
-				color: 'secondary',
+				// not "secondary": in the dark theme of the admin that is a dark blue on a dark background
+				color: 'primary',
 			},
 			doorbell: {
 				label: I18n.t('devices_cap_doorbell'),
@@ -111,7 +150,9 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 				color: 'default',
 			},
 		};
-		const info = map[capability] ?? { label: capability, icon: <></>, color: 'default' as const };
+		// No icon for a capability this version does not know: MUI clones the icon element to set a
+		// class name, which React rejects for a fragment.
+		const info = map[capability] ?? { label: capability, color: 'default' as const };
 		return (
 			<Chip
 				key={capability}
@@ -139,14 +180,13 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 				<CardContent>
 					<Stack
 						direction="row"
-						justifyContent="space-between"
-						alignItems="center"
 						spacing={1}
+						sx={{ justifyContent: 'space-between', alignItems: 'center' }}
 					>
 						<Stack>
 							<Typography
 								variant="subtitle1"
-								fontWeight="bold"
+								sx={{ fontWeight: 'bold' }}
 							>
 								{device.name}
 							</Typography>
@@ -177,9 +217,7 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 			<Box sx={{ width: '100%' }}>
 				<Stack
 					direction="row"
-					justifyContent="space-between"
-					alignItems="center"
-					sx={{ mb: 2 }}
+					sx={{ justifyContent: 'space-between', alignItems: 'center', mb: 2 }}
 				>
 					<Typography variant="h6">{I18n.t('devices_title')}</Typography>
 					<Button
@@ -215,7 +253,7 @@ class DeviceManagement extends ConfigGeneric<ConfigGenericProps, DeviceManagemen
 					<Stack
 						direction="row"
 						spacing={1}
-						alignItems="center"
+						sx={{ alignItems: 'center' }}
 					>
 						<CircularProgress size={20} />
 						<Typography variant="body2">{I18n.t('devices_loading')}</Typography>

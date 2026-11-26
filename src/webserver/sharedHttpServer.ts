@@ -53,6 +53,25 @@ export class SharedHttpServer {
 		return this.options.tls ? 'https' : 'http';
 	}
 
+	/** Number of registered handlers — a server without handlers has nothing to serve. */
+	get handlerCount(): number {
+		return this.handlers.length;
+	}
+
+	/**
+	 * The port the server listens on — the one the OS picked when it was configured as 0 (tests bind
+	 * to port 0 instead of probing for a free port and hoping it stays free).
+	 */
+	get port(): number {
+		const address = this.server?.address();
+		return address && typeof address === 'object' ? address.port : this.options.port;
+	}
+
+	/** Whether the server is listening. */
+	get listening(): boolean {
+		return this.server !== null;
+	}
+
 	start(): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const handler = (req: IncomingMessage, res: ServerResponse): void => {
@@ -67,8 +86,22 @@ export class SharedHttpServer {
 			server.once('error', reject);
 			const onListening = (): void => {
 				server.removeListener('error', reject);
+				// An 'error' without listener is thrown as uncaught exception and would terminate the
+				// adapter — keep a listener for the whole lifetime of the server.
+				server.on('error', (err: Error) => {
+					this.options.logger.warn(`Shared ${this.scheme} server error: ${err.message}`);
+				});
+				server.on('clientError', (err: Error, socket) => {
+					// malformed request or TLS handshake failure of a client: answer if possible, never throw
+					if (socket.writable) {
+						socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+					} else {
+						socket.destroy();
+					}
+					this.options.logger.debug(`Shared ${this.scheme} server: client error: ${err.message}`);
+				});
 				this.server = server;
-				const where = this.options.ip ? `${this.options.ip}:${this.options.port}` : `:${this.options.port}`;
+				const where = this.options.ip ? `${this.options.ip}:${this.port}` : `:${this.port}`;
 				this.options.logger.info(`Shared ${this.scheme} server listening on ${where}`);
 				resolve();
 			};
@@ -86,8 +119,12 @@ export class SharedHttpServer {
 				resolve();
 				return;
 			}
-			this.server.close(() => resolve());
+			const server = this.server;
 			this.server = null;
+			server.close(() => resolve());
+			// close() alone waits for keep-alive and in-flight connections — drop them, so stopping the
+			// adapter cannot hang on a client that never disconnects.
+			server.closeAllConnections();
 		});
 	}
 

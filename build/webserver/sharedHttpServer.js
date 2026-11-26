@@ -36,6 +36,23 @@ class SharedHttpServer {
   get scheme() {
     return this.options.tls ? "https" : "http";
   }
+  /** Number of registered handlers — a server without handlers has nothing to serve. */
+  get handlerCount() {
+    return this.handlers.length;
+  }
+  /**
+   * The port the server listens on — the one the OS picked when it was configured as 0 (tests bind
+   * to port 0 instead of probing for a free port and hoping it stays free).
+   */
+  get port() {
+    var _a;
+    const address = (_a = this.server) == null ? void 0 : _a.address();
+    return address && typeof address === "object" ? address.port : this.options.port;
+  }
+  /** Whether the server is listening. */
+  get listening() {
+    return this.server !== null;
+  }
   start() {
     return new Promise((resolve, reject) => {
       const handler = (req, res) => {
@@ -48,8 +65,19 @@ class SharedHttpServer {
       server.once("error", reject);
       const onListening = () => {
         server.removeListener("error", reject);
+        server.on("error", (err) => {
+          this.options.logger.warn(`Shared ${this.scheme} server error: ${err.message}`);
+        });
+        server.on("clientError", (err, socket) => {
+          if (socket.writable) {
+            socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+          } else {
+            socket.destroy();
+          }
+          this.options.logger.debug(`Shared ${this.scheme} server: client error: ${err.message}`);
+        });
         this.server = server;
-        const where = this.options.ip ? `${this.options.ip}:${this.options.port}` : `:${this.options.port}`;
+        const where = this.options.ip ? `${this.options.ip}:${this.port}` : `:${this.port}`;
         this.options.logger.info(`Shared ${this.scheme} server listening on ${where}`);
         resolve();
       };
@@ -66,8 +94,10 @@ class SharedHttpServer {
         resolve();
         return;
       }
-      this.server.close(() => resolve());
+      const server = this.server;
       this.server = null;
+      server.close(() => resolve());
+      server.closeAllConnections();
     });
   }
   async dispatch(req, res) {

@@ -1,9 +1,8 @@
 /**
  * Shared types for the UniFi Access adapter.
  * Field names mirror the JSON shapes documented in the UniFi Access Developer API
- * (see .doc/api_reference.pdf in this repo). Optional fields not strictly required
- * by the documented schema are kept loose so undocumented fields the controller
- * happens to send (firmware, online flags, last-seen) flow through unchanged.
+ * (API reference v4.2.16). Fields that are not part of the documented schema but that
+ * controllers send in practice (firmware, online flags) are optional and marked as such.
  */
 
 export interface UnifiDeviceRaw {
@@ -11,11 +10,11 @@ export interface UnifiDeviceRaw {
 	name?: string;
 	type?: string;
 	alias?: string;
-	/** Field name as returned by the API: "firmware" (not firmware_version). */
+	/** Not documented for GET /devices (8.1); sent by controllers in practice and in webhook `device` blocks. */
 	firmware?: string;
-	/** Field name as returned by the API: "online" (not is_online). */
+	/** Not documented for GET /devices (8.1); only an explicit `false` is treated as offline. */
 	online?: boolean;
-	/** start_time is a Unix timestamp (seconds) indicating when the device came online. */
+	/** Not documented for GET /devices; Unix timestamp (seconds) seen in webhook `device` blocks. */
 	start_time?: number;
 	[key: string]: unknown;
 }
@@ -44,6 +43,13 @@ export type UnifiLockRuleType = 'keep_lock' | 'keep_unlock' | 'custom' | 'reset'
 export interface UnifiLockRulePayload {
 	type: UnifiLockRuleType;
 	interval?: number;
+}
+
+/** Response of GET /doors/:id/lock_rule (API reference 7.11). `ended_time` is in Unix seconds. */
+export interface UnifiDoorLockRule {
+	type?: string;
+	ended_time?: number;
+	[key: string]: unknown;
 }
 
 export interface UnifiWebhookEndpoint {
@@ -128,6 +134,11 @@ export interface NormalizedEvent {
 	doorId?: string;
 	doorName?: string;
 	userName?: string;
+	/**
+	 * `access.door.unlock` only: whether access was granted (`data.object.result` "Access Granted") or
+	 * refused ("BLOCKED", "Access Denied", …). Absent for every other event type.
+	 */
+	granted?: boolean;
 	thumbnailPath?: string;
 	/** Protect camera ID extracted from the Access system log camera event target. */
 	protectCameraId?: string;

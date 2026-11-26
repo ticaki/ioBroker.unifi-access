@@ -1,3 +1,4 @@
+import type { JSX } from 'react';
 import { AppBar, Box, CssBaseline, Divider, IconButton, Stack, ThemeProvider, Toolbar, Tooltip } from '@mui/material';
 import LightModeIcon from '@mui/icons-material/LightMode';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
@@ -8,6 +9,7 @@ import { LastThumbnailCard } from './components/LastThumbnailCard';
 import { DoorbellCallsCard } from './components/DoorbellCallsCard';
 import { EventLogCard } from './components/EventLogCard';
 import { SettingsPanel } from './components/SettingsPanel';
+import { SocketLoadErrorAlert } from './components/SocketLoadErrorAlert';
 import { SettingsContext, useSettings, useSettingsProvider } from './settings';
 
 function AppInner(): JSX.Element {
@@ -51,6 +53,7 @@ function AppInner(): JSX.Element {
                 </AppBar>
                 <Box sx={{ maxWidth: settings.maxWidth, mx: 'auto', p: 2 }}>
                     <Stack spacing={2}>
+                        <SocketLoadErrorAlert />
                         {settings.showDoorbell && <DoorbellCallsCard />}
                         {settings.showSnapshot && <LastThumbnailCard />}
                         {settings.showDoorList && <Divider />}

@@ -6,28 +6,89 @@
 
 import * as utils from '@iobroker/adapter-core';
 
-import { classifyError, UnifiHttp } from './lib/unifiHttp';
-import { ProtectHttp } from './lib/protectHttp';
+import { apiErrorCode, classifyError, UnifiApiError, UnifiHttp } from './lib/unifiHttp';
+import { classifyProtectError, ProtectHttp, type ProtectClipStream } from './lib/protectHttp';
+import { classifyStoredSecret } from './lib/secretMigration';
+import { parseCaCert } from './lib/caCert';
+import { normalizePublicBaseUrl } from './lib/publicBaseUrl';
+import { tlsAdvice, tlsCertificateErrorCode } from './lib/tlsErrors';
 import { UnifiWebSocket } from './lib/unifiWebSocket';
+import type { TimerHost } from './lib/timerHost';
+import {
+	asRecord,
+	asString,
+	DOORBELL_REASONS,
+	isAccessGranted,
+	MASKED_VALUE,
+	parseAccessEvent,
+	type ParsedAccessEvent,
+} from './lib/eventNormalizer';
 import { Library } from './lib/library';
+import { isStoppedError, StoppedError } from './lib/stopSignal';
+import {
+	PROTECT_SNAPSHOT_CACHE_MAX_BYTES,
+	PROTECT_SNAPSHOT_CACHE_MAX_ENTRIES,
+	SnapshotCache,
+} from './lib/snapshotCache';
 import { detectModel, featuresFor, type DeviceCapability, type UnifiDeviceModel } from './lib/deviceModels';
-import type {
-	GenericAlarmPayload,
-	LastError,
-	NormalizedEvent,
-	UnifiAccessEventEnvelope,
-	UnifiDeviceRaw,
-	UnifiDoorRaw,
-} from './lib/types';
+import { isSafeProtectId, sanitizeStaticPath } from './lib/pathSafety';
+import {
+	describeValue,
+	extractDpsStatus,
+	LOCK_RULE_BY_INDEX,
+	MAX_UNLOCK_MINUTES,
+	normalizeDefaultUnlockMinutes,
+	normalizePort,
+	parseLockRuleIndex,
+	parseUnlockMinutes,
+} from './lib/controlValues';
+import type { LastError, NormalizedEvent, UnifiDeviceRaw, UnifiDoorRaw, UnifiLockRuleType } from './lib/types';
 import { networkInterfaces } from 'node:os';
+import { createSecureContext } from 'node:tls';
 import { WebhookHandler } from './webhooks/server';
 import { DEFAULT_WEBHOOK_EVENTS, ensureRegistration, reregister } from './webhooks/registration';
 import { ThumbnailHandler } from './webserver/snapshotEndpoint';
 import { ProtectMediaHandler } from './webserver/protectSnapshotEndpoint';
-import { GenericWebhookHandler } from './webhooks/genericWebhookServer';
-import { SharedHttpServer } from './webserver/sharedHttpServer';
+import { GenericWebhookHandler, reservedWebhookPathOwner } from './webhooks/genericWebhookServer';
+import { SharedHttpServer, type SharedHttpServerTls } from './webserver/sharedHttpServer';
 
 const WEBHOOK_PATH = '/unifi-access-webhook';
+
+/** Several door events in a row lead to one GET /doors after this pause. */
+const DOOR_REFRESH_DEBOUNCE_MS = 2000;
+/** After an own lock-rule command: read the door status back. */
+const DOOR_CHECK_AFTER_COMMAND_MS = 2000;
+/** After a pulse unlock / an unlock event: the relay has dropped again by then. */
+const DOOR_CHECK_AFTER_EVENT_MS = 7000;
+/**
+ * A published doorbell call is cleared after this time at the latest: the event that ends it may be
+ * lost (adapter restart, WebSocket reconnect, webhook not delivered). UniFi ends unanswered calls
+ * well before (reason 105 "timeout").
+ */
+const DOORBELL_CALL_MAX_MS = 3 * 60_000;
+/** Rules ending later than this are not given a timer of their own (the next reload plans it). */
+const RULE_END_CHECK_HORIZON_MS = 24 * 60 * 60_000;
+/** Distance between two checks that the webhook endpoint is still registered at the controller. */
+const WEBHOOK_CHECK_INTERVAL_MS = 15 * 60_000;
+/** Minimum distance between two full reloads after WebSocket reconnects. */
+const RESYNC_MIN_INTERVAL_MS = 60_000;
+/** A planned end-of-rule check that differs by less than this from the controller's end time is kept. */
+const RULE_END_TOLERANCE_MS = 5000;
+/** API codes that say "not now" rather than "not for this door". */
+const TEMPORARY_API_CODES = new Set(['CODE_DEVICE_DEVICE_OFFLINE', 'CODE_SYSTEM_ERROR', 'CODE_DEVICE_DEVICE_BUSY']);
+/** Upper bound for the JSON the www panel may store in admin.uiSettings. */
+const UI_SETTINGS_MAX_LENGTH = 10_000;
+
+/** How long a sendTo request waits for the start of the adapter to finish before it is answered anyway. */
+const STARTUP_WAIT_MS = 8000;
+/** sendTo commands whose answer depends on what the start of the adapter sets up or loads. */
+const STATE_DEPENDENT_COMMANDS = new Set([
+	'getConnectionStatus',
+	'listDevices',
+	'listUsers',
+	'reregisterWebhook',
+	'getServerInfo',
+]);
 
 const USER_RELEVANT_EVENTS = new Set([
 	'access.remote_view',
@@ -64,6 +125,26 @@ interface ForwardRule {
 	targetState: string;
 }
 
+/**
+ * Message of an unknown thrown value.
+ *
+ * @param err Whatever was thrown
+ */
+function errorText(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Upper limit (seconds) of the WebSocket reconnect back-off from the configuration. Anything that is
+ * not a positive number falls back to 5 s — a zero or negative delay would reconnect in a tight loop.
+ *
+ * @param value Raw `wsReconnectDelay`
+ */
+function normalizeReconnectDelay(value: unknown): number {
+	const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+	return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.min(n, 3600) : 5;
+}
+
 class UnifiAccess extends utils.Adapter {
 	private http: UnifiHttp | null = null;
 	private protectHttp: ProtectHttp | null = null;
@@ -76,47 +157,166 @@ class UnifiAccess extends utils.Adapter {
 	private controllerName: string | null = null;
 	private webhookSecret: string | null = null;
 	private webhookEndpointId: string | null = null;
+	/** True once the endpoint is known to be registered with the controller in this run. */
+	private webhookRegistered = false;
+	private webhookRegistrationRunning = false;
+	/** The registration step that is running (check/registration or re-registration), for serialising them. */
+	private webhookRegistrationTask: Promise<void> | null = null;
+	/** The registration was made before a connection outage and has to be checked again. */
+	private webhookRegistrationStale = false;
+	private webhookRegistrationFailureLog = '';
+	/** The shared HTTP server is listening with the webhook receiver mounted. */
+	private webhookReceiverActive = false;
 
 	private bootstrapRetryTimer: ioBroker.Timeout | undefined;
+	private bootstrapRunning = false;
+	private bootstrapRequestedAgain = false;
+	private bootstrapSucceededOnce = false;
+	private bootstrapFailures = 0;
+	private lastBootstrapFailureLog = '';
+	private connectionStatusWritten = false;
+	private unloading = false;
+	/** Set when the WebSocket closed: the next "open" reloads devices and doors. */
+	private wsNeedsResync = false;
+	private wsErrorLogged = false;
+	private protectRetryTimer: ioBroker.Timeout | undefined;
+	private protectLoginRunning = false;
 
 	private devices: Map<string, DeviceCacheEntry> = new Map();
 	private userNameCache: Map<string, string> = new Map();
 	private doorNameCache: Map<string, string> = new Map();
 	private forwardRules: ForwardRule[] = [];
 
-	private readonly protectSnapshotCache = new Map<string, Buffer>();
-	private readonly protectSnapshotCacheOrder: string[] = [];
-	private static readonly PROTECT_CACHE_MAX = 50;
+	/** Camera snapshots of door events for the media endpoint: at most 50 / 32 MiB, oldest dropped first. */
+	private readonly protectSnapshotCache = new SnapshotCache(
+		PROTECT_SNAPSHOT_CACHE_MAX_ENTRIES,
+		PROTECT_SNAPSHOT_CACHE_MAX_BYTES,
+	);
+	/** Why TLS could not be activated although it is enabled (null: no problem). */
+	private tlsError: string | null = null;
 
 	// Dedup: access.data.device.remote_unlock (WS) + access.door.unlock (webhook) describe the same action.
 	// remote_unlock (no door/user data) is delayed 4 s; if door.unlock arrives in that window,
 	// the pending remote_unlock is cancelled and door.unlock (richer data) is pushed instead.
 	private readonly unlockPendingTimers = new Map<string, ioBroker.Timeout>();
 	private readonly unlockPendingEvents = new Map<string, NormalizedEvent>();
+	/**
+	 * When a granted door.unlock was logged per door (ms epoch): a remote_unlock that arrives after it
+	 * within the window describes the same action — the order of the two channels is not documented.
+	 */
+	private readonly recentDoorUnlocks = new Map<string, number>();
+	private static readonly UNLOCK_DEDUP_MS = 4000;
+	/** Upper bound of the memory of finished doorbell calls. */
+	private static readonly FINISHED_DOORBELL_CALLS_MAX = 20;
+
+	/** Last value the adapter acknowledged per control state — what an invalid write is reset to. */
+	private readonly lastAckedControlValues = new Map<string, number>();
+
+	/** Debounced refresh of all doors (GET /doors). */
+	private doorRefreshTimer: ioBroker.Timeout | undefined;
+	private doorRefreshWithLockRules = false;
+	/** Pending status checks per door (GET /doors/:id). */
+	private readonly doorCheckTimers = new Map<string, ioBroker.Timeout[]>();
+	/** False once the controller turned out not to offer GET /doors/:id/lock_rule (route missing). */
+	private lockRuleSupported = true;
+	/** Doors whose lock rule the controller refuses to report (e.g. not bound to a hub) — until the next load. */
+	private readonly lockRuleUnavailableDoors = new Set<string>();
+	/** The doorbell call currently published in doorbell.active*. */
+	private activeDoorbellCall: { requestId?: string; fromWebhook: boolean } | null = null;
+	/**
+	 * Request ids of calls that are over (end event seen, time limit, or replaced by a newer call) →
+	 * when that was noted (ms epoch). A late webhook of such a call must not publish it again.
+	 */
+	private readonly finishedDoorbellCalls = new Map<string, number>();
+	/** Periodic check that the webhook endpoint is still registered at the controller. */
+	private webhookCheckInterval: ioBroker.Interval | undefined;
+	/** Start of the last resync after a reconnect (ms epoch, 0 = none yet). */
+	private lastResyncAt = 0;
+	/** A resync that waits for the minimum distance to the previous one. */
+	private resyncTimer: ioBroker.Timeout | undefined;
+	/** Clears the published doorbell call when its end event never arrives. */
+	private doorbellExpiryTimer: ioBroker.Timeout | undefined;
+	/** Emergency flags as last confirmed by the controller (what a failed command is put back to). */
+	private readonly lastEmergency: { lockdown?: boolean; evacuation?: boolean } = {};
+	/** Serialises emergency commands (read-modify-write of two flags). */
+	private emergencyQueue: Promise<void> = Promise.resolve();
+	/** One check per door at the end of a timed unlock — survives the short checks after later events. */
+	private readonly doorRuleEndTimers = new Map<string, { timer: ioBroker.Timeout; at: number }>();
+	private webhookRegistrationRetryTimer: ioBroker.Timeout | undefined;
+	private webhookRegistrationFailures = 0;
+	/** First characters of the ioBroker installation UUID — part of the webhook endpoint name. */
+	private installationId = '';
+	/** Device ids from events that are not in the controller's device list (already looked up once). */
+	private readonly unknownDeviceIds = new Set<string>();
+	private systemLogFailureLogged = false;
+	private lastValidUiSettings = '{}';
+
+	/** Legacy system secret: plain-text and encrypted Protect passwords cannot be told apart. */
+	private protectPasswordUncertain = false;
+
+	/** Resolved when the first attempt to load the controller state is over (successful or not). */
+	private readonly startup: Promise<void>;
+	private startupFinished = false;
+	private finishStartup: () => void = () => undefined;
 
 	public constructor(options: Partial<utils.AdapterOptions> = {}) {
 		super({
 			...options,
 			name: 'unifi-access',
 		});
-		this.on('ready', this.onReady.bind(this));
+		this.startup = new Promise<void>(resolve => {
+			this.finishStartup = () => {
+				this.startupFinished = true;
+				resolve();
+			};
+		});
+		// a failure during start is logged — it must not end as an unhandled rejection (restart loop)
+		this.on('ready', () =>
+			this.onReady()
+				.catch((err: unknown) => {
+					if (isStoppedError(err) || this.unloading) {
+						// stopped while starting: the start was abandoned on purpose
+						this.log.debug(`Adapter start ended by the stop: ${errorText(err)}`);
+						return;
+					}
+					this.log.error(`Adapter start failed: ${errorText(err)}`);
+				})
+				// whatever happened: messages must not wait for a start that is over
+				.finally(() => this.finishStartup()),
+		);
 		this.on('stateChange', this.onStateChange.bind(this));
 		this.on('message', this.onMessage.bind(this));
 		this.on('unload', this.onUnload.bind(this));
 	}
 
 	private async onReady(): Promise<void> {
-		this.library = new Library(this);
-		await this.setState('info.connection', false, true);
+		this.library = new Library(this, () => this.unloading);
+		await this.writeState('info.connection', { val: false, ack: true });
+		await this.removeObsoleteObjects();
+		await this.library.ensureBaseObjects();
+		// what an earlier run left behind is not true for this one until proven
+		await this.writeState('info.webhookRegistered', { val: false, ack: true });
+		await this.writeState('info.protectConnected', { val: false, ack: true });
+		// a call that was ringing when the adapter stopped has ended since — its end event is lost
+		await this.clearActiveDoorbellCall();
+		await this.loadInstallationId();
+		// Stopped while starting (settings saved twice, stop during start): nothing may be started any
+		// more — onUnload has already run and would not clean it up (the process lives on in compact mode).
+		if (this.unloading) {
+			return;
+		}
 
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
-		const port = cfg.controllerPort || 12_445;
+		const port = normalizePort(cfg.controllerPort, 12_445);
 		const token = cfg.apiToken ?? '';
 		const verifyTLS = cfg.verifyTLS === true;
 		const caCert = cfg.caCert || undefined;
 
 		this.forwardRules = Array.isArray(cfg.forwardEvents) ? cfg.forwardEvents : [];
+		// credentials of the webhook endpoint registered by an earlier run
+		this.webhookEndpointId = asString(cfg.webhookEndpointId) ?? null;
+		this.webhookSecret = asString(cfg.webhookSecret) ?? null;
 
 		if (!host || !token) {
 			this.log.warn('Controller host or API token missing — open the admin UI to configure.');
@@ -124,72 +324,309 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 
-		this.http = new UnifiHttp({ host, port, token, verifyTLS, caCert, debugLog: (m: string) => this.log.debug(m) });
-
-		if (cfg.enableProtect === true && cfg.protectUsername) {
-			this.protectHttp = new ProtectHttp({
-				host,
-				username: cfg.protectUsername,
-				password: cfg.protectPassword ?? '',
-				verifyTLS,
-			});
-			try {
-				await this.protectHttp.login();
-				this.log.info('UniFi Protect API client initialized');
-			} catch (err) {
-				const msg = (err as Error).message;
-				this.log.warn(`Protect login failed: ${msg}`);
-				if (msg.includes('429')) {
-					// Rate-limited — retry once after 30 s without blocking the adapter start.
-					this.log.info('Protect rate-limited (429) — retrying in 30 s.');
-					setTimeout(() => {
-						void this.protectHttp
-							?.login()
-							.then(() => {
-								this.log.info('Protect login retry succeeded.');
-								void this.setState('info.protectConnected', { val: true, ack: true });
-							})
-							.catch(e => {
-								this.log.warn(`Protect login retry failed: ${(e as Error).message}`);
-								this.protectHttp = null;
-								void this.setState('info.protectConnected', { val: false, ack: true });
-							});
-					}, 30_000);
-				} else {
-					this.protectHttp = null;
-				}
-			}
-		} else if (cfg.enableProtect === true) {
-			this.log.warn('[protect] integration enabled but no username configured — skipping');
-		} else {
-			this.log.debug('[protect] integration disabled');
+		this.checkCaCert();
+		const publicBase = normalizePublicBaseUrl(cfg.publicBaseUrl);
+		if (publicBase.problem) {
+			this.log.warn(
+				`The public base URL "${String(cfg.publicBaseUrl)}" is not usable (${publicBase.problem}) — the URLs are built from the listen address instead.`,
+			);
 		}
+		this.http = new UnifiHttp({
+			host,
+			port,
+			token,
+			verifyTLS,
+			caCert,
+			debugLog: (m: string) => this.log.debug(m),
+			isStopped: () => this.unloading,
+		});
 
 		this.subscribeStates('doors.*.unlock');
 		this.subscribeStates('doors.*.unlock_duration');
 		this.subscribeStates('doors.*.lock_rule');
 		this.subscribeStates('doors.emergency.*');
 		this.subscribeStates('admin.uiSettings');
+		try {
+			const stored = await this.getStateAsync('admin.uiSettings');
+			if (typeof stored?.val === 'string' && asRecord(JSON.parse(stored.val))) {
+				this.lastValidUiSettings = stored.val;
+			}
+		} catch {
+			// not valid JSON: the panel falls back to its defaults, an invalid write is reset to "{}"
+		}
+		if (this.unloading) {
+			return;
+		}
 
-		await this.bootstrapAndConnect();
+		// The receivers listen before the controller is contacted: the webhook endpoint is registered
+		// at the end of a successful bootstrap and events may arrive right away.
 		await this.startSharedHttpServer();
+		if (this.unloading) {
+			return;
+		}
+		this.startWebhookRegistrationCheck();
+		await this.bootstrapAndConnect();
+		// sendTo requests that arrived meanwhile are answered now, with what was loaded
+		this.finishStartup();
+		if (this.unloading) {
+			return;
+		}
+		// Last: the Protect login may take long when the console does not answer; door control and
+		// events must not wait for it.
+		await this.initProtect(host, caCert);
 	}
 
-	private buildTlsOptions(): { key: string; cert: string; ca?: string } | undefined {
+	/**
+	 * Report a CA certificate that cannot be used. Node would ignore it silently and every strict TLS
+	 * check would fail without a visible reason. Repairable damage (lost line breaks) is repaired by the
+	 * clients and not reported.
+	 */
+	private checkCaCert(): void {
 		const cfg = this.config;
+		const { certificates, problems } = parseCaCert(cfg.caCert);
+		if (problems.length === 0) {
+			return;
+		}
+		const text =
+			`The CA certificate in the connection settings is ${certificates.length > 0 ? 'partly ' : ''}not usable: ` +
+			`${problems.join('; ')}. ${
+				certificates.length > 0 ? `Only ${certificates.length} certificate(s) are trusted.` : 'It is ignored.'
+			} Paste the complete PEM text including the "-----BEGIN CERTIFICATE-----" and "-----END CERTIFICATE-----" lines.`;
+		// only a certificate that is actually used for a verification is worth a warning
+		const used = cfg.verifyTLS === true || (cfg.enableProtect === true && cfg.protectVerifyTLS === true);
+		if (used) {
+			this.log.warn(text);
+		} else {
+			this.log.debug(text);
+		}
+	}
+
+	/** Read the first characters of the installation UUID (part of the webhook endpoint name). */
+	private async loadInstallationId(): Promise<void> {
+		try {
+			const meta = await this.getForeignObjectAsync('system.meta.uuid');
+			const uuid = asString((meta?.native as Record<string, unknown> | undefined)?.uuid);
+			this.installationId = uuid ? uuid.replace(/[^A-Za-z0-9]/g, '').slice(0, 8) : '';
+		} catch {
+			this.installationId = '';
+		}
+	}
+
+	/**
+	 * Set up the optional UniFi Protect client (camera snapshots for door events).
+	 *
+	 * @param host Console host (the same host as UniFi Access)
+	 * @param caCert CA certificate from the connection settings
+	 */
+	private async initProtect(host: string, caCert: string | undefined): Promise<void> {
+		const cfg = this.config;
+		if (cfg.enableProtect !== true) {
+			this.log.debug('[protect] integration disabled');
+			return;
+		}
+		if (!cfg.protectUsername) {
+			this.log.warn('[protect] integration enabled but no username configured — skipping');
+			return;
+		}
+		const password = await this.resolveProtectPassword();
+		if (this.unloading) {
+			return;
+		}
+		this.protectHttp = new ProtectHttp({
+			host,
+			port: normalizePort(cfg.protectPort, 443),
+			username: cfg.protectUsername,
+			password,
+			// exactly as configured — there is no silent fallback to an unverified connection
+			verifyTLS: cfg.protectVerifyTLS === true,
+			caCert,
+			isStopped: () => this.unloading,
+		});
+		await this.tryProtectLogin(1);
+	}
+
+	/**
+	 * The Protect password to log in with.
+	 *
+	 * `protectPassword` became an encrypted attribute; instances configured before that still hold it
+	 * in plain text, which js-controller turns into garbage when it "decrypts" the configuration at
+	 * start. The stored value is inspected and — if it is plain text — used directly and written back
+	 * encrypted once (the write restarts the instance; afterwards the value is recognised as encrypted).
+	 */
+	private async resolveProtectPassword(): Promise<string> {
+		const decrypted = typeof this.config.protectPassword === 'string' ? this.config.protectPassword : '';
+		const instanceId = `system.adapter.${this.namespace}`;
+		let instance: ioBroker.Object | null | undefined;
+		try {
+			instance = await this.getForeignObjectAsync(instanceId);
+		} catch (err) {
+			this.log.debug(`[protect] could not read the instance object: ${errorText(err)}`);
+		}
+		if (!instance) {
+			return decrypted;
+		}
+		const encryptedNative = (instance as { encryptedNative?: unknown }).encryptedNative;
+		const stored = classifyStoredSecret({
+			raw: (instance.native as Record<string, unknown> | undefined)?.protectPassword,
+			decrypted,
+			isEncryptedAttribute: Array.isArray(encryptedNative) && encryptedNative.includes('protectPassword'),
+			encrypt: plain => this.encrypt(plain),
+		});
+		if (stored.kind === 'plaintext') {
+			this.throwIfStopped();
+			this.log.info('[protect] the stored Protect password is not encrypted yet — encrypting it now.');
+			try {
+				this.throwIfStopped();
+				// eslint-disable-next-line no-restricted-syntax -- checked right above
+				await this.extendForeignObjectAsync(instanceId, { native: { protectPassword: stored.encrypted } });
+			} catch (err) {
+				if (isStoppedError(err)) {
+					throw err;
+				}
+				this.log.warn(`[protect] could not store the encrypted Protect password: ${errorText(err)}`);
+			}
+		} else if (stored.kind === 'ambiguous') {
+			this.protectPasswordUncertain = true;
+		} else if (stored.kind === 'encrypted') {
+			// Without the AES marker the value was classified by heuristics (legacy system secret): a
+			// plain-text password with non-ASCII characters looks the same as an encrypted one.
+			const raw = (instance.native as Record<string, unknown> | undefined)?.protectPassword;
+			this.protectPasswordUncertain = typeof raw === 'string' && !raw.startsWith('$/aes-192-cbc:');
+		}
+		return stored.password;
+	}
+
+	private async tryProtectLogin(attempt: number): Promise<void> {
+		const protect = this.protectHttp;
+		if (!protect || this.protectLoginRunning || this.unloading) {
+			return;
+		}
+		this.protectLoginRunning = true;
+		try {
+			await protect.login();
+			this.protectLoginRunning = false;
+			if (this.unloading) {
+				// answered after the stop: the stopped instance must not report "Protect connected" —
+				// js-controller does not reset that state — and the session is dropped with the client
+				this.protectHttp = null;
+				return;
+			}
+			this.log.info(attempt === 1 ? 'UniFi Protect API client initialized' : 'Protect login retry succeeded.');
+			await this.writeState('info.protectConnected', { val: true, ack: true });
+			return;
+		} catch (err) {
+			this.protectLoginRunning = false;
+			if (this.unloading) {
+				// a failure answered after the stop is neither reported nor retried
+				this.protectHttp = null;
+				return;
+			}
+			const kind = classifyProtectError(err);
+			if (kind === 'tls') {
+				// A configuration problem: retrying cannot help, so say exactly once what to do.
+				const code = tlsCertificateErrorCode(err);
+				this.log.warn(
+					`Protect login failed: the TLS certificate of the console was rejected (${code}). ` +
+						`${tlsAdvice(code, 'protect')} The Protect integration stays off until the instance is restarted.`,
+				);
+				this.protectHttp = null;
+			} else if (kind === 'credentials') {
+				this.log.warn(
+					`Protect login failed: user name or password rejected.${
+						this.protectPasswordUncertain
+							? ' The password was saved by an earlier adapter version and may need to be entered again: open the instance settings, re-enter the Protect password and save.'
+							: ''
+					} The Protect integration stays off until the instance is restarted.`,
+				);
+				this.protectHttp = null;
+			} else {
+				// rate limit / console not reachable (yet): try again with growing distance
+				const delayMs = Math.min(30_000 * 2 ** Math.min(attempt - 1, 10), 10 * 60_000);
+				const text = `Protect login failed (${kind}): ${errorText(err)} — retrying in ${Math.round(delayMs / 1000)} s.`;
+				if (attempt === 1) {
+					this.log.warn(text);
+				} else {
+					this.log.debug(text);
+				}
+				this.protectRetryTimer = this.startTimer(() => {
+					this.protectRetryTimer = undefined;
+					this.tryProtectLogin(attempt + 1).catch((e: unknown) => {
+						this.log.debug(`Protect login retry failed unexpectedly: ${errorText(e)}`);
+					});
+				}, delayMs);
+			}
+		}
+		await this.writeState('info.protectConnected', { val: false, ack: true });
+	}
+
+	private requireProtect(): ProtectHttp {
+		if (!this.protectHttp) {
+			throw new Error('UniFi Protect is not connected');
+		}
+		return this.protectHttp;
+	}
+
+	/**
+	 * Load key and certificate for the built-in HTTP server from the ioBroker certificate store.
+	 *
+	 * @returns The TLS options, or `undefined` when TLS is off or the certificates are not usable. In
+	 * the latter case the reason is logged as error and kept in `tlsError`; the server is then not
+	 * started at all (fail closed — no silent fall-back to plain http).
+	 */
+	private async loadTlsOptions(): Promise<SharedHttpServerTls | undefined> {
+		const cfg = this.config;
+		this.tlsError = null;
 		if (cfg.enableTls !== true) {
 			return undefined;
 		}
-		this.log.warn(
-			'TLS is enabled but the adapter does not yet load certificates from the ioBroker certificate store — please configure a reverse proxy or extend loadCertificates().',
-		);
-		return undefined;
+		try {
+			const [certificates] = await this.getCertificatesAsync(cfg.certPublic, cfg.certPrivate, cfg.certChained);
+			const key = asString(certificates?.key);
+			let cert = asString(certificates?.cert);
+			const chain = asString(certificates?.ca);
+			if (!key || !cert) {
+				throw new Error('certificate or private key is empty');
+			}
+			if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(key) || !cert.includes('-----BEGIN CERTIFICATE-----')) {
+				throw new Error('certificate or private key is not in PEM format');
+			}
+			if (chain && chain.includes('-----BEGIN CERTIFICATE-----') && !cert.includes(chain.trim())) {
+				// the server has to present the intermediate certificates along with its own
+				cert = `${cert.trim()}\n${chain.trim()}\n`;
+			}
+			// fails for a key that does not belong to the certificate or for unreadable PEM data
+			createSecureContext({ key, cert });
+			return { key, cert };
+		} catch (err) {
+			this.tlsError = errorText(err);
+			this.log.error(
+				`TLS is enabled for the built-in HTTP server, but the certificates (public "${cfg.certPublic ?? ''}", private "${cfg.certPrivate ?? ''}") ` +
+					`could not be loaded: ${this.tlsError}. The server is NOT started (no fall-back to plain http): webhook receiver, ` +
+					`thumbnail server and generic webhook are unavailable and no webhook URL is registered. ` +
+					`Select valid certificates in the instance settings or disable TLS.`,
+			);
+			return undefined;
+		}
 	}
 
+	/**
+	 * Base URL of the built-in HTTP server as clients and the controller reach it. The scheme is taken
+	 * from the running server — never from the configuration — and there is no URL while the server
+	 * is not listening.
+	 */
 	private buildServerBaseUrl(): string | null {
+		const server = this.httpServer;
+		if (!server?.listening) {
+			return null;
+		}
+		// behind a reverse proxy / port forwarding the address clients and the controller use is configured
+		const configured = this.publicBaseUrl();
+		if (configured) {
+			return configured;
+		}
 		const cfg = this.config;
-		const port = cfg.listenPort || 8095;
-		const scheme = cfg.enableTls === true ? 'https' : 'http';
+		const port = normalizePort(cfg.listenPort, 8095);
+		const scheme = server.scheme;
 		if (cfg.listenIp && cfg.listenIp !== '0.0.0.0') {
 			return `${scheme}://${cfg.listenIp}:${port}`;
 		}
@@ -204,6 +641,11 @@ class UnifiAccess extends utils.Adapter {
 		return null;
 	}
 
+	/** The normalised `publicBaseUrl` setting, or null when it is empty (or unusable — warned at start). */
+	private publicBaseUrl(): string | null {
+		return normalizePublicBaseUrl(this.config.publicBaseUrl).url;
+	}
+
 	private buildWebhookPublicUrl(): string | null {
 		const base = this.buildServerBaseUrl();
 		return base ? `${base}${WEBHOOK_PATH}` : null;
@@ -211,24 +653,28 @@ class UnifiAccess extends utils.Adapter {
 
 	private async startSharedHttpServer(): Promise<void> {
 		const cfg = this.config;
-		const port = cfg.listenPort || 8095;
+		const port = normalizePort(cfg.listenPort, 8095);
 		const ip = cfg.listenIp && cfg.listenIp !== '0.0.0.0' ? cfg.listenIp : undefined;
-		const tls = this.buildTlsOptions();
+		const tls = await this.loadTlsOptions();
+		if (this.unloading) {
+			return;
+		}
+		if (cfg.enableTls === true && !tls) {
+			// fail closed: credentials of the generic webhook and the webhook payloads must not travel in
+			// clear text because a certificate expired or was deleted (reason logged in loadTlsOptions)
+			this.httpServer = null;
+			return;
+		}
 
-		const logger = {
-			debug: (m: string) => this.log.debug(m),
-			info: (m: string) => this.log.info(m),
-			warn: (m: string) => this.log.warn(m),
-		};
+		const logger = this.helperLogger();
 
 		const server = new SharedHttpServer({ port, ip, tls, logger });
+		let webhookHandlerMounted = false;
 
 		if (cfg.enableWebhooks === true) {
 			if (!this.http) {
 				this.log.warn('Webhook receiver not enabled: no HTTP client.');
 			} else {
-				this.webhookEndpointId = cfg.webhookEndpointId || null;
-				this.webhookSecret = cfg.webhookSecret || null;
 				const handler = new WebhookHandler({
 					path: WEBHOOK_PATH,
 					secret: () => this.webhookSecret,
@@ -236,6 +682,7 @@ class UnifiAccess extends utils.Adapter {
 					onEvent: env => this.handleAccessEvent(env, 'webhook'),
 				});
 				server.registerHandler('unifi-webhook', handler.matches, handler.handle);
+				webhookHandlerMounted = true;
 			}
 		}
 
@@ -252,17 +699,23 @@ class UnifiAccess extends utils.Adapter {
 			server.registerHandler('thumbnail', handler.matches, handler.handle);
 		}
 
-		if (cfg.enableProtect === true && this.protectHttp !== null) {
+		if (cfg.enableProtect === true && cfg.protectUsername) {
 			const snapshotPrefix = `/unifi-access/${this.instance}/protect-snapshot`;
 			const videoPrefix = `/unifi-access/${this.instance}/protect-video`;
-			const protect = this.protectHttp;
+			// resolved per request: the client is dropped when the login turns out to be misconfigured
+			const protect = {
+				getEventMeta: (eventId: string): Promise<{ clipUrl?: string } | null> =>
+					this.requireProtect().getEventMeta(eventId),
+				getClipStream: (clipPath: string): Promise<ProtectClipStream> =>
+					this.requireProtect().getClipStream(clipPath),
+			};
 			const protectHandler = new ProtectMediaHandler({
 				snapshotPathPrefix: snapshotPrefix,
 				videoPathPrefix: videoPrefix,
 				getSnapshot: (cameraId, ts) => this.protectSnapshotCache.get(`${cameraId}:${ts}`),
-				fetchSnapshot: cameraId => protect.getSnapshot(cameraId),
 				getEventMeta: eventId => protect.getEventMeta(eventId),
-				fetchClip: clipPath => protect.getClipBuffer(clipPath),
+				// streamed: a clip is passed on chunk by chunk instead of being held in memory
+				fetchClip: clipPath => protect.getClipStream(clipPath),
 				logger,
 			});
 			server.registerHandler('protect-media', protectHandler.matches, protectHandler.handle);
@@ -270,7 +723,7 @@ class UnifiAccess extends utils.Adapter {
 
 		if (cfg.enableGenericWebhook === true) {
 			const handler = new GenericWebhookHandler({
-				path: cfg.genericWebhookPath || '/webhook',
+				path: cfg.genericWebhookPath,
 				auth: cfg.genericWebhookAuth || 'none',
 				username: cfg.genericWebhookUsername || undefined,
 				password: cfg.genericWebhookPassword || undefined,
@@ -278,10 +731,11 @@ class UnifiAccess extends utils.Adapter {
 				logger,
 				onRequest: async ({ body, method, url }) => {
 					const raw = body.toString('utf8');
-					this.log.info(`[generic-webhook] ${method} ${url} | body: ${raw.slice(0, 2000)}`);
-					let payload: GenericAlarmPayload;
+					// the one place the body is logged, at debug level only (it may carry personal data)
+					this.log.debug(`[generic-webhook] ${method} ${url} | body: ${raw.slice(0, 2000)}`);
+					let payload: unknown;
 					try {
-						payload = JSON.parse(raw) as GenericAlarmPayload;
+						payload = JSON.parse(raw);
 					} catch {
 						this.log.debug('[generic-webhook] body is not valid JSON — skipping state update');
 						return;
@@ -289,59 +743,220 @@ class UnifiAccess extends utils.Adapter {
 					await this.handleGenericAlarm(payload, raw);
 				},
 			});
-			server.registerHandler('generic-webhook', handler.matches, handler.handle);
+			if (handler.path !== cfg.genericWebhookPath) {
+				this.log.debug(
+					`Generic webhook listens on ${handler.path} (setting: "${cfg.genericWebhookPath ?? ''}").`,
+				);
+			}
+			const owner = reservedWebhookPathOwner(handler.path);
+			if (owner) {
+				this.log.error(
+					`Generic webhook NOT started: its path "${handler.path}" is reserved for ${owner} of this adapter ` +
+						`— requests there would never reach the generic webhook. Choose another path (e.g. /webhook) on the generic webhook tab.`,
+				);
+			} else if (!handler.credentialsConfigured) {
+				this.log.warn(
+					`Generic webhook: authentication "${cfg.genericWebhookAuth}" is selected but no ${
+						cfg.genericWebhookAuth === 'basic' ? 'user name and password are' : 'token is'
+					} configured — every request will be rejected.`,
+				);
+			}
+			if (!owner) {
+				server.registerHandler('generic-webhook', handler.matches, handler.handle);
+			}
+		}
+
+		if (server.handlerCount === 0) {
+			// nothing to serve: do not occupy the port (a second instance could not start otherwise)
+			this.log.debug('No receiver enabled — the built-in HTTP server is not started.');
+			this.httpServer = null;
+			return;
 		}
 
 		try {
 			await server.start();
+			if (this.unloading) {
+				// the instance stopped while the port was being bound: onUnload did not see this server
+				await server.stop();
+				return;
+			}
 			this.httpServer = server;
+			this.webhookReceiverActive = webhookHandlerMounted;
 		} catch (err) {
 			this.log.warn(`Shared HTTP server failed to start: ${(err as Error).message}`);
 			this.httpServer = null;
 			return;
 		}
+	}
 
-		if (cfg.enableWebhooks === true && this.http) {
-			const publicUrl = this.buildWebhookPublicUrl();
-			if (!publicUrl) {
+	/**
+	 * Name of this installation's webhook endpoint on the controller. It contains the ioBroker host
+	 * name: two installations at the same controller (e.g. production and a dev-server, both with
+	 * instance 0) get different names and never clean up each other's endpoint.
+	 */
+	private webhookEndpointName(): string {
+		// host name plus the start of the installation UUID: two installations with the same host name
+		// and instance number (e.g. two containers called "iobroker") still get different names
+		const installation = this.installationId ? `#${this.installationId}` : '';
+		return `ioBroker.unifi-access (${this.namespace}@${this.host || 'iobroker'}${installation})`;
+	}
+
+	private registrationLogger(): { debug: (m: string) => void; info: (m: string) => void; warn: (m: string) => void } {
+		return this.helperLogger();
+	}
+
+	/**
+	 * Register the webhook endpoint with the controller unless that already happened. Called when the
+	 * receiver is listening and again after every successful (re)load of the controller state, so a
+	 * registration that failed because the controller was not reachable at start is made up for.
+	 */
+	private async ensureWebhookRegistration(): Promise<void> {
+		if (
+			this.config.enableWebhooks !== true ||
+			!this.http ||
+			!this.webhookReceiverActive ||
+			(this.webhookRegistered && !this.webhookRegistrationStale) ||
+			this.webhookRegistrationRunning ||
+			this.unloading
+		) {
+			return;
+		}
+		if (!this.bootstrapSucceededOnce) {
+			this.log.debug('Webhook registration postponed until the controller is reachable.');
+			return;
+		}
+		const publicUrl = this.buildWebhookPublicUrl();
+		if (!publicUrl) {
+			if (!this.webhookRegistrationFailureLog) {
+				this.webhookRegistrationFailureLog = 'no-address';
 				this.log.warn('Webhook registration skipped: no usable network address found.');
-			} else {
-				try {
-					const result = await ensureRegistration({
-						http: this.http,
-						publicUrl,
-						name: `ioBroker.unifi-access (${this.namespace})`,
-						events: DEFAULT_WEBHOOK_EVENTS,
-						logger,
-					});
-					this.webhookEndpointId = result.id;
-					this.webhookSecret = result.secret;
-					// Only write to native when credentials actually changed — extendForeignObjectAsync
-					// triggers a js-controller restart, so we must not call it on every start.
-					const idChanged = result.id !== (cfg.webhookEndpointId || null);
-					const secretChanged = result.secret !== (cfg.webhookSecret || null);
-					if (idChanged || secretChanged) {
-						await this.persistWebhookCredentials(result.id, result.secret);
-					}
-					await this.setState('info.webhookRegistered', { val: true, ack: true });
-				} catch (err) {
-					this.log.warn(`Webhook registration failed: ${(err as Error).message}`);
-					await this.setState('info.webhookRegistered', { val: false, ack: true });
-				}
 			}
+			return;
+		}
+		this.webhookRegistrationRunning = true;
+		let done: () => void = () => undefined;
+		this.webhookRegistrationTask = new Promise<void>(resolve => (done = resolve));
+		try {
+			const storedId = this.webhookEndpointId;
+			const storedSecret = this.webhookSecret;
+			const result = await ensureRegistration({
+				http: this.http,
+				publicUrl,
+				name: this.webhookEndpointName(),
+				storedId,
+				storedSecret,
+				events: DEFAULT_WEBHOOK_EVENTS,
+				logger: this.registrationLogger(),
+				isStopped: () => this.unloading,
+			});
+			this.webhookEndpointId = result.id;
+			this.webhookSecret = result.secret;
+			// Only write to native when credentials actually changed — extendForeignObjectAsync
+			// triggers a js-controller restart, so we must not call it on every start.
+			const changed = result.id !== storedId || result.secret !== storedSecret;
+			if (this.unloading) {
+				// Stopped while the controller answered: the stopped instance does not claim "registered",
+				// but the credentials of an endpoint the controller has created are stored, so the
+				// configuration matches the controller at the next start.
+				if (changed) {
+					await this.persistWebhookCredentials(result.id, result.secret);
+				}
+				return;
+			}
+			this.webhookRegistered = true;
+			this.webhookRegistrationStale = false;
+			this.webhookRegistrationFailureLog = '';
+			await this.writeState('info.webhookRegistered', { val: true, ack: true });
+			if (changed) {
+				await this.persistWebhookCredentials(result.id, result.secret);
+			}
+			this.webhookRegistrationFailures = 0;
+		} catch (err) {
+			if (isStoppedError(err) || this.unloading) {
+				// stopped in between: no further request, no state, no retry — the next start checks anyway
+				this.log.debug(`Webhook registration ended by the stop: ${errorText(err)}`);
+				return;
+			}
+			const text = `Webhook registration failed: ${errorText(err)}`;
+			if (text !== this.webhookRegistrationFailureLog) {
+				this.webhookRegistrationFailureLog = text;
+				this.log.warn(text);
+			} else {
+				this.log.debug(text);
+			}
+			this.webhookRegistered = false;
+			await this.writeState('info.webhookRegistered', { val: false, ack: true });
+			this.scheduleWebhookRegistrationRetry();
+		} finally {
+			this.webhookRegistrationRunning = false;
+			this.webhookRegistrationTask = null;
+			done();
 		}
 	}
 
-	private async bootstrapAndConnect(): Promise<void> {
-		if (!this.http) {
+	/**
+	 * Check the registration at the controller every {@link WEBHOOK_CHECK_INTERVAL_MS} while the receiver
+	 * runs: the endpoint may be deleted at the controller (by hand, restored backup, another integration)
+	 * or the address of this host may change without the WebSocket ever dropping. An endpoint that is
+	 * still in place costs one GET; nothing is written to the instance configuration then, so the check
+	 * can never cause a restart loop.
+	 */
+	private startWebhookRegistrationCheck(): void {
+		if (
+			this.config.enableWebhooks !== true ||
+			!this.webhookReceiverActive ||
+			this.webhookCheckInterval ||
+			this.unloading
+		) {
 			return;
 		}
+		this.webhookCheckInterval = this.startInterval(() => {
+			if (this.unloading || !this.connectedToController || this.webhookRegistrationRunning) {
+				// without connection the reconnect checks the registration anyway
+				return;
+			}
+			this.webhookRegistrationStale = true;
+			this.runDetached('webhook registration check', this.ensureWebhookRegistration());
+		}, WEBHOOK_CHECK_INTERVAL_MS);
+	}
+
+	/**
+	 * Try the webhook registration again later (60 s, 2 min, 4 min, then every 5 min). Without this a
+	 * single failed request would leave the webhooks off until the next reconnect or restart.
+	 */
+	private scheduleWebhookRegistrationRetry(): void {
+		if (this.unloading || this.webhookRegistrationRetryTimer) {
+			return;
+		}
+		this.webhookRegistrationFailures += 1;
+		const delayMs = Math.min(60_000 * 2 ** Math.min(this.webhookRegistrationFailures - 1, 6), 5 * 60_000);
+		this.webhookRegistrationRetryTimer = this.startTimer(() => {
+			this.webhookRegistrationRetryTimer = undefined;
+			this.runDetached('webhook registration', this.ensureWebhookRegistration());
+		}, delayMs);
+	}
+
+	/**
+	 * Load devices, doors and users from the controller and mirror them into objects and states.
+	 *
+	 * @returns false when the controller could not be queried (logged, connection status set)
+	 */
+	private async loadControllerState(): Promise<boolean> {
+		if (!this.http) {
+			return false;
+		}
 		try {
-			const [devices, doors, users] = await Promise.all([
+			const [allDevices, allDoors, allUsers] = await Promise.all([
 				this.http.listDevices(),
 				this.http.listDoors(),
 				this.http.listUsers().catch(() => []),
 			]);
+			// records without a usable id cannot be mapped to objects — skip them instead of failing the whole load
+			const hasId = (entry: { id?: unknown } | null | undefined): boolean =>
+				typeof entry?.id === 'string' && entry.id !== '';
+			const devices = allDevices.filter(hasId);
+			const doors = allDoors.filter(hasId);
+			const users = allUsers.filter(hasId);
 			this.userNameCache.clear();
 			for (const u of users) {
 				const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.user_email || u.id;
@@ -349,37 +964,129 @@ class UnifiAccess extends utils.Adapter {
 			}
 			await this.applyBootstrap({ devices, doors });
 			await this.refreshEmergencyStatus();
-			this.setConnectionStatus(true, null);
-			this.log.info(`Connected to UniFi Access controller. ${devices.length} devices, ${doors.length} doors.`);
-
-			this.startWebSocket();
-		} catch (err) {
-			const kind = classifyError(err);
-			this.setConnectionStatus(false, kind);
-			const axErr = err as { response?: { status?: number }; message?: string };
-			if (axErr.response?.status === 404) {
-				this.log.warn(
-					`Bootstrap failed: 404 — verify that host and port point to a UniFi Access controller (${this.http.url}).`,
+			this.lockRuleSupported = true;
+			this.lockRuleUnavailableDoors.clear();
+			for (const door of doors) {
+				await this.refreshLockRule(door.id);
+			}
+			// stopped meanwhile: no "Connected" for the stopped instance
+			this.throwIfStopped();
+			if (this.bootstrapFailures > 0 || !this.bootstrapSucceededOnce) {
+				this.log.info(
+					`Connected to UniFi Access controller. ${devices.length} devices, ${doors.length} doors.`,
 				);
 			} else {
-				this.log.warn(`Bootstrap failed (${kind}): ${(err as Error).message}`);
+				this.log.debug(`Controller state refreshed: ${devices.length} devices, ${doors.length} doors.`);
 			}
-			this.scheduleBootstrapRetry();
+			if (!this.bootstrapSucceededOnce) {
+				await this.refreshThumbnailUrls();
+			}
+			this.bootstrapSucceededOnce = true;
+			this.bootstrapFailures = 0;
+			this.lastBootstrapFailureLog = '';
+			return true;
+		} catch (err) {
+			if (isStoppedError(err) || this.unloading) {
+				// abandoned by the stop: neither a failure to report nor a reason for a retry
+				return false;
+			}
+			const kind = classifyError(err);
+			this.setConnectionStatus(false, kind);
+			this.bootstrapFailures += 1;
+			const axErr = err as { response?: { status?: number }; message?: string };
+			const tlsCode = tlsCertificateErrorCode(err);
+			let text: string;
+			if (tlsCode) {
+				text = `Bootstrap failed: the TLS certificate of the controller was rejected (${tlsCode}). ${tlsAdvice(tlsCode, 'controller')}`;
+			} else if (axErr.response?.status === 404) {
+				text = `Bootstrap failed: 404 — verify that host and port point to a UniFi Access controller (${this.http.url}).`;
+			} else {
+				text = `Bootstrap failed (${kind}): ${errorText(err)}`;
+			}
+			// A controller that stays down fails the same way on every retry: warn once per distinct
+			// failure, repeat only at debug level.
+			if (text !== this.lastBootstrapFailureLog) {
+				this.lastBootstrapFailureLog = text;
+				this.log.warn(text);
+			} else {
+				this.log.debug(`${text} (attempt ${this.bootstrapFailures})`);
+			}
+			return false;
 		}
 	}
 
+	/**
+	 * (Re)load the controller state; on success make sure the WebSocket is running, on failure
+	 * schedule the next attempt. Calls are serialised — a request during a running load triggers
+	 * exactly one further load afterwards.
+	 */
+	private async bootstrapAndConnect(): Promise<void> {
+		if (!this.http || this.unloading) {
+			return;
+		}
+		if (this.bootstrapRunning) {
+			this.bootstrapRequestedAgain = true;
+			return;
+		}
+		this.bootstrapRunning = true;
+		if (this.bootstrapRetryTimer) {
+			this.clearTimeout(this.bootstrapRetryTimer);
+			this.bootstrapRetryTimer = undefined;
+		}
+		try {
+			const ok = await this.loadControllerState();
+			if (this.unloading) {
+				return;
+			}
+			if (!ok) {
+				this.scheduleBootstrapRetry();
+				return;
+			}
+			if (!this.ws) {
+				this.setConnectionStatus(true, null);
+				this.startWebSocket();
+			} else if (this.ws.isOpen) {
+				this.setConnectionStatus(true, null);
+			}
+			// a registration that could not be made at start (controller unreachable) is made up for here
+			await this.ensureWebhookRegistration();
+			// else: the WebSocket is reconnecting; its "open" sets the status and triggers a resync
+		} finally {
+			this.bootstrapRunning = false;
+			if (this.bootstrapRequestedAgain && !this.unloading) {
+				this.bootstrapRequestedAgain = false;
+				this.runDetached('controller refresh', this.bootstrapAndConnect());
+			}
+		}
+	}
+
+	/** Delay before the next bootstrap attempt: 30 s, 60 s, 120 s, then every 5 min (rejected token: always 5 min). */
+	private nextBootstrapRetryDelay(): number {
+		if (this.lastErrorKind === 'unauthorized') {
+			return 5 * 60_000;
+		}
+		return Math.min(30_000 * 2 ** Math.max(0, Math.min(this.bootstrapFailures - 1, 6)), 5 * 60_000);
+	}
+
 	private scheduleBootstrapRetry(): void {
+		if (this.unloading) {
+			return;
+		}
 		if (this.bootstrapRetryTimer) {
 			this.clearTimeout(this.bootstrapRetryTimer);
 		}
-		this.bootstrapRetryTimer = this.setTimeout(() => {
+		const delayMs = this.nextBootstrapRetryDelay();
+		this.log.debug(`Next bootstrap attempt in ${Math.round(delayMs / 1000)} s.`);
+		this.bootstrapRetryTimer = this.startTimer(() => {
 			this.bootstrapRetryTimer = undefined;
-			void this.bootstrapAndConnect();
-		}, 30_000);
+			this.runDetached('bootstrap retry', this.bootstrapAndConnect());
+		}, delayMs);
 	}
 
 	private async applyBootstrap(data: { devices: UnifiDeviceRaw[]; doors: UnifiDoorRaw[] }): Promise<void> {
 		await this.library.applyBootstrap(data);
+		// firmware and last-seen time are learned from events; keep them across a reload
+		const previous = new Map(this.devices);
 		this.devices.clear();
 		this.doorNameCache.clear();
 		for (const d of data.doors) {
@@ -397,12 +1104,12 @@ class UnifiAccess extends utils.Adapter {
 				alias: d.alias,
 				type: d.type,
 				model,
-				firmware: d.firmware,
+				firmware: (typeof d.firmware === 'string' && d.firmware) || previous.get(d.id)?.firmware,
 				// Only an explicit `online: false` means offline; if the field is missing the
 				// device is at least known to the controller, so default to online.
 				online: d.online !== false,
 				capabilities: featuresFor(model),
-				lastSeenAt: undefined,
+				lastSeenAt: previous.get(d.id)?.lastSeenAt,
 			});
 		}
 		// Pick a friendly controller name for the admin UI: prefer the alias of any UAH-like
@@ -412,287 +1119,843 @@ class UnifiAccess extends utils.Adapter {
 
 		if (this.config.enableProtect) {
 			const connected = this.protectHttp?.isLoggedIn() === true;
-			await this.setState('info.protectConnected', { val: connected, ack: true });
+			await this.writeState('info.protectConnected', { val: connected, ack: true });
 			this.log.debug(`[protect] info.protectConnected = ${String(connected)}`);
 		}
+	}
+
+	/** The adapter's timer functions for helper classes (tracked by js-controller, cleared on unload). */
+	private timerHost(): TimerHost {
+		return {
+			setTimeout: (callback, ms) => this.startTimer(callback, ms),
+			clearTimeout: handle => this.clearTimeout(handle as ioBroker.Timeout | undefined),
+			setInterval: (callback, ms) => this.startInterval(callback, ms),
+			clearInterval: handle => this.clearInterval(handle as ioBroker.Interval | undefined),
+		};
+	}
+
+	/**
+	 * Reload devices and doors after a reconnect — at most once per {@link RESYNC_MIN_INTERVAL_MS}. A
+	 * connection that keeps flapping would otherwise trigger a full load (devices, doors, all user
+	 * pages, emergency status, one lock rule per door) every few seconds.
+	 */
+	private requestResync(): void {
+		if (this.resyncTimer || this.unloading) {
+			// a delayed resync is pending already and covers this reconnect as well
+			return;
+		}
+		const waitMs = this.lastResyncAt + RESYNC_MIN_INTERVAL_MS - Date.now();
+		if (this.lastResyncAt === 0 || waitMs <= 0) {
+			this.lastResyncAt = Date.now();
+			this.log.info('UniFi Access WebSocket reconnected — refreshing devices and doors.');
+			this.runDetached('resync after reconnect', this.bootstrapAndConnect());
+			return;
+		}
+		this.log.debug(
+			`UniFi Access WebSocket reconnected — refreshing devices and doors in ${Math.ceil(waitMs / 1000)} s.`,
+		);
+		this.resyncTimer = this.startTimer(() => {
+			this.resyncTimer = undefined;
+			this.lastResyncAt = Date.now();
+			this.runDetached('resync after reconnect', this.bootstrapAndConnect());
+		}, waitMs);
 	}
 
 	private startWebSocket(): void {
 		const cfg = this.config;
 		const host = cfg.controllerHost ?? '';
-		const port = cfg.controllerPort || 12_445;
+		const port = normalizePort(cfg.controllerPort, 12_445);
 		const token = cfg.apiToken ?? '';
 		const verifyTLS = cfg.verifyTLS === true;
 		const caCert = cfg.caCert || undefined;
 
 		this.ws?.stop();
-		this.ws = new UnifiWebSocket({
+		this.wsNeedsResync = false;
+		this.wsErrorLogged = false;
+		const ws = new UnifiWebSocket({
 			host,
 			port,
 			token,
 			verifyTLS,
 			caCert,
-			reconnectDelaySeconds: cfg.wsReconnectDelay || 5,
+			reconnectDelaySeconds: normalizeReconnectDelay(cfg.wsReconnectDelay),
+			timers: this.timerHost(),
 			logger: {
 				debug: (m: string) => this.log.debug(m),
 				info: (m: string) => this.log.info(m),
 				warn: (m: string) => this.log.warn(m),
 			},
 		});
-		this.ws.on('open', () => {
-			this.log.info('UniFi Access WebSocket open.');
+		this.ws = ws;
+		ws.on('open', () => {
+			if (this.ws !== ws || this.unloading) {
+				return;
+			}
+			this.wsErrorLogged = false;
 			this.setConnectionStatus(true, null);
+			if (this.wsNeedsResync) {
+				// Events were missed while the connection was down: reload devices and doors.
+				this.wsNeedsResync = false;
+				// The controller may have come back without our webhook endpoint (restored backup, reset,
+				// endpoint deleted by hand): check the registration again instead of trusting what was
+				// true before the outage. An endpoint that is still there costs one GET and changes nothing.
+				// Until the check says otherwise the endpoint keeps counting as registered.
+				this.webhookRegistrationStale = true;
+				this.requestResync();
+			} else {
+				this.log.info('UniFi Access WebSocket open.');
+			}
 		});
-		this.ws.on('close', () => {
-			this.log.debug('UniFi Access WebSocket closed.');
+		ws.on('close', () => {
+			if (this.ws !== ws || this.unloading) {
+				return;
+			}
+			if (this.connectedToController) {
+				this.log.info('UniFi Access WebSocket closed — connection to the controller lost.');
+			} else {
+				this.log.debug('UniFi Access WebSocket closed.');
+			}
+			this.wsNeedsResync = true;
+			this.setConnectionStatus(false, 'network');
 		});
-		this.ws.on('error', err => {
-			this.log.warn(`WebSocket error: ${err.message}`);
+		ws.on('error', err => {
+			// one warning per outage, the repeats of the reconnect attempts only at debug level
+			if (!this.wsErrorLogged) {
+				this.wsErrorLogged = true;
+				this.log.warn(`WebSocket error: ${err.message}`);
+			} else {
+				this.log.debug(`WebSocket error: ${err.message}`);
+			}
 		});
-		this.ws.on('event', msg => {
-			void this.handleAccessEvent(msg, 'ws');
+		ws.on('event', msg => {
+			if (this.ws !== ws || this.unloading) {
+				return;
+			}
+			this.runDetached('WebSocket event', this.handleAccessEvent(msg, 'ws'));
 		});
-		this.ws.start();
+		ws.start();
 	}
 
+	/**
+	 * Remove objects of earlier adapter versions. `info.webhookSecret` held the webhook signing secret
+	 * in clear text, readable by everything that may read states — the secret now lives only in the
+	 * encrypted instance configuration.
+	 */
+	private async removeObsoleteObjects(): Promise<void> {
+		for (const id of ['info.webhookSecret']) {
+			try {
+				if (await this.getObjectAsync(id)) {
+					this.throwIfStopped();
+					// eslint-disable-next-line no-restricted-syntax -- checked right above
+					await this.delObjectAsync(id);
+					this.log.info(`Removed obsolete state ${id}.`);
+				}
+				// the state may exist without an object
+				this.throwIfStopped();
+				// eslint-disable-next-line no-restricted-syntax -- checked right above
+				await this.delStateAsync(id);
+			} catch (err) {
+				if (isStoppedError(err)) {
+					throw err;
+				}
+				this.log.debug(`Could not remove obsolete state ${id}: ${errorText(err)}`);
+			}
+		}
+	}
+
+	/**
+	 * Store id and secret of the endpoint the controller has created. The one write that is still made
+	 * after the stop: the endpoint exists at the controller, and only with its secret do the webhooks of
+	 * the next start pass the signature check.
+	 *
+	 * @param id Endpoint id
+	 * @param secret Signing secret of the endpoint
+	 */
 	private async persistWebhookCredentials(id: string, secret: string): Promise<void> {
+		// eslint-disable-next-line no-restricted-syntax -- deliberately also after the stop (see above)
 		await this.setState('info.webhookEndpointId', { val: id, ack: true });
-		await this.setState('info.webhookSecret', { val: secret, ack: true });
 		// webhookSecret ist `encryptedNative`: js-controller entschlüsselt es beim
 		// Adapter-Start automatisch — daher hier symmetrisch verschlüsseln, sonst
 		// landet beim nächsten Start Müll in cfg.webhookSecret.
+		// eslint-disable-next-line no-restricted-syntax -- deliberately also after the stop (see above)
 		await this.extendForeignObjectAsync(`system.adapter.${this.namespace}`, {
 			native: { webhookEndpointId: id, webhookSecret: this.encrypt(secret) },
 		});
 	}
 
-	private async handleAccessEvent(msg: UnifiAccessEventEnvelope, source: 'ws' | 'webhook'): Promise<void> {
-		if (!msg.event) {
+	private async handleAccessEvent(msg: unknown, source: 'ws' | 'webhook'): Promise<void> {
+		// Envelopes are untrusted input (a frame may be null, fields may have any type).
+		const parsed = parseAccessEvent(msg, source, Date.now());
+		if (!parsed) {
+			this.log.debug(`Ignoring ${source} message that is not an event envelope.`);
 			return;
 		}
-		const ts =
-			typeof msg.timestamp === 'number'
-				? msg.timestamp
-				: typeof msg.timestamp === 'string'
-					? Date.parse(msg.timestamp) || Date.now()
-					: Date.now();
-
-		const data = msg.data ?? {};
-		const dataDevice = (data.device as Record<string, unknown> | undefined) ?? undefined;
-		// access.data.device.remote_unlock delivers the door's location object directly as `data`
-		// (no nested `data.location`, no `data.door_id`). Detect that shape via location_type+unique_id
-		// so doorId/doorName/thumbnail extraction below works for it.
-		const dataIsLocation = typeof data.location_type === 'string' && typeof data.unique_id === 'string';
-		const location = (data.location as Record<string, unknown> | undefined) ?? (dataIsLocation ? data : undefined);
-		const extras = (location?.extras as Record<string, unknown> | undefined) ?? undefined;
-		const actor = (data.actor as Record<string, unknown> | undefined) ?? undefined;
-		const thumbnailPath =
-			(extras?.door_thumbnail as string | undefined) ?? (data.door_thumbnail as string | undefined);
-
-		const REMOTE_VIEW_CHANGE_REASONS: Record<number, string> = {
-			105: 'timeout',
-			106: 'admin_rejected',
-			107: 'admin_unlocked',
-			108: 'visitor_cancelled',
-			400: 'answered_elsewhere',
-		};
-		let subtype: string | undefined;
-		if (msg.event === 'access.remote_view.change') {
-			const code = Number(data.reason_code ?? -1);
-			subtype = REMOTE_VIEW_CHANGE_REASONS[code];
-		} else if (msg.event === 'access.device.dps_status') {
-			const val = data.dps_status ?? data.value;
-			subtype = typeof val === 'string' ? val : undefined;
+		const { event } = parsed;
+		if (parsed.thumbnailPathRejected) {
+			this.log.warn(`Ignoring invalid thumbnail path in ${event.type} event.`);
 		}
-
-		const event: NormalizedEvent = {
-			ts,
-			source,
-			type: msg.event,
-			subtype,
-			deviceId:
-				(data.device_id as string | undefined) ??
-				(dataDevice?.id as string | undefined) ??
-				(msg.event === 'access.data.device.remote_unlock' ? msg.event_object_id : undefined),
-			deviceName:
-				(data.device_name as string | undefined) ??
-				(dataDevice?.name as string | undefined) ??
-				(dataDevice?.alias as string | undefined),
-			doorId:
-				(data.door_id as string | undefined) ??
-				(location?.id as string | undefined) ??
-				(location?.unique_id as string | undefined),
-			doorName: (data.door_name as string | undefined) ?? (location?.name as string | undefined),
-			userName: (data.user_name as string | undefined) ?? (actor?.name as string | undefined),
-			thumbnailPath,
-			raw: msg,
-		};
 		if (USER_RELEVANT_EVENTS.has(event.type)) {
 			if (event.type === 'access.data.device.remote_unlock' && event.doorId) {
-				// Delay push: door.unlock (webhook) may follow with richer data (door name, user)
 				const doorId = event.doorId;
-				const existing = this.unlockPendingTimers.get(doorId);
-				if (existing) {
-					this.clearTimeout(existing);
-				}
-				this.unlockPendingEvents.set(doorId, event);
-				const t = this.setTimeout(async () => {
-					this.unlockPendingTimers.delete(doorId);
-					const pending = this.unlockPendingEvents.get(doorId);
-					if (pending) {
-						this.unlockPendingEvents.delete(doorId);
-						await this.library.pushEvent(pending);
-					}
-				}, 4000);
-				if (t) {
-					this.unlockPendingTimers.set(doorId, t);
+				const loggedAt = this.recentDoorUnlocks.get(doorId);
+				this.recentDoorUnlocks.delete(doorId);
+				if (loggedAt !== undefined && Math.abs(Date.now() - loggedAt) < UnifiAccess.UNLOCK_DEDUP_MS) {
+					// the webhook of the same action came first and is already logged with the richer data
+					this.log.debug(`[event] remote_unlock for doorId=${doorId}: already logged as access.door.unlock`);
+				} else {
+					this.deferRemoteUnlock(doorId, event);
 				}
 			} else if (event.type === 'access.door.unlock' && event.doorId) {
-				// Cancel pending remote_unlock for this door and push door.unlock instead
+				// A granted door.unlock replaces a pending remote_unlock of the same door (same action, richer
+				// data). A refused attempt is a different action and leaves it alone.
 				const doorId = event.doorId;
-				const t = this.unlockPendingTimers.get(doorId);
-				if (t) {
-					this.clearTimeout(t);
-					this.unlockPendingTimers.delete(doorId);
-					this.unlockPendingEvents.delete(doorId);
+				if (event.granted !== false) {
+					const t = this.unlockPendingTimers.get(doorId);
+					if (t) {
+						this.clearTimeout(t);
+						this.unlockPendingTimers.delete(doorId);
+						this.unlockPendingEvents.delete(doorId);
+					} else {
+						this.recentDoorUnlocks.set(doorId, Date.now());
+					}
 				}
 				await this.library.pushEvent(event);
 			} else {
 				await this.library.pushEvent(event);
 			}
 		}
-		await this.updateDeviceFromEventData(dataDevice, ts);
-		await this.dispatchEvent(event, msg);
+		await this.updateDeviceFromEventData(parsed.device, event.ts);
+		await this.dispatchEvent(parsed);
 		await this.applyForwardRules(event);
 	}
 
-	private async dispatchEvent(event: NormalizedEvent, raw: UnifiAccessEventEnvelope): Promise<void> {
-		switch (event.type) {
-			case 'access.remote_view':
-				await this.setState('doorbell.activeCallId', {
-					val: raw.event_object_id ?? null,
-					ack: true,
-				});
-				await this.setState('doorbell.activeFromDevice', {
-					val: event.doorName ?? event.deviceName ?? event.deviceId ?? null,
-					ack: true,
-				});
-				await this.setState('doorbell.activeStartedAt', { val: event.ts, ack: true });
-				if (event.thumbnailPath) {
-					const tid = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
-					if (tid) {
-						await this.setThumbnail(tid, event.thumbnailPath, event.ts);
-					}
-				}
-				break;
+	/**
+	 * Log a remote_unlock only after {@link UnifiAccess.UNLOCK_DEDUP_MS}: the door.unlock webhook of the
+	 * same action may follow with richer data (door name, user) and then replaces it.
+	 *
+	 * @param doorId Door of the event
+	 * @param event The remote_unlock event
+	 */
+	private deferRemoteUnlock(doorId: string, event: NormalizedEvent): void {
+		const existing = this.unlockPendingTimers.get(doorId);
+		if (existing) {
+			this.clearTimeout(existing);
+		}
+		this.unlockPendingEvents.set(doorId, event);
+		const t = this.startTimer(() => {
+			this.unlockPendingTimers.delete(doorId);
+			const pending = this.unlockPendingEvents.get(doorId);
+			if (pending) {
+				this.unlockPendingEvents.delete(doorId);
+				this.runDetached('event log', this.library.pushEvent(pending));
+			}
+		}, UnifiAccess.UNLOCK_DEDUP_MS);
+		if (t) {
+			this.unlockPendingTimers.set(doorId, t);
+		}
+	}
 
-			case 'access.remote_view.change': {
-				const reason = Number((raw.data?.reason_code as number | undefined) ?? -1);
-				// 105 timeout, 106 admin reject, 108 visitor cancel, 400 answered elsewhere → call ended
-				if (reason === 105 || reason === 106 || reason === 108 || reason === 400) {
-					await this.setState('doorbell.activeCallId', { val: null, ack: true });
-					await this.setState('doorbell.activeFromDevice', { val: null, ack: true });
-					await this.setState('doorbell.activeStartedAt', { val: null, ack: true });
-				}
+	private async dispatchEvent(parsed: ParsedAccessEvent): Promise<void> {
+		const { event } = parsed;
+		switch (event.type) {
+			case 'access.remote_view': {
+				const callId = asString((event.raw as Record<string, unknown>).event_object_id) ?? parsed.requestId;
+				await this.setActiveDoorbellCall(
+					callId ?? null,
+					parsed.requestId,
+					event.doorName ?? event.deviceName ?? event.deviceId ?? null,
+					event.ts,
+					true,
+				);
+				await this.storeEventThumbnail(event);
 				break;
 			}
 
-			case 'access.data.device.remote_unlock':
-				if (event.doorId) {
-					const channelId = `doors.${this.safeId(event.doorId)}.locked`;
-					await this.setState(channelId, { val: false, ack: true });
+			case 'access.remote_view.change':
+				// 105 timeout, 106 admin reject, 107 admin unlocked the door, 108 visitor cancel,
+				// 400 answered elsewhere → the call is over in every documented case
+				if (parsed.reasonCode !== undefined && parsed.reasonCode in DOORBELL_REASONS) {
+					await this.endDoorbellCall(parsed.requestId, event.type);
 				}
-				if (event.thumbnailPath) {
-					const tid = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
-					if (tid) {
-						await this.setThumbnail(tid, event.thumbnailPath, event.ts);
-					}
-				}
-				break;
-
-			case 'access.door.unlock':
-				if (event.doorId) {
-					const channelId = `doors.${this.safeId(event.doorId)}.locked`;
-					await this.setState(channelId, { val: false, ack: true });
-				}
-				if (event.thumbnailPath) {
-					const tid = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
-					if (tid) {
-						await this.setThumbnail(tid, event.thumbnailPath, event.ts);
-					}
-				}
-				this.log.debug(`[event] ${event.type} for doorId=${event.doorId}, setting locked=false`);
-				this.logSystemLogs(event.ts);
 				break;
 
 			case 'access.doorbell.incoming':
+				// Webhook counterpart of access.remote_view: marks the call as active when the WebSocket
+				// did not report it, but never replaces what the WebSocket event of the same call set.
+				await this.setActiveDoorbellCall(
+					parsed.requestId ?? asString((event.raw as Record<string, unknown>).event_object_id) ?? null,
+					parsed.requestId,
+					event.doorName ?? event.deviceName ?? event.deviceId ?? null,
+					event.ts,
+					false,
+				);
+				await this.storeEventThumbnail(event);
+				break;
+
 			case 'access.doorbell.incoming.REN':
-				if (event.thumbnailPath) {
-					const tid = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
-					if (tid) {
-						await this.setThumbnail(tid, event.thumbnailPath, event.ts);
+				await this.storeEventThumbnail(event);
+				break;
+
+			case 'access.doorbell.completed':
+				// "accepted, declined, or canceled" — the call is over, whatever the WebSocket delivered
+				await this.endDoorbellCall(parsed.requestId, event.type);
+				if (parsed.reasonCode === 107 && event.doorId) {
+					this.scheduleDoorChecks(event.doorId, [DOOR_CHECK_AFTER_EVENT_MS]);
+				}
+				break;
+
+			case 'access.data.device.remote_unlock':
+				if (event.doorId) {
+					await this.markDoorUnlocked(event.doorId);
+				}
+				await this.storeEventThumbnail(event);
+				break;
+
+			case 'access.door.unlock':
+				// "Triggered on all door unlock events" — including denied attempts (result BLOCKED /
+				// "Access Denied"). Only a granted access means the door was released.
+				if (event.doorId) {
+					if (isAccessGranted(parsed.result)) {
+						await this.markDoorUnlocked(event.doorId);
+					} else {
+						this.log.debug(
+							`[event] ${event.type} for doorId=${event.doorId} with result "${parsed.result}" — door stays locked`,
+						);
 					}
 				}
+				await this.storeEventThumbnail(event);
+				this.logSystemLogs(event.ts, event.doorId);
 				break;
 
 			case 'access.device.dps_status':
 				if (event.doorId) {
-					const value = raw.data?.dps_status ?? raw.data?.value;
-					await this.setState(`doors.${this.safeId(event.doorId)}.position`, {
-						val: typeof value === 'string' ? value : 'unknown',
-						ack: true,
-					});
+					// Documented location of the sensor state is data.object.status. An event without a usable
+					// status must not overwrite the known position (it used to be set to "unknown" here).
+					const value = extractDpsStatus(parsed.data);
+					if (value !== undefined && this.doorNameCache.has(event.doorId)) {
+						await this.library.setDoorPosition(event.doorId, value);
+					} else if (value === undefined) {
+						this.log.debug(`[event] ${event.type} for doorId=${event.doorId} without a status — ignored`);
+					}
 				}
+				this.requestDoorRefresh();
 				break;
 
 			case 'access.device.emergency_status':
-				void this.refreshEmergencyStatus();
+				this.runDetached('emergency status', this.refreshEmergencyStatus());
 				break;
 
 			case 'access.temporary_unlock.start':
-				this.logSystemLogs(event.ts);
+				this.logSystemLogs(event.ts, event.doorId);
+				this.requestDoorRefresh(true);
+				break;
+
+			case 'access.temporary_unlock.end':
+			case 'access.unlock_schedule.activate':
+			case 'access.unlock_schedule.deactivate':
+				// The payloads of these events are not documented — ask the controller what the doors are now.
+				this.requestDoorRefresh(true);
 				break;
 		}
+	}
+
+	private async storeEventThumbnail(event: NormalizedEvent): Promise<void> {
+		if (!event.thumbnailPath) {
+			return;
+		}
+		const deviceId = this.extractReaderIdFromPath(event.thumbnailPath) ?? event.deviceId;
+		if (deviceId) {
+			await this.setThumbnail(deviceId, event.thumbnailPath, event.ts);
+		}
+	}
+
+	/**
+	 * Mark a doorbell call as active.
+	 *
+	 * @param callId Value for doorbell.activeCallId
+	 * @param requestId Request id of the call (shared by WebSocket and webhook events of one call)
+	 * @param from Door or device the call comes from
+	 * @param startedAt Event time (ms epoch)
+	 * @param authoritative WebSocket event: always applies. Webhook: only when no call is active.
+	 */
+	private async setActiveDoorbellCall(
+		callId: string | null,
+		requestId: string | undefined,
+		from: string | null,
+		startedAt: number,
+		authoritative: boolean,
+	): Promise<void> {
+		const current = this.activeDoorbellCall;
+		if (
+			!authoritative &&
+			requestId !== undefined &&
+			current?.requestId !== requestId &&
+			this.isFinishedDoorbellCall(requestId)
+		) {
+			// Webhooks arrive after the WebSocket event of the same call. A call that already ended, or
+			// that a newer call has replaced, is not ringing any more: publishing it would push aside the
+			// call that is (and its own end event would then clear everything). Webhooks carry no event
+			// time, so the order is all there is to go by.
+			this.log.debug(`Doorbell: webhook for call ${requestId}, which is already over — not published.`);
+			return;
+		}
+		if (authoritative && requestId !== undefined) {
+			// the WebSocket reports it ringing: whatever was noted about this id is out of date
+			this.finishedDoorbellCalls.delete(requestId);
+		}
+		if (current) {
+			const sameCall =
+				requestId === undefined || current.requestId === undefined || current.requestId === requestId;
+			if (!authoritative && sameCall) {
+				// the webhook of the call that is already published (or one that cannot be told apart from
+				// it) must not replace it; a different request id is a new call whose predecessor's end
+				// event was missed
+				return;
+			}
+			if (current.fromWebhook && requestId !== undefined && current.requestId === requestId) {
+				// the WebSocket event of the call the webhook already announced: keep the published id
+				return;
+			}
+		}
+		if (current?.requestId !== undefined && current.requestId !== requestId) {
+			// replaced by a newer call: the earlier one is over
+			this.noteFinishedDoorbellCall(current.requestId);
+		}
+		this.activeDoorbellCall = { requestId, fromWebhook: !authoritative };
+		await this.writeState('doorbell.activeCallId', { val: callId, ack: true });
+		await this.writeState('doorbell.activeFromDevice', { val: from, ack: true });
+		await this.writeState('doorbell.activeStartedAt', { val: startedAt, ack: true });
+		this.scheduleDoorbellExpiry();
+	}
+
+	/** (Re)start the upper time limit of the published call. */
+	private scheduleDoorbellExpiry(): void {
+		if (this.doorbellExpiryTimer) {
+			this.clearTimeout(this.doorbellExpiryTimer);
+		}
+		const requestId = this.activeDoorbellCall?.requestId;
+		this.doorbellExpiryTimer = this.startTimer(() => {
+			this.doorbellExpiryTimer = undefined;
+			this.log.debug('Doorbell call without end event — cleared after the time limit.');
+			this.runDetached('doorbell call expiry', this.endDoorbellCall(requestId, 'time limit'));
+		}, DOORBELL_CALL_MAX_MS);
+	}
+
+	/**
+	 * A doorbell call ended. The published call is only cleared when the end belongs to it: with two
+	 * readers ringing one after the other, the end of the earlier call must not clear the call that is
+	 * still ringing. An end without request id (or a published call without one) cannot be told apart
+	 * and clears the published call, as before — leaving a call standing would be worse than clearing
+	 * it once too often (it would hang until the time limit).
+	 *
+	 * @param requestId Request id from the end event
+	 * @param what Event type or reason, for the debug log
+	 */
+	private async endDoorbellCall(requestId: string | undefined, what: string): Promise<void> {
+		const current = this.activeDoorbellCall;
+		if (requestId !== undefined) {
+			this.noteFinishedDoorbellCall(requestId);
+		} else if (current?.requestId !== undefined) {
+			// an end without id clears the published call (see above) — that call is over as well
+			this.noteFinishedDoorbellCall(current.requestId);
+		}
+		if (current && requestId !== undefined && current.requestId !== undefined && current.requestId !== requestId) {
+			this.log.debug(
+				`Doorbell: ${what} for call ${requestId}, but call ${current.requestId} is published — it stays active.`,
+			);
+			return;
+		}
+		await this.clearActiveDoorbellCall();
+	}
+
+	/**
+	 * Remember that a call is over. The memory is short (the time limit of a call) and small: a late
+	 * webhook arrives seconds after the WebSocket event, not minutes.
+	 *
+	 * @param requestId Request id of the call
+	 */
+	private noteFinishedDoorbellCall(requestId: string): void {
+		const now = Date.now();
+		this.finishedDoorbellCalls.delete(requestId);
+		this.finishedDoorbellCalls.set(requestId, now);
+		for (const [id, at] of this.finishedDoorbellCalls) {
+			if (
+				now - at <= DOORBELL_CALL_MAX_MS &&
+				this.finishedDoorbellCalls.size <= UnifiAccess.FINISHED_DOORBELL_CALLS_MAX
+			) {
+				break; // insertion order: the remaining entries are newer
+			}
+			this.finishedDoorbellCalls.delete(id);
+		}
+	}
+
+	private isFinishedDoorbellCall(requestId: string): boolean {
+		const at = this.finishedDoorbellCalls.get(requestId);
+		return at !== undefined && Date.now() - at <= DOORBELL_CALL_MAX_MS;
+	}
+
+	private async clearActiveDoorbellCall(): Promise<void> {
+		if (this.doorbellExpiryTimer) {
+			this.clearTimeout(this.doorbellExpiryTimer);
+			this.doorbellExpiryTimer = undefined;
+		}
+		this.activeDoorbellCall = null;
+		await this.writeState('doorbell.activeCallId', { val: null, ack: true });
+		await this.writeState('doorbell.activeFromDevice', { val: null, ack: true });
+		await this.writeState('doorbell.activeStartedAt', { val: null, ack: true });
+	}
+
+	/**
+	 * A door was released (event from the controller): publish it and check a little later what the
+	 * controller reports, instead of leaving `locked=false` standing until the next restart.
+	 *
+	 * @param doorId Door id as used by the controller
+	 */
+	private async markDoorUnlocked(doorId: string): Promise<void> {
+		if (!this.doorNameCache.has(doorId)) {
+			// a door that appeared after the start: load it (creates its objects) instead of writing blind
+			this.requestDoorRefresh();
+			return;
+		}
+		await this.library.setDoorLocked(doorId, false);
+		this.scheduleDoorChecks(doorId, [DOOR_CHECK_AFTER_EVENT_MS]);
+	}
+
+	/**
+	 * Ask the controller for the status of all doors shortly (debounced: a burst of events leads to
+	 * one request). Doors the adapter does not know yet get their objects created.
+	 *
+	 * @param withLockRules Also re-read the temporary lock rules
+	 */
+	private requestDoorRefresh(withLockRules = false): void {
+		if (this.unloading || !this.http) {
+			return;
+		}
+		this.doorRefreshWithLockRules ||= withLockRules;
+		if (this.doorRefreshTimer) {
+			return;
+		}
+		this.doorRefreshTimer = this.startTimer(() => {
+			this.doorRefreshTimer = undefined;
+			const lockRules = this.doorRefreshWithLockRules;
+			this.doorRefreshWithLockRules = false;
+			this.runDetached('door refresh', this.refreshDoors(lockRules));
+		}, DOOR_REFRESH_DEBOUNCE_MS);
+	}
+
+	/**
+	 * Schedule status checks for one door, replacing checks still pending for it. Used after commands
+	 * and unlock events in place of timers that assumed the door state.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param delaysMs Delays from now, one check each
+	 */
+	private scheduleDoorChecks(doorId: string, delaysMs: number[]): void {
+		this.cancelDoorChecks(doorId);
+		if (this.unloading || !this.http) {
+			return;
+		}
+		const timers: ioBroker.Timeout[] = [];
+		for (const delayMs of delaysMs) {
+			const timer = this.startTimer(() => {
+				const pending = this.doorCheckTimers.get(doorId);
+				if (pending) {
+					const remaining = pending.filter(t => t !== timer);
+					if (remaining.length > 0) {
+						this.doorCheckTimers.set(doorId, remaining);
+					} else {
+						this.doorCheckTimers.delete(doorId);
+					}
+				}
+				this.runDetached('door status check', this.refreshDoor(doorId));
+			}, delayMs);
+			if (timer) {
+				timers.push(timer);
+			}
+		}
+		if (timers.length > 0) {
+			this.doorCheckTimers.set(doorId, timers);
+		}
+	}
+
+	/**
+	 * Check the door once more when a timed unlock runs out. Kept separately from the short checks:
+	 * an unlock event for the same door in the meantime (which schedules its own short check) must not
+	 * cancel it — without webhooks nothing else would report that the door locked again.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param delayMs Time until the rule ends
+	 */
+	private scheduleRuleEndCheck(doorId: string, delayMs: number): void {
+		this.cancelRuleEndCheck(doorId);
+		if (this.unloading || !this.http) {
+			return;
+		}
+		const timer = this.startTimer(() => {
+			this.doorRuleEndTimers.delete(doorId);
+			this.runDetached('door status check', this.refreshDoor(doorId));
+		}, delayMs);
+		if (timer) {
+			this.doorRuleEndTimers.set(doorId, { timer, at: Date.now() + delayMs });
+		}
+	}
+
+	private cancelRuleEndCheck(doorId: string): void {
+		const entry = this.doorRuleEndTimers.get(doorId);
+		if (entry) {
+			this.clearTimeout(entry.timer);
+			this.doorRuleEndTimers.delete(doorId);
+		}
+	}
+
+	private cancelDoorChecks(doorId: string): void {
+		for (const timer of this.doorCheckTimers.get(doorId) ?? []) {
+			this.clearTimeout(timer);
+		}
+		this.doorCheckTimers.delete(doorId);
+	}
+
+	/**
+	 * Read one door from the controller (GET /doors/:id) and mirror its lock/position status and lock rule.
+	 *
+	 * @param doorId Door id as used by the controller
+	 */
+	private async refreshDoor(doorId: string): Promise<void> {
+		if (!this.http || this.unloading) {
+			return;
+		}
+		try {
+			const door = await this.http.getDoor(doorId);
+			if (door && !this.unloading) {
+				await this.applyDoorStatus(door);
+				await this.refreshLockRule(door.id);
+			}
+		} catch (err) {
+			this.rethrowIfStopped(err);
+			this.log.debug(`Door status refresh for ${doorId} failed: ${errorText(err)}`);
+		}
+	}
+
+	/**
+	 * Read all doors from the controller (GET /doors) and mirror their lock/position status.
+	 *
+	 * @param withLockRules Also re-read the temporary lock rules
+	 */
+	private async refreshDoors(withLockRules: boolean): Promise<void> {
+		if (!this.http || this.unloading) {
+			return;
+		}
+		try {
+			const doors = await this.http.listDoors();
+			for (const door of doors) {
+				if (this.unloading) {
+					return;
+				}
+				if (!door || typeof door.id !== 'string') {
+					continue;
+				}
+				await this.applyDoorStatus(door);
+				if (withLockRules) {
+					await this.refreshLockRule(door.id);
+				}
+			}
+		} catch (err) {
+			this.rethrowIfStopped(err);
+			this.log.debug(`Door status refresh failed: ${errorText(err)}`);
+		}
+	}
+
+	private async applyDoorStatus(door: UnifiDoorRaw): Promise<void> {
+		if (!this.doorNameCache.has(door.id)) {
+			// new door: create its channel and states before anything is written
+			await this.library.ensureDoor(door);
+			this.doorNameCache.set(door.id, door.name ?? door.full_name ?? door.id);
+			this.log.info(`New door "${door.name ?? door.id}" added.`);
+			return;
+		}
+		await this.library.updateDoorStatus(door);
+	}
+
+	/**
+	 * Mirror the temporary lock rule of a door into doors.<id>.lockRuleType / lockRuleEndsAt, and make
+	 * sure the door is checked again when a rule with an end time runs out — also for rules set in the
+	 * UniFi app or before an adapter restart; without webhooks nothing else reports the end.
+	 *
+	 * The endpoint needs UniFi Access 1.24.6 or later. A controller without the route (HTTP 404) is not
+	 * asked again until the next (re)load; a refusal for one door only stops the requests for that door.
+	 * Temporary failures (server error, device offline, network) stop nothing.
+	 *
+	 * @param doorId Door id as used by the controller
+	 */
+	private async refreshLockRule(doorId: string): Promise<void> {
+		if (!this.http || this.unloading || !this.lockRuleSupported || this.lockRuleUnavailableDoors.has(doorId)) {
+			return;
+		}
+		try {
+			const rule = await this.http.getDoorLockRule(doorId);
+			await this.library.setDoorLockRule(doorId, rule);
+			this.scheduleRuleEndFromController(doorId, rule?.ended_time);
+		} catch (err) {
+			this.rethrowIfStopped(err);
+			const status =
+				(err as { response?: { status?: number } }).response?.status ??
+				(err instanceof UnifiApiError ? err.httpStatus : undefined);
+			const code = apiErrorCode(err);
+			if (status === 404) {
+				// the route itself is missing: the controller is too old for it
+				this.lockRuleSupported = false;
+				this.log.debug(
+					`Lock rule status not available (requires UniFi Access >= 1.24.6): ${errorText(err)} — not asking again until the next reconnect.`,
+				);
+				return;
+			}
+			const temporary =
+				status === undefined ||
+				status >= 500 ||
+				[401, 403, 408, 429].includes(status) ||
+				(code !== undefined && TEMPORARY_API_CODES.has(code)) ||
+				classifyError(err) === 'unauthorized';
+			const refusal =
+				!temporary && ((status !== undefined && status >= 400 && status < 500) || err instanceof UnifiApiError);
+			if (refusal) {
+				this.lockRuleUnavailableDoors.add(doorId);
+				this.log.debug(
+					`Lock rule status of door ${doorId} not available: ${errorText(err)} — not asking again for this door until the next reconnect.`,
+				);
+			} else {
+				this.log.debug(`Lock rule refresh for ${doorId} failed: ${errorText(err)}`);
+			}
+		}
+	}
+
+	/**
+	 * Plan the end-of-rule check from the end time the controller reports.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param endedTime `ended_time` of the rule (unix seconds), 0/absent = no end
+	 */
+	private scheduleRuleEndFromController(doorId: string, endedTime: unknown): void {
+		if (typeof endedTime !== 'number' || !Number.isFinite(endedTime) || endedTime <= 0) {
+			return;
+		}
+		const remainingMs = endedTime * 1000 - Date.now();
+		// a rule that has ended already needs no check; very long rules are picked up by a later load
+		if (remainingMs <= 0 || remainingMs > RULE_END_CHECK_HORIZON_MS) {
+			return;
+		}
+		const at = Date.now() + remainingMs + DOOR_CHECK_AFTER_COMMAND_MS;
+		const planned = this.doorRuleEndTimers.get(doorId);
+		if (planned && Math.abs(planned.at - at) <= RULE_END_TOLERANCE_MS) {
+			// the check planned with the own command already covers it (ended_time has whole seconds)
+			return;
+		}
+		this.scheduleRuleEndCheck(doorId, remainingMs + DOOR_CHECK_AFTER_COMMAND_MS);
 	}
 
 	private async updateDeviceFromEventData(
 		dataDevice: Record<string, unknown> | undefined,
 		ts: number,
 	): Promise<void> {
-		if (!dataDevice?.id || typeof dataDevice.id !== 'string') {
+		const deviceId = asString(dataDevice?.id);
+		if (!dataDevice || deviceId === undefined) {
 			return;
 		}
-		const safe = this.safeId(dataDevice.id);
+		const cached = this.devices.get(deviceId);
+		if (!cached) {
+			// A device that is not in the device list (added after the start): its objects do not exist
+			// yet. Reload the list instead of writing states without objects.
+			this.requestDeviceRefresh(deviceId);
+			return;
+		}
+		const safe = this.safeId(deviceId);
 		const isoTs = new Date(ts).toISOString();
-		if (typeof dataDevice.firmware === 'string' && dataDevice.firmware) {
-			await this.setState(`devices.${safe}.firmware`, { val: dataDevice.firmware, ack: true });
+		const firmware = asString(dataDevice.firmware);
+		if (firmware !== undefined) {
+			await this.writeState(`devices.${safe}.firmware`, { val: firmware, ack: true });
+			cached.firmware = firmware;
 		}
-		if (typeof dataDevice.online === 'boolean') {
-			await this.setState(`devices.${safe}.online`, { val: dataDevice.online, ack: true });
+		// `online` is deliberately not taken from event payloads: every documented webhook sample carries
+		// `"online": false`, even for the reader that just rang. The online state comes from GET /devices.
+		await this.writeState(`devices.${safe}.lastSeenAt`, { val: isoTs, ack: true });
+		cached.lastSeenAt = isoTs;
+	}
+
+	/**
+	 * An event named a device the adapter does not know. Reload devices and doors once (creates the
+	 * objects); an id that is still unknown afterwards is remembered and does not trigger further reloads.
+	 *
+	 * @param deviceId Device id from the event
+	 */
+	private requestDeviceRefresh(deviceId: string): void {
+		if (this.unloading || !this.http || this.unknownDeviceIds.has(deviceId)) {
+			return;
 		}
-		await this.setState(`devices.${safe}.lastSeenAt`, { val: isoTs, ack: true });
-		const cached = this.devices.get(dataDevice.id);
-		if (cached) {
-			if (typeof dataDevice.firmware === 'string' && dataDevice.firmware) {
-				cached.firmware = dataDevice.firmware;
-			}
-			if (typeof dataDevice.online === 'boolean') {
-				cached.online = dataDevice.online;
-			}
-			cached.lastSeenAt = isoTs;
+		this.unknownDeviceIds.add(deviceId);
+		if (this.unknownDeviceIds.size > 500) {
+			this.unknownDeviceIds.clear();
 		}
+		this.log.debug(`Event for unknown device ${deviceId} — reloading the device list.`);
+		this.runDetached('device refresh', this.bootstrapAndConnect());
 	}
 
 	private async setThumbnail(deviceId: string, path: string, ts: number): Promise<void> {
+		if (sanitizeStaticPath(path) === null) {
+			return;
+		}
+		if (!this.devices.has(deviceId)) {
+			this.requestDeviceRefresh(deviceId);
+			return;
+		}
+		// models without the thumbnail capability flag get their thumbnail states on first use
+		await this.library.ensureThumbnailStates(deviceId);
 		const safe = this.safeId(deviceId);
-		await this.setState(`devices.${safe}.lastThumbnailPath`, { val: path, ack: true });
-		await this.setState(`devices.${safe}.lastThumbnailAt`, { val: ts, ack: true });
-		const cfg = this.config;
-		if (cfg.enableThumbnailServer === true) {
-			const base = this.buildServerBaseUrl();
-			if (base) {
-				const url = `${base}/unifi-access/${this.instance}/thumbnail/${encodeURIComponent(deviceId)}.jpg?ts=${ts}`;
-				await this.setState(`devices.${safe}.lastThumbnailUrl`, { val: url, ack: true });
+		await this.writeState(`devices.${safe}.lastThumbnailPath`, { val: path, ack: true });
+		await this.writeState(`devices.${safe}.lastThumbnailAt`, { val: ts, ack: true });
+		// An empty URL says "there is an image, but it is not served" (thumbnail server off) — a URL from
+		// an earlier configuration must not stay behind and point to nothing.
+		await this.writeState(`devices.${safe}.lastThumbnailUrl`, { val: this.thumbnailUrl(deviceId, ts), ack: true });
+	}
+
+	/**
+	 * URL under which the built-in HTTP server delivers the last thumbnail of a device.
+	 *
+	 * @param deviceId Device id as used by the controller
+	 * @param ts Time of the thumbnail (ms epoch), only there to defeat browser caches
+	 * @returns The URL, or an empty string while the thumbnail server is off or not listening
+	 */
+	private thumbnailUrl(deviceId: string, ts: number): string {
+		const base = this.config.enableThumbnailServer === true ? this.buildServerBaseUrl() : null;
+		return base
+			? `${base}/unifi-access/${this.instance}/thumbnail/${encodeURIComponent(deviceId)}.jpg?ts=${ts}`
+			: '';
+	}
+
+	/**
+	 * Bring `lastThumbnailUrl` of every device in line with how the built-in HTTP server runs now. The
+	 * state survives restarts, the server settings may not: after the thumbnail server was switched
+	 * off, or port, listen address or TLS were changed, the stored URL would lead nowhere until the
+	 * next event with a thumbnail arrives.
+	 */
+	private async refreshThumbnailUrls(): Promise<void> {
+		for (const deviceId of this.devices.keys()) {
+			const safe = this.safeId(deviceId);
+			try {
+				const stored = await this.getStateAsync(`devices.${safe}.lastThumbnailUrl`);
+				if (!stored) {
+					// no thumbnail states for this device (yet)
+					continue;
+				}
+				const path = await this.getStateAsync(`devices.${safe}.lastThumbnailPath`);
+				const at = await this.getStateAsync(`devices.${safe}.lastThumbnailAt`);
+				const hasThumbnail = typeof path?.val === 'string' && sanitizeStaticPath(path.val) !== null;
+				const ts = typeof at?.val === 'number' && at.val > 0 ? at.val : 0;
+				const url = hasThumbnail ? this.thumbnailUrl(deviceId, ts) : '';
+				if ((stored.val ?? '') !== url) {
+					await this.writeState(`devices.${safe}.lastThumbnailUrl`, { val: url, ack: true });
+				}
+			} catch (err) {
+				this.rethrowIfStopped(err);
+				this.log.debug(`Could not refresh the thumbnail URL of ${deviceId}: ${errorText(err)}`);
 			}
 		}
 	}
@@ -705,21 +1968,145 @@ class UnifiAccess extends utils.Adapter {
 			if (rule.event !== event.type) {
 				continue;
 			}
-			if (rule.deviceId && event.deviceId && rule.deviceId !== event.deviceId) {
+			// a rule with a device filter matches only events of exactly that device — not events
+			// without any device id (e.g. REN doorbells with "device": null)
+			if (rule.deviceId && rule.deviceId !== event.deviceId) {
 				continue;
 			}
 			try {
-				await this.setForeignStateAsync(rule.targetState, { val: JSON.stringify(event), ack: true });
+				await this.writeForeignState(rule.targetState, { val: JSON.stringify(event), ack: true });
 			} catch (err) {
+				if (isStoppedError(err)) {
+					throw err;
+				}
 				this.log.debug(`Forward to ${rule.targetState} failed: ${(err as Error).message}`);
 			}
 		}
 	}
 
 	private setConnectionStatus(connected: boolean, lastError: LastError): void {
+		const changed = this.connectedToController !== connected || !this.connectionStatusWritten;
 		this.connectedToController = connected;
 		this.lastErrorKind = lastError;
-		void this.setState('info.connection', connected, true);
+		if (changed) {
+			this.connectionStatusWritten = true;
+			this.runDetached('info.connection', this.writeState('info.connection', { val: connected, ack: true }));
+		}
+	}
+
+	/**
+	 * Let a promise run on its own while making sure a rejection is logged instead of terminating the
+	 * adapter as an unhandled rejection.
+	 *
+	 * @param what Short description for the log
+	 * @param promise The running operation
+	 */
+	private runDetached(what: string, promise: Promise<unknown>): void {
+		promise.catch((err: unknown) => {
+			if (isStoppedError(err) || this.unloading) {
+				// abandoned because the instance stopped — nothing failed
+				this.log.debug(`${what} ended by the stop: ${errorText(err)}`);
+				return;
+			}
+			this.log.warn(`${what} failed: ${errorText(err)}`);
+		});
+	}
+
+	// ----- effects that must not happen after the stop (see lib/stopSignal.ts) -----------------------
+	// Every state/object write and every timer of this class goes through these wrappers (enforced by
+	// the lint rule `no-restricted-syntax` for src/main.ts). The HTTP clients refuse requests by
+	// themselves (`isStopped`).
+
+	/** Throw {@link StoppedError} once the instance is stopping: the operation ends before its next effect. */
+	private throwIfStopped(): void {
+		if (this.unloading) {
+			throw new StoppedError();
+		}
+	}
+
+	/**
+	 * First statement of a `catch` that would report or repair a failure: after the stop there is
+	 * nothing to report (a request that fails then failed because of the stop, or is of no interest any
+	 * more) and nothing to repair — the operation ends quietly.
+	 *
+	 * @param err The caught error
+	 */
+	private rethrowIfStopped(err: unknown): void {
+		if (isStoppedError(err)) {
+			throw err;
+		}
+		if (this.unloading) {
+			throw new StoppedError(`the instance is stopping (${errorText(err)})`);
+		}
+	}
+
+	/** Logger for helpers (receivers, registration): what they report after the stop goes to debug only. */
+	private helperLogger(): { debug: (m: string) => void; info: (m: string) => void; warn: (m: string) => void } {
+		return {
+			debug: (m: string) => this.log.debug(m),
+			info: (m: string) => (this.unloading ? this.log.debug(m) : this.log.info(m)),
+			warn: (m: string) => (this.unloading ? this.log.debug(m) : this.log.warn(m)),
+		};
+	}
+
+	/**
+	 * `setState` that refuses after the stop.
+	 *
+	 * @param id State id without namespace
+	 * @param state Value and ack
+	 */
+	private async writeState(id: string, state: ioBroker.SettableState): Promise<void> {
+		this.throwIfStopped();
+		// eslint-disable-next-line no-restricted-syntax -- the wrapper itself
+		await this.setState(id, state);
+	}
+
+	/**
+	 * `setForeignStateAsync` that refuses after the stop.
+	 *
+	 * @param id Full state id
+	 * @param state Value and ack
+	 */
+	private async writeForeignState(id: string, state: ioBroker.SettableState): Promise<void> {
+		this.throwIfStopped();
+		// eslint-disable-next-line no-restricted-syntax -- the wrapper itself
+		await this.setForeignStateAsync(id, state);
+	}
+
+	/**
+	 * Adapter timer that is not created after the stop and does not run its callback after it.
+	 *
+	 * @param callback What to run
+	 * @param ms Delay
+	 */
+	private startTimer(callback: () => void, ms: number): ioBroker.Timeout | undefined {
+		if (this.unloading) {
+			return undefined;
+		}
+		// eslint-disable-next-line no-restricted-syntax -- the wrapper itself
+		return this.setTimeout(() => {
+			if (!this.unloading) {
+				callback();
+			}
+		}, ms);
+	}
+
+	/**
+	 * Adapter interval that is not created after the stop and does not run its callback after it.
+	 *
+	 * @param callback What to run
+	 * @param ms Period
+	 */
+	private startInterval(callback: () => void, ms: number): ioBroker.Interval | undefined {
+		if (this.unloading) {
+			return undefined;
+		}
+		// eslint-disable-next-line no-restricted-syntax -- the wrapper itself
+		return this.setInterval(() => {
+			if (!this.unloading) {
+				callback();
+			}
+		}, ms);
 	}
 
 	private safeId(raw: string): string {
@@ -735,35 +2122,43 @@ class UnifiAccess extends utils.Adapter {
 		return /\/reader_([0-9a-fA-F]+)_/i.exec(path)?.[1];
 	}
 
-	private async handleGenericAlarm(payload: GenericAlarmPayload, raw: string): Promise<void> {
-		const first = payload.events?.[0];
-		const locationId = first?.location ?? first?.scope?.locations ?? '';
-		const userId = first?.user ?? '';
+	/**
+	 * Mirror an alarm-manager webhook body into notifications.*. The body is foreign input: every
+	 * field is written only as the type its state declares, anything else becomes an empty string.
+	 *
+	 * @param payload Parsed JSON body (any shape)
+	 * @param raw The body as received
+	 */
+	private async handleGenericAlarm(payload: unknown, raw: string): Promise<void> {
+		const body = asRecord(payload) ?? {};
+		const first = asRecord(Array.isArray(body.events) ? (body.events as unknown[])[0] : undefined) ?? {};
+		const text = (value: unknown): string =>
+			typeof value === 'string'
+				? value
+				: typeof value === 'number' && Number.isFinite(value)
+					? String(value)
+					: '';
 
+		const locationId = text(first.location) || text(asRecord(first.scope)?.locations);
+		const userId = text(first.user);
 		const locationName =
-			(typeof locationId === 'string' && locationId ? this.doorNameCache.get(locationId) : undefined) ??
-			(typeof first?.location_name === 'string' && first.location_name ? first.location_name : undefined) ??
-			locationId;
+			(locationId && this.doorNameCache.get(locationId)) || text(first.location_name) || locationId;
+		const userName = (userId && this.userNameCache.get(userId)) || text(first.user_name) || userId;
+		const time = text(first.time);
 
-		const userName =
-			(typeof userId === 'string' && userId ? this.userNameCache.get(userId) : undefined) ??
-			(typeof first?.user_name === 'string' && first.user_name ? first.user_name : undefined) ??
-			userId;
-
-		await this.setState('notifications.lastRaw', { val: raw, ack: true });
-		await this.setState('notifications.lastAlarmId', { val: payload.alarm_id ?? '', ack: true });
-		await this.setState('notifications.lastEventType', { val: first?.id ?? '', ack: true });
-		await this.setState('notifications.lastLocationId', { val: locationId, ack: true });
-		await this.setState('notifications.lastLocationName', { val: locationName, ack: true });
-		await this.setState('notifications.lastUserId', { val: userId, ack: true });
-		await this.setState('notifications.lastUserName', { val: userName, ack: true });
-		await this.setState('notifications.lastDirection', { val: first?.direction ?? '', ack: true });
-		await this.setState('notifications.lastUnlockMethod', { val: first?.unlock_method_text ?? '', ack: true });
-		const ts =
-			first?.time && typeof first.time === 'string' && first.time
-				? Date.parse(first.time) || Date.now()
-				: Date.now();
-		await this.setState('notifications.lastTimestamp', { val: ts, ack: true });
+		await this.writeState('notifications.lastRaw', { val: raw, ack: true });
+		await this.writeState('notifications.lastAlarmId', { val: text(body.alarm_id), ack: true });
+		await this.writeState('notifications.lastEventType', { val: text(first.id), ack: true });
+		await this.writeState('notifications.lastLocationId', { val: locationId, ack: true });
+		await this.writeState('notifications.lastLocationName', { val: locationName, ack: true });
+		await this.writeState('notifications.lastUserId', { val: userId, ack: true });
+		await this.writeState('notifications.lastUserName', { val: userName, ack: true });
+		await this.writeState('notifications.lastDirection', { val: text(first.direction), ack: true });
+		await this.writeState('notifications.lastUnlockMethod', { val: text(first.unlock_method_text), ack: true });
+		await this.writeState('notifications.lastTimestamp', {
+			val: (time && Date.parse(time)) || Date.now(),
+			ack: true,
+		});
 	}
 
 	private onStateChange(id: string, state: ioBroker.State | null | undefined): void {
@@ -771,68 +2166,315 @@ class UnifiAccess extends utils.Adapter {
 			return;
 		}
 		const localId = id.startsWith(`${this.namespace}.`) ? id.slice(this.namespace.length + 1) : id;
+		const val: unknown = state.val;
 
-		if (localId.startsWith('doors.') && localId.endsWith('.unlock')) {
-			if (state.val !== true) {
+		if (localId === 'doors.emergency.lockdown' || localId === 'doors.emergency.evacuation') {
+			const field = localId === 'doors.emergency.lockdown' ? 'lockdown' : 'evacuation';
+			const blocked = this.commandBlocker();
+			if (blocked) {
+				this.refuseCommand(localId, blocked, this.lastEmergency[field] ?? null);
 				return;
 			}
-			const doorId = localId.slice('doors.'.length, -'.unlock'.length);
-			void this.handleDoorUnlock(doorId);
+			this.runCommand(localId, this.handleEmergencyChange(field, val));
 			return;
 		}
-		if (localId.startsWith('doors.') && localId.endsWith('.unlock_duration')) {
-			const minutes = typeof state.val === 'number' ? Math.max(0, Math.floor(state.val)) : 0;
-			const doorId = localId.slice('doors.'.length, -'.unlock_duration'.length);
-			void this.handleDoorUnlockDuration(doorId, minutes);
+
+		if (localId === 'admin.uiSettings') {
+			this.runCommand(localId, this.handleUiSettings(val));
 			return;
 		}
-		if (localId.startsWith('doors.') && localId.endsWith('.lock_rule')) {
-			const ruleIndex = typeof state.val === 'number' ? state.val : 0;
-			const doorId = localId.slice('doors.'.length, -'.lock_rule'.length);
-			void this.handleDoorLockRule(doorId, ruleIndex);
+
+		const match = /^doors\.([^.]+)\.(unlock|unlock_duration|lock_rule)$/.exec(localId);
+		if (!match) {
 			return;
 		}
-		if (localId === 'doors.emergency.lockdown') {
-			void this.handleEmergencyChange('lockdown', state.val === true);
+		const [, doorId, control] = match;
+		// what the state is put back to when the command is not carried out
+		const neutral: ioBroker.StateValue =
+			control === 'unlock' ? false : (this.lastAckedControlValues.get(localId) ?? 0);
+		const blocked = this.commandBlocker();
+		if (blocked) {
+			// never queued: a door must not open minutes later, when the connection is back
+			this.refuseCommand(localId, blocked, neutral);
 			return;
 		}
-		if (localId === 'doors.emergency.evacuation') {
-			void this.handleEmergencyChange('evacuation', state.val === true);
+		if (!this.doorNameCache.has(doorId)) {
+			this.runCommand(localId, this.refuseUnknownDoor(localId, doorId, neutral));
 			return;
 		}
+
+		// A control state opens or locks a real door: only values of exactly the expected type and
+		// range are acted upon. Everything else is rejected with a warning and the state is put back
+		// (acknowledged) — it must never be "repaired" into a pulse unlock or a rule reset.
+		if (control === 'unlock') {
+			if (val === false) {
+				return;
+			}
+			if (val !== true) {
+				this.rejectControlValue(localId, val, 'expected the boolean true', false);
+				return;
+			}
+			this.runCommand(localId, this.handleDoorUnlock(doorId));
+			return;
+		}
+		if (control === 'unlock_duration') {
+			const minutes = parseUnlockMinutes(val);
+			if (minutes === null) {
+				this.rejectControlValue(
+					localId,
+					val,
+					`expected a number of minutes between 0 and ${MAX_UNLOCK_MINUTES}`,
+					this.lastAckedControlValues.get(localId) ?? 0,
+				);
+				return;
+			}
+			this.runCommand(localId, this.handleDoorUnlockDuration(doorId, minutes));
+			return;
+		}
+		const ruleType = parseLockRuleIndex(val);
+		if (ruleType === null) {
+			this.rejectControlValue(
+				localId,
+				val,
+				`expected one of the rule indexes ${Object.keys(LOCK_RULE_BY_INDEX).join(', ')}`,
+				this.lastAckedControlValues.get(localId) ?? 0,
+			);
+			return;
+		}
+		this.runCommand(localId, this.handleDoorLockRule(doorId, val as number, ruleType));
 	}
 
-	private async handleEmergencyChange(field: 'lockdown' | 'evacuation', val: boolean): Promise<void> {
+	/**
+	 * Why a switching command cannot be carried out right now, or `null` when it can. Commands are
+	 * refused — not queued — while the controller state has not been loaded (the door list is unknown,
+	 * e.g. the controller was not reachable at start) and while the connection to the controller is lost.
+	 */
+	private commandBlocker(): string | null {
+		if (!this.http) {
+			return 'no controller is configured';
+		}
+		if (!this.bootstrapSucceededOnce) {
+			return 'the controller has not been reachable since the adapter start (doors not loaded yet)';
+		}
+		if (!this.connectedToController) {
+			return 'the connection to the controller is lost';
+		}
+		return null;
+	}
+
+	/**
+	 * Refuse a switching command: warn and put the state back (acknowledged). Nothing is sent and
+	 * nothing is remembered for later.
+	 *
+	 * @param localId State id without namespace
+	 * @param reason Why the command is not carried out
+	 * @param restore Value the state is reset to
+	 */
+	private refuseCommand(localId: string, reason: string, restore: ioBroker.StateValue): void {
+		this.log.warn(
+			`Command ${localId} not executed: ${reason}. The state was reset — write it again once the controller is connected.`,
+		);
+		this.writeState(localId, { val: restore, ack: true }).catch((err: unknown) => {
+			this.log.debug(`Could not reset ${localId}: ${errorText(err)}`);
+		});
+	}
+
+	/**
+	 * A command for a door id the controller does not report (any more). Door objects are kept when a
+	 * door disappears; a write to such a leftover is refused visibly. A write to an id without objects
+	 * (nothing of this adapter) is only noted at debug level.
+	 *
+	 * @param localId State id without namespace
+	 * @param doorId Door id from the state id
+	 * @param restore Value the state is reset to
+	 */
+	private async refuseUnknownDoor(localId: string, doorId: string, restore: ioBroker.StateValue): Promise<void> {
+		if (!(await this.getObjectAsync(localId))) {
+			this.log.debug(`[${localId}] ignoring write for unknown door id: ${doorId}`);
+			return;
+		}
+		this.throwIfStopped();
+		this.refuseCommand(localId, `the controller does not report a door with the id ${doorId} (any more)`, restore);
+	}
+
+	/**
+	 * Run a command handler detached from the state-change callback. Handlers catch their own API
+	 * errors; this is the safety net that keeps an unexpected rejection from terminating the adapter.
+	 *
+	 * @param what Short description for the log
+	 * @param promise The running handler
+	 */
+	private runCommand(what: string, promise: Promise<void>): void {
+		promise.catch((err: unknown) => {
+			if (isStoppedError(err) || this.unloading) {
+				this.log.debug(`Command ${what} ended by the stop: ${errorText(err)}`);
+				return;
+			}
+			this.log.warn(`Command ${what} failed unexpectedly: ${errorText(err)}`);
+		});
+	}
+
+	/**
+	 * Refuse an invalid value written to a control state: warn and put the state back (acknowledged).
+	 * No request is sent to the controller.
+	 *
+	 * @param localId State id without namespace
+	 * @param val The rejected value
+	 * @param expected Human-readable description of what would have been valid
+	 * @param restore Value the state is reset to
+	 */
+	private rejectControlValue(localId: string, val: unknown, expected: string, restore: ioBroker.StateValue): void {
+		this.log.warn(
+			`Ignoring invalid value ${describeValue(val)} for ${localId}: ${expected}. No door action taken.`,
+		);
+		this.writeState(localId, { val: restore, ack: true }).catch((err: unknown) => {
+			this.log.debug(`Could not reset ${localId}: ${errorText(err)}`);
+		});
+	}
+
+	/**
+	 * `admin.uiSettings` is the storage of the www panel, not a command: a JSON object is confirmed
+	 * (ack) as it is, anything else is replaced by the last valid value.
+	 *
+	 * @param val Value written by the panel
+	 */
+	private async handleUiSettings(val: unknown): Promise<void> {
+		let valid = false;
+		if (typeof val === 'string' && val.length <= UI_SETTINGS_MAX_LENGTH) {
+			try {
+				valid = asRecord(JSON.parse(val)) !== undefined;
+			} catch {
+				valid = false;
+			}
+		}
+		if (valid) {
+			this.lastValidUiSettings = val as string;
+			await this.writeState('admin.uiSettings', { val: val as string, ack: true });
+			return;
+		}
+		this.log.warn(
+			`Ignoring invalid value ${describeValue(val)} for admin.uiSettings: expected a JSON object (max. ${UI_SETTINGS_MAX_LENGTH} characters).`,
+		);
+		await this.writeState('admin.uiSettings', { val: this.lastValidUiSettings, ack: true });
+	}
+
+	private async handleEmergencyChange(field: 'lockdown' | 'evacuation', val: unknown): Promise<void> {
 		if (!this.http) {
 			return;
 		}
-		const sibling = field === 'lockdown' ? 'evacuation' : 'lockdown';
-		const siblingState = await this.getStateAsync(`doors.emergency.${sibling}`);
-		const siblingVal = siblingState?.val === true;
-		const payload =
-			field === 'lockdown'
-				? { lockdown: val, evacuation: siblingVal }
-				: { lockdown: siblingVal, evacuation: val };
+		const localId = `doors.emergency.${field}`;
+		if (typeof val !== 'boolean') {
+			this.log.warn(
+				`Ignoring invalid value ${describeValue(val)} for ${localId}: expected a boolean. Emergency status not changed.`,
+			);
+			// put the state back to what the controller reports (or reported last)
+			await this.restoreEmergencyStates();
+			return;
+		}
+		// Read-modify-write of two flags: commands are processed strictly one after the other. Two writes
+		// in quick succession ("evacuation off", "lockdown off") would otherwise both read the old status
+		// and the second PUT would switch the first flag back on.
+		const run = this.emergencyQueue.then(() => this.applyEmergencyChange(field, val));
+		this.emergencyQueue = run.catch(() => undefined);
+		await run;
+	}
+
+	private async applyEmergencyChange(field: 'lockdown' | 'evacuation', val: boolean): Promise<void> {
+		if (!this.http || this.unloading) {
+			return;
+		}
+		const localId = `doors.emergency.${field}`;
 		try {
+			// The request carries both flags. The other one is read from the controller right now: the
+			// local state may be stale or hold a command that never went through (ack=false), and
+			// sending that along could switch evacuation/lockdown on by accident.
+			const current = await this.http.readEmergencyStatus();
+			this.throwIfStopped();
+			if (!current) {
+				// never send a guessed value for the other flag
+				this.log.warn(
+					'Set emergency status failed: the controller did not report the current emergency status.',
+				);
+				await this.restoreEmergencyStates();
+				return;
+			}
+			const payload = { lockdown: current.lockdown, evacuation: current.evacuation };
+			payload[field] = val;
 			await this.http.setEmergencyStatus(payload);
-			await this.setState(`doors.emergency.${field}`, { val, ack: true });
+			this.lastEmergency.lockdown = payload.lockdown;
+			this.lastEmergency.evacuation = payload.evacuation;
+			await this.writeState(localId, { val, ack: true });
+			const sibling = field === 'lockdown' ? 'evacuation' : 'lockdown';
+			await this.writeState(`doors.emergency.${sibling}`, { val: payload[sibling], ack: true });
 			this.log.info(`Emergency status: lockdown=${payload.lockdown}, evacuation=${payload.evacuation}`);
 		} catch (err) {
-			this.log.warn(`Set emergency status failed: ${(err as Error).message}`);
+			this.rethrowIfStopped(err);
+			this.log.warn(`Set emergency status failed: ${errorText(err)}`);
+			await this.restoreEmergencyStates();
 		}
 	}
 
-	private async refreshEmergencyStatus(): Promise<void> {
-		if (!this.http) {
+	/**
+	 * After a failed emergency command the states must not keep showing the requested value (a
+	 * "lockdown active" that does not exist): read what the controller reports, or — if that is not
+	 * possible either — put back what it reported last.
+	 */
+	private async restoreEmergencyStates(): Promise<void> {
+		if (await this.refreshEmergencyStatus()) {
 			return;
+		}
+		await this.writeState('doors.emergency.lockdown', { val: this.lastEmergency.lockdown ?? null, ack: true });
+		await this.writeState('doors.emergency.evacuation', { val: this.lastEmergency.evacuation ?? null, ack: true });
+	}
+
+	/** @returns false when the controller could not be asked */
+	private async refreshEmergencyStatus(): Promise<boolean> {
+		if (!this.http) {
+			return false;
 		}
 		try {
 			const emergency = await this.http.getEmergencyStatus();
-			await this.setState('doors.emergency.lockdown', { val: emergency.lockdown, ack: true });
-			await this.setState('doors.emergency.evacuation', { val: emergency.evacuation, ack: true });
-		} catch {
+			this.lastEmergency.lockdown = emergency.lockdown;
+			this.lastEmergency.evacuation = emergency.evacuation;
+			await this.writeState('doors.emergency.lockdown', { val: emergency.lockdown, ack: true });
+			await this.writeState('doors.emergency.evacuation', { val: emergency.evacuation, ack: true });
+			return true;
+		} catch (err) {
+			this.rethrowIfStopped(err);
 			// Endpoint requires UniFi Access >= 1.24.6 — silently ignore on older firmware.
 			this.log.debug('Emergency status endpoint not available (requires UniFi Access >= 1.24.6).');
+			return false;
+		}
+	}
+
+	private unlockActor(): { id: string; name: string } | undefined {
+		const actorId = this.config.unlockActorId || '';
+		return actorId ? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId } : undefined;
+	}
+
+	/**
+	 * Unlock a door: pulse (minutes = 0) or timed via a custom lock rule. Afterwards the door status
+	 * is read back from the controller instead of assuming when the door locks again.
+	 *
+	 * @param doorId Door id as used by the controller
+	 * @param minutes Whole minutes, 0 = pulse
+	 */
+	private async unlockDoorFor(doorId: string, minutes: number): Promise<void> {
+		if (!this.http) {
+			throw new Error('no controller connection');
+		}
+		if (minutes > 0) {
+			await this.http.setDoorLockRule(doorId, { type: 'custom', interval: minutes });
+			this.log.info(`Door ${doorId} unlocked for ${minutes} min via lock_rule.`);
+			await this.library.setDoorLocked(doorId, false);
+			// verify shortly, and look again when the time is up
+			this.scheduleDoorChecks(doorId, [DOOR_CHECK_AFTER_COMMAND_MS]);
+			this.scheduleRuleEndCheck(doorId, minutes * 60_000 + DOOR_CHECK_AFTER_COMMAND_MS);
+		} else {
+			await this.http.unlockDoor(doorId, this.unlockActor());
+			this.log.info(`Door ${doorId} unlocked (pulse).`);
+			await this.library.setDoorLocked(doorId, false);
+			this.scheduleDoorChecks(doorId, [DOOR_CHECK_AFTER_EVENT_MS]);
 		}
 	}
 
@@ -844,26 +2486,13 @@ class UnifiAccess extends utils.Adapter {
 			this.log.debug(`[unlock] ignoring unlock for unknown door id: ${safeDoorId}`);
 			return;
 		}
-		const cfg = this.config;
-		const minutes = Math.max(0, Math.floor(cfg.defaultUnlockDuration || 0));
-		const actorId = cfg.unlockActorId || '';
-		const actor = actorId ? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId } : undefined;
+		const minutes = normalizeDefaultUnlockMinutes(this.config.defaultUnlockDuration);
 		try {
-			if (minutes > 0) {
-				await this.http.setDoorLockRule(safeDoorId, { type: 'custom', interval: minutes });
-				this.log.info(`Door ${safeDoorId} unlocked for ${minutes} min via lock_rule.`);
-			} else {
-				await this.http.unlockDoor(safeDoorId, actor);
-				this.log.info(`Door ${safeDoorId} unlocked (pulse).`);
-			}
-			await this.setState(`doors.${safeDoorId}.unlock`, { val: true, ack: true });
-			await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
-			const resetMs = minutes > 0 ? minutes * 60 * 1000 : 5000;
-			this.setTimeout(() => {
-				void this.setState(`doors.${safeDoorId}.locked`, { val: true, ack: true });
-			}, resetMs);
+			await this.unlockDoorFor(safeDoorId, minutes);
+			await this.writeState(`doors.${safeDoorId}.unlock`, { val: true, ack: true });
 		} catch (err) {
-			this.log.warn(`Unlock door ${safeDoorId} failed: ${(err as Error).message}`);
+			this.rethrowIfStopped(err);
+			this.log.warn(`Unlock door ${safeDoorId} failed: ${errorText(err)}`);
 		}
 	}
 
@@ -875,28 +2504,21 @@ class UnifiAccess extends utils.Adapter {
 			this.log.debug(`[unlock_duration] ignoring unknown door id: ${safeDoorId}`);
 			return;
 		}
-		const actorId = this.config.unlockActorId || '';
-		const actor = actorId ? { id: actorId, name: this.userNameCache.get(actorId) ?? actorId } : undefined;
 		try {
-			if (minutes > 0) {
-				await this.http.setDoorLockRule(safeDoorId, { type: 'custom', interval: minutes });
-				this.log.info(`Door ${safeDoorId} unlocked for ${minutes} min via lock_rule.`);
-			} else {
-				await this.http.unlockDoor(safeDoorId, actor);
-				this.log.info(`Door ${safeDoorId} unlocked (pulse) via unlock_duration.`);
-			}
-			await this.setState(`doors.${safeDoorId}.unlock_duration`, { val: minutes, ack: true });
-			await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
-			const resetMs = minutes > 0 ? minutes * 60 * 1000 : 5000;
-			this.setTimeout(() => {
-				void this.setState(`doors.${safeDoorId}.locked`, { val: true, ack: true });
-			}, resetMs);
+			await this.unlockDoorFor(safeDoorId, minutes);
+			await this.writeState(`doors.${safeDoorId}.unlock_duration`, { val: minutes, ack: true });
+			this.lastAckedControlValues.set(`doors.${safeDoorId}.unlock_duration`, minutes);
 		} catch (err) {
-			this.log.warn(`Unlock door ${safeDoorId} (duration) failed: ${(err as Error).message}`);
+			this.rethrowIfStopped(err);
+			this.log.warn(`Unlock door ${safeDoorId} (duration) failed: ${errorText(err)}`);
 		}
 	}
 
-	private async handleDoorLockRule(safeDoorId: string, ruleIndex: number): Promise<void> {
+	private async handleDoorLockRule(
+		safeDoorId: string,
+		ruleIndex: number,
+		type: Exclude<UnifiLockRuleType, 'custom'>,
+	): Promise<void> {
 		if (!this.http) {
 			return;
 		}
@@ -904,262 +2526,504 @@ class UnifiAccess extends utils.Adapter {
 			this.log.debug(`[lock_rule] ignoring unknown door id: ${safeDoorId}`);
 			return;
 		}
-		const ruleMap: Record<number, 'reset' | 'keep_unlock' | 'keep_lock' | 'lock_now'> = {
-			0: 'reset',
-			1: 'keep_unlock',
-			2: 'keep_lock',
-			3: 'lock_now',
-		};
-		const type = ruleMap[ruleIndex];
-		if (!type) {
-			this.log.warn(`[lock_rule] unknown rule index ${ruleIndex} for door ${safeDoorId}`);
-			return;
-		}
 		try {
 			await this.http.setDoorLockRule(safeDoorId, { type });
 			this.log.info(`Door ${safeDoorId} lock_rule set to ${type}.`);
-			await this.setState(`doors.${safeDoorId}.lock_rule`, { val: ruleIndex, ack: true });
 			if (type === 'keep_unlock') {
-				await this.setState(`doors.${safeDoorId}.locked`, { val: false, ack: true });
-			} else if (type === 'keep_lock' || type === 'lock_now' || type === 'reset') {
-				await this.setState(`doors.${safeDoorId}.locked`, { val: true, ack: true });
+				await this.library.setDoorLocked(safeDoorId, false);
+			} else if (type === 'keep_lock' || type === 'lock_now') {
+				await this.library.setDoorLocked(safeDoorId, true);
 			}
+			// `reset` only clears a temporary rule and `lock_early` ends an unlock schedule early: what the
+			// door does then depends on its schedule, so nothing is assumed. In every case the status is
+			// read back; the new rule replaces an earlier timed unlock, so its end-of-time check is dropped.
+			this.cancelRuleEndCheck(safeDoorId);
+			this.scheduleDoorChecks(safeDoorId, [DOOR_CHECK_AFTER_COMMAND_MS]);
+			// acknowledged last (as for unlock / unlock_duration): whoever waits for the ack finds `locked`
+			// and the status check already in place (T-03)
+			this.lastAckedControlValues.set(`doors.${safeDoorId}.lock_rule`, ruleIndex);
+			await this.writeState(`doors.${safeDoorId}.lock_rule`, { val: ruleIndex, ack: true });
 		} catch (err) {
-			this.log.warn(`Set lock_rule for door ${safeDoorId} failed: ${(err as Error).message}`);
+			this.rethrowIfStopped(err);
+			this.log.warn(`Set lock_rule for door ${safeDoorId} failed: ${errorText(err)}`);
 		}
 	}
 
+	/**
+	 * sendTo commands of the admin UI and the www panel. Every message with a callback gets exactly
+	 * one answer — also when the handler fails or the command is unknown — and failures are reported
+	 * in a string field `error`.
+	 *
+	 * @param msg The message
+	 */
 	private onMessage(msg: ioBroker.Message): void {
+		if (!msg || typeof msg !== 'object' || typeof msg.command !== 'string') {
+			return;
+		}
 		this.log.debug(`Message: ${JSON.stringify({ command: msg.command })}`);
+		let afterAnswer: (() => Promise<void>) | undefined;
+		this.handleMessage(msg, task => {
+			afterAnswer = task;
+		})
+			.catch((err: unknown) => {
+				this.log.warn(`Message "${msg.command}" failed: ${errorText(err)}`);
+				return { ok: false, error: errorText(err) };
+			})
+			.then(answer => {
+				if (msg.callback) {
+					this.sendTo(msg.from, msg.command, answer, msg.callback);
+				}
+				return afterAnswer?.();
+			})
+			.catch((err: unknown) => {
+				this.log.warn(`Message "${msg.command}": ${errorText(err)}`);
+			});
+	}
 
-		if (msg.command === 'getConnectionStatus') {
-			this.sendTo(
-				msg.from,
-				msg.command,
-				{
+	/**
+	 * Compute the answer to a sendTo command.
+	 *
+	 * @param msg The message
+	 * @param defer Register work that must run only after the answer was sent
+	 */
+	private async handleMessage(
+		msg: ioBroker.Message,
+		defer: (task: () => Promise<void>) => void,
+	): Promise<Record<string, unknown>> {
+		if (STATE_DEPENDENT_COMMANDS.has(msg.command)) {
+			await this.waitForStartup();
+		}
+		switch (msg.command) {
+			case 'getConnectionStatus':
+				return {
 					connected: this.connectedToController,
 					lastError: this.lastErrorKind,
 					hasToken: !!this.config.apiToken,
 					controllerName: this.controllerName,
-					webhookRegistered: this.webhookEndpointId !== null && this.webhookSecret !== null,
-				},
-				msg.callback,
-			);
-			return;
-		}
-		if (msg.command === 'listDevices') {
-			const devices = Array.from(this.devices.values()).map(d => ({
-				id: d.id,
-				name: d.name,
-				alias: d.alias,
-				type: d.type,
-				model: d.model,
-				firmware: d.firmware,
-				online: d.online,
-				capabilities: d.capabilities,
-				lastSeenAt: d.lastSeenAt,
-			}));
-			this.sendTo(msg.from, msg.command, { devices }, msg.callback);
-			return;
-		}
-		if (msg.command === 'verifyToken') {
-			void this.handleVerifyToken(msg);
-			return;
-		}
-		if (msg.command === 'reregisterWebhook') {
-			void this.handleReregisterWebhook(msg);
-			return;
-		}
-		if (msg.command === 'listUsers') {
-			if (!this.http) {
-				this.sendTo(msg.from, msg.command, { users: [] }, msg.callback);
-				return;
-			}
-			void this.http
-				.listUsers()
-				.then(users => {
-					this.sendTo(
-						msg.from,
-						msg.command,
-						{
-							users: users.map(u => ({
-								id: u.id,
-								name: [u.first_name, u.last_name].filter(Boolean).join(' ') || u.user_email || u.id,
-							})),
-						},
-						msg.callback,
-					);
-				})
-				.catch(() => {
-					this.sendTo(msg.from, msg.command, { users: [] }, msg.callback);
-				});
-			return;
-		}
-		if (msg.command === 'getNetworkInterfaces') {
-			const ifaces = networkInterfaces();
-			const addresses: string[] = [];
-			for (const nets of Object.values(ifaces)) {
-				for (const net of nets ?? []) {
-					if (net.family === 'IPv4' && !net.internal) {
-						addresses.push(net.address);
-					}
+					webhookRegistered: this.webhookRegistered,
+				};
+
+			case 'listDevices':
+				return {
+					devices: Array.from(this.devices.values()).map(d => ({
+						id: d.id,
+						name: d.name,
+						alias: d.alias,
+						type: d.type,
+						model: d.model,
+						firmware: d.firmware,
+						online: d.online,
+						capabilities: d.capabilities,
+						lastSeenAt: d.lastSeenAt,
+					})),
+				};
+
+			case 'verifyToken':
+				return this.handleVerifyToken(msg);
+
+			case 'reregisterWebhook':
+				return this.handleReregisterWebhook(defer);
+
+			case 'listUsers': {
+				if (!this.http) {
+					return { users: [], error: 'not-configured' };
+				}
+				try {
+					const users = await this.http.listUsers();
+					return {
+						users: users.map(u => ({
+							id: u.id,
+							name: [u.first_name, u.last_name].filter(Boolean).join(' ') || u.user_email || u.id,
+						})),
+					};
+				} catch (err) {
+					this.log.debug(`listUsers failed: ${errorText(err)}`);
+					return { users: [], error: classifyError(err) };
 				}
 			}
-			this.sendTo(msg.from, msg.command, { addresses }, msg.callback);
-			return;
+
+			case 'getServerInfo': {
+				// actual state of the built-in HTTP server (the UI must not derive it from the settings)
+				const server = this.httpServer;
+				const running = server?.listening === true;
+				return {
+					running,
+					scheme: running ? server.scheme : null,
+					port: normalizePort(this.config.listenPort, 8095),
+					baseUrl: this.buildServerBaseUrl(),
+					tlsEnabled: this.config.enableTls === true,
+					tlsActive: running && server.scheme === 'https',
+					tlsError: this.tlsError,
+					// the configured public base URL (normalised; null = not set or unusable). baseUrl equals it
+					// while the server runs.
+					publicBaseUrl: this.publicBaseUrl(),
+				};
+			}
+
+			case 'getNetworkInterfaces': {
+				const addresses: string[] = [];
+				for (const nets of Object.values(networkInterfaces())) {
+					for (const net of nets ?? []) {
+						if (net.family === 'IPv4' && !net.internal) {
+							addresses.push(net.address);
+						}
+					}
+				}
+				return { addresses };
+			}
+
+			default:
+				this.log.debug(`Unknown message command "${msg.command}".`);
+				return { ok: false, error: 'unknown-command' };
 		}
 	}
 
-	private async handleVerifyToken(msg: ioBroker.Message): Promise<void> {
-		const payload = (msg.message ?? {}) as { host?: string; port?: number; token?: string; verifyTLS?: boolean };
-		const host = payload.host ?? '';
-		const port = payload.port ?? 12_445;
-		const token = payload.token ?? '';
-		const verifyTLS = payload.verifyTLS === true;
-		if (!host || !token) {
-			this.sendTo(msg.from, msg.command, { ok: false, error: 'missing-fields' }, msg.callback);
+	/**
+	 * Wait until the start of the adapter is over. The admin sends its requests as soon as the instance
+	 * is reported alive — before the HTTP client exists and the controller state is loaded. Answering
+	 * right away told the settings page "no devices" and "host or token missing" for a correctly
+	 * configured instance that was merely still starting.
+	 *
+	 * @param maxMs Give up waiting after this time (the controller may not answer at all)
+	 */
+	private async waitForStartup(maxMs = STARTUP_WAIT_MS): Promise<void> {
+		if (this.startupFinished || this.unloading) {
 			return;
 		}
-		const probe = new UnifiHttp({ host, port, token, verifyTLS });
+		await new Promise<void>(resolve => {
+			const timer = this.startTimer(resolve, maxMs);
+			void this.startup.then(() => {
+				if (timer) {
+					this.clearTimeout(timer);
+				}
+				resolve();
+			});
+		});
+	}
+
+	/**
+	 * "Test connection" of the admin: probe the controller with the values of the form (not saved yet).
+	 * `verifyTLS` and `caCert` of the form win over the stored configuration; without them in the
+	 * payload the stored values apply. The token is never logged.
+	 *
+	 * @param msg Message with `{host, port, token, verifyTLS?, caCert?}`
+	 * @returns `{ok:true, deviceCount}` or `{ok:false, error}` with error `missing-fields`, `unauthorized`,
+	 * `network` or `tls` (then with `detail`: the OpenSSL / Node.js code of the certificate failure)
+	 */
+	private async handleVerifyToken(msg: ioBroker.Message): Promise<Record<string, unknown>> {
+		const payload = asRecord(msg.message) ?? {};
+		const host = asString(payload.host) ?? '';
+		const port = normalizePort(payload.port, 12_445);
+		const token = asString(payload.token) ?? '';
+		const verifyTLS = typeof payload.verifyTLS === 'boolean' ? payload.verifyTLS : this.config.verifyTLS === true;
+		// an empty string from the form means "no CA certificate" — only a missing field falls back
+		const caCert = typeof payload.caCert === 'string' ? payload.caCert : this.config.caCert;
+		if (!host || !token) {
+			return { ok: false, error: 'missing-fields' };
+		}
+		// A probe with its own client: nothing of the running connection is touched.
+		const probe = new UnifiHttp({
+			host,
+			port,
+			token,
+			verifyTLS,
+			caCert: caCert || undefined,
+			isStopped: () => this.unloading,
+		});
 		try {
 			const devices = await probe.listDevices();
-			const first = devices[0];
-			const name = first?.alias ?? first?.name ?? null;
-			this.sendTo(msg.from, msg.command, { ok: true, controllerName: name }, msg.callback);
+			// The API has no endpoint that names the controller — the answer only says what was found.
+			return { ok: true, deviceCount: devices.length };
 		} catch (err) {
-			this.sendTo(msg.from, msg.command, { ok: false, error: classifyError(err) }, msg.callback);
+			const tlsCode = tlsCertificateErrorCode(err);
+			if (tlsCode) {
+				return { ok: false, error: 'tls', detail: tlsCode };
+			}
+			return { ok: false, error: classifyError(err) };
 		}
 	}
 
-	private async handleReregisterWebhook(msg: ioBroker.Message): Promise<void> {
-		const publicUrl = this.buildWebhookPublicUrl();
-		if (!this.http || !publicUrl) {
-			this.sendTo(msg.from, msg.command, { ok: false, error: 'not-configured' }, msg.callback);
-			return;
+	private async handleReregisterWebhook(
+		defer: (task: () => Promise<void>) => void,
+	): Promise<Record<string, unknown>> {
+		if (!this.http) {
+			return { ok: false, error: 'not-configured' };
 		}
+		if (this.config.enableWebhooks !== true) {
+			// registering an endpoint nothing listens on would only make the controller post into the void
+			return { ok: false, error: 'webhooks-disabled' };
+		}
+		const publicUrl = this.webhookReceiverActive ? this.buildWebhookPublicUrl() : null;
+		if (!publicUrl) {
+			return { ok: false, error: 'receiver-not-running' };
+		}
+		// One registration step at a time: a check that is running works with the endpoint list it
+		// fetched before — finishing after the re-registration it would put the old secret back.
+		while (this.webhookRegistrationTask) {
+			await this.webhookRegistrationTask;
+		}
+		if (this.unloading) {
+			// stopped while waiting: no DELETE/POST at the controller for a receiver that is gone
+			return { ok: false, error: 'unloading' };
+		}
+		this.webhookRegistrationRunning = true;
+		let done: () => void = () => undefined;
+		this.webhookRegistrationTask = new Promise<void>(resolve => (done = resolve));
+		try {
+			return await this.reregisterWebhookNow(publicUrl, defer);
+		} finally {
+			this.webhookRegistrationRunning = false;
+			this.webhookRegistrationTask = null;
+			done();
+		}
+	}
+
+	private async reregisterWebhookNow(
+		publicUrl: string,
+		defer: (task: () => Promise<void>) => void,
+	): Promise<Record<string, unknown>> {
+		const http = this.http!;
 		try {
 			const result = await reregister(
 				{
-					http: this.http,
+					http,
 					publicUrl,
-					name: `ioBroker.unifi-access (${this.namespace})`,
+					name: this.webhookEndpointName(),
 					events: DEFAULT_WEBHOOK_EVENTS,
-					logger: {
-						debug: (m: string) => this.log.debug(m),
-						info: (m: string) => this.log.info(m),
-						warn: (m: string) => this.log.warn(m),
-					},
+					logger: this.registrationLogger(),
+					isStopped: () => this.unloading,
 				},
 				this.webhookEndpointId,
 			);
 			this.webhookEndpointId = result.id;
 			this.webhookSecret = result.secret;
-			await this.persistWebhookCredentials(result.id, result.secret);
-			this.sendTo(msg.from, msg.command, { ok: true, id: result.id }, msg.callback);
+			this.webhookRegistered = true;
+			if (!this.unloading) {
+				await this.writeState('info.webhookRegistered', { val: true, ack: true });
+			}
+			// Stopped while the controller created the endpoint: its credentials are still stored, so the
+			// configuration matches the controller at the next start.
+			// Storing the credentials changes the instance object, which makes js-controller restart the
+			// adapter — the answer has to be on its way before that.
+			defer(() => this.persistWebhookCredentials(result.id, result.secret));
+			return { ok: true, id: result.id };
 		} catch (err) {
-			this.sendTo(msg.from, msg.command, { ok: false, error: (err as Error).message }, msg.callback);
+			this.webhookRegistered = false;
+			if (this.unloading) {
+				// stopped in between: nothing more is sent to the controller; the next start checks the
+				// registration anyway
+				return { ok: false, error: 'unloading' };
+			}
+			// The old endpoint may already be deleted: do not keep claiming it is registered, and make
+			// up for it with the regular registration.
+			await this.writeState('info.webhookRegistered', { val: false, ack: true });
+			defer(() => {
+				this.scheduleWebhookRegistrationRetry();
+				return Promise.resolve();
+			});
+			return { ok: false, error: errorText(err) };
 		}
 	}
 
-	private logSystemLogs(ts: number): void {
-		if (!this.http) {
+	/**
+	 * The Protect client lost its session (a re-login after 401 failed, e.g. rate limit or timeout) and
+	 * no retry is pending: start the login retry, otherwise the integration would stay off until restart.
+	 */
+	private recoverProtectSession(): void {
+		if (
+			this.config.enableProtect === true &&
+			this.protectHttp &&
+			!this.protectHttp.isLoggedIn() &&
+			!this.protectRetryTimer &&
+			!this.protectLoginRunning &&
+			!this.unloading
+		) {
+			this.log.debug('[protect] session lost — logging in again');
+			this.runDetached('protect login', this.tryProtectLogin(2));
+		}
+	}
+
+	/** Whether the Protect integration is active and has a session — the only consumer of the system logs. */
+	private protectReady(): boolean {
+		return this.config.enableProtect === true && this.protectHttp?.isLoggedIn() === true;
+	}
+
+	/**
+	 * Look up the system log entries around a door event to find the UniFi Protect camera event that
+	 * belongs to it. Only runs when the Protect integration is active — the lookup needs the extra
+	 * token permission `view:system_log` and has no other use.
+	 *
+	 * @param ts Event time (ms epoch)
+	 * @param doorId Door of the event — camera events are only attached when they belong to it
+	 */
+	private logSystemLogs(ts: number, doorId: string | undefined): void {
+		if (!this.http || !this.protectReady()) {
+			this.recoverProtectSession();
+			return;
+		}
+		if (!doorId) {
+			// without the door the camera event cannot be told apart from those of other doors
+			this.log.debug('[protect] door event without door id — no camera lookup');
 			return;
 		}
 		const http = this.http;
-		this.setTimeout(async () => {
-			const since = Math.floor(ts / 1000) - 10;
-			const until = Math.floor(ts / 1000) + 30;
-			for (const topic of ['door_openings', 'all'] as const) {
-				try {
-					const raw = await http.fetchSystemLogsRaw(topic, since, until);
-					this.log.debug(`[system-logs:${topic}] ${JSON.stringify(raw)}`);
-					if (topic === 'all') {
-						await this.processSystemLogForProtect(raw, ts);
-					}
-				} catch (err) {
-					this.log.warn(`[system-logs:${topic}] fetch failed: ${(err as Error).message}`);
-				}
-			}
+		this.startTimer(() => {
+			this.runDetached('system log lookup', this.lookupSystemLogs(http, ts, doorId));
 		}, 3000);
 	}
 
-	private async processSystemLogForProtect(raw: unknown, eventTs: number): Promise<void> {
-		const protect = this.protectHttp;
-		if (!this.config.enableProtect || !protect?.isLoggedIn()) {
-			this.log.debug(
-				`[protect] skipping system log scan: enableProtect=${String(this.config.enableProtect)}, loggedIn=${String(protect?.isLoggedIn() ?? false)}`,
-			);
+	private async lookupSystemLogs(http: UnifiHttp, ts: number, doorId: string): Promise<void> {
+		if (this.unloading || !this.protectReady()) {
 			return;
+		}
+		const since = Math.floor(ts / 1000) - 10;
+		const until = Math.floor(ts / 1000) + 30;
+		// `door_openings` is a documented topic (API reference 9.2). `all` is listed in 9.1 but not in
+		// the request enum of 9.2 — it is only tried when the documented topic yields no camera event.
+		for (const topic of ['door_openings', 'all'] as const) {
+			let raw: unknown;
+			try {
+				raw = await http.fetchSystemLogsRaw(topic, since, until);
+			} catch (err) {
+				this.rethrowIfStopped(err);
+				const text = `[system-logs:${topic}] fetch failed: ${errorText(err)}`;
+				if (topic === 'door_openings' && !this.systemLogFailureLogged) {
+					this.systemLogFailureLogged = true;
+					this.log.warn(
+						`${text} — the API token needs the permission "view:system_log" for Protect snapshots.`,
+					);
+				} else {
+					this.log.debug(text);
+				}
+				continue;
+			}
+			if (this.log.level === 'debug' || this.log.level === 'silly') {
+				// authentication.issuer is the card id / credential of the person (API reference 9.2 sample)
+				this.log.debug(
+					`[system-logs:${topic}] ${JSON.stringify(raw, (key, value: unknown) =>
+						(key === 'issuer' || key === 'authentication_value') && value !== '' && value !== null
+							? MASKED_VALUE
+							: value,
+					)}`,
+				);
+			}
+			if (await this.processSystemLogForProtect(raw, ts, doorId)) {
+				return;
+			}
+		}
+	}
+
+	/**
+	 * Scan a system log response for the Protect camera event of a door event and attach snapshot and
+	 * clip URLs to it. Only log entries whose targets name the door of the event are considered — with
+	 * two doors opened within seconds the window also contains the entry of the other door. Of these the
+	 * one closest in time wins; exactly one snapshot is fetched.
+	 *
+	 * @param raw Response of POST /system/logs
+	 * @param eventTs Time of the door event (ms epoch)
+	 * @param doorId Door of the event
+	 * @returns true when a camera event of this door was found
+	 */
+	private async processSystemLogForProtect(raw: unknown, eventTs: number, doorId: string): Promise<boolean> {
+		const protect = this.protectHttp;
+		if (!protect || !this.protectReady()) {
+			return false;
 		}
 		const hits = (raw as { data?: { hits?: unknown[] } } | undefined)?.data?.hits;
 		if (!Array.isArray(hits)) {
 			this.log.debug('[protect] no hits array in system log response');
-			return;
+			return false;
 		}
-		this.log.debug(`[protect] scanning ${hits.length} system log hit(s) for camera events`);
-
+		this.log.debug(`[protect] scanning ${hits.length} system log hit(s) for camera events of door ${doorId}`);
+		let best: { cameraId: string; eventId?: string; distance: number } | undefined;
 		for (const hit of hits) {
-			const targets = (hit as { _source?: { target?: unknown[] } } | undefined)?._source?.target;
+			const source = (hit as { _source?: { target?: unknown[]; event?: { published?: unknown } } } | undefined)
+				?._source;
+			const targets = source?.target;
 			if (!Array.isArray(targets)) {
 				continue;
 			}
-
-			for (const target of targets) {
-				const t = target as { type?: string; id?: string };
-				if (t?.type !== 'camera event') {
-					continue;
-				}
-				const id = t.id;
-				if (typeof id !== 'string' || !id.startsWith('protect_')) {
-					this.log.debug(`[protect] camera event with unexpected id format: ${String(id)}`);
-					continue;
-				}
-
-				// Format: "protect_<cameraId>_<eventId>"
-				const parts = id.split('_');
-				if (parts.length < 2) {
-					continue;
-				}
-				const cameraId = parts[1];
-				const eventId = parts.length >= 3 ? parts.slice(2).join('_') : undefined;
-				if (!cameraId) {
-					continue;
-				}
-				this.log.debug(`[protect] camera event found: cameraId=${cameraId}, eventId=${eventId ?? 'none'}`);
-
-				try {
-					const buf = await protect.getSnapshot(cameraId);
-					const cacheKey = `${cameraId}:${eventTs}`;
-					if (!this.protectSnapshotCache.has(cacheKey)) {
-						if (this.protectSnapshotCacheOrder.length >= UnifiAccess.PROTECT_CACHE_MAX) {
-							const oldest = this.protectSnapshotCacheOrder.shift()!;
-							this.protectSnapshotCache.delete(oldest);
-						}
-						this.protectSnapshotCacheOrder.push(cacheKey);
-						this.protectSnapshotCache.set(cacheKey, buf);
-					}
-
-					const base = this.buildServerBaseUrl() ?? '';
-					const snapshotUrl = `${base}/unifi-access/${this.instance}/protect-snapshot/${encodeURIComponent(cameraId)}/${eventTs}.jpg`;
-					const videoUrl = eventId
-						? `${base}/unifi-access/${this.instance}/protect-video/${encodeURIComponent(eventId)}.mp4`
-						: undefined;
-
-					await this.library.updateEventProtectData(eventTs, {
-						protectCameraId: cameraId,
-						protectEventId: eventId,
-						protectSnapshotUrl: snapshotUrl,
-						protectVideoUrl: videoUrl,
-					});
-					this.log.debug(`[protect] snapshot cached for camera ${cameraId} (${buf.length} bytes)`);
-				} catch (err) {
-					this.log.warn(`[protect] snapshot fetch for camera ${cameraId} failed: ${(err as Error).message}`);
-				}
+			const forThisDoor = targets.some(target => {
+				const t = target as { type?: unknown; id?: unknown } | null;
+				return t?.type === 'door' && t.id === doorId;
+			});
+			const camera = targets
+				.map(target => this.parseCameraTarget(target))
+				.find((c): c is { cameraId: string; eventId?: string } => c !== undefined);
+			if (!camera) {
+				continue;
+			}
+			if (!forThisDoor) {
+				this.log.debug(`[protect] camera event ${camera.cameraId} belongs to another door — skipped`);
+				continue;
+			}
+			const published = source?.event?.published;
+			const distance = typeof published === 'number' ? Math.abs(published - eventTs) : Number.MAX_SAFE_INTEGER;
+			if (!best || distance < best.distance) {
+				best = { ...camera, distance };
 			}
 		}
+		if (!best) {
+			return false;
+		}
+		const { cameraId, eventId } = best;
+		this.log.debug(`[protect] camera event found: cameraId=${cameraId}, eventId=${eventId ?? 'none'}`);
+		try {
+			const buf = await protect.getSnapshot(cameraId);
+			this.protectSnapshotCache.add(`${cameraId}:${eventTs}`, buf);
+			const base = this.buildServerBaseUrl();
+			if (base === null) {
+				this.log.debug('[protect] built-in HTTP server not running — no media URLs for this event');
+				return true;
+			}
+			const snapshotUrl = `${base}/unifi-access/${this.instance}/protect-snapshot/${encodeURIComponent(cameraId)}/${eventTs}.jpg`;
+			const videoUrl = eventId
+				? `${base}/unifi-access/${this.instance}/protect-video/${encodeURIComponent(eventId)}.mp4`
+				: undefined;
+			await this.library.updateEventProtectData(eventTs, {
+				protectCameraId: cameraId,
+				protectEventId: eventId,
+				protectSnapshotUrl: snapshotUrl,
+				protectVideoUrl: videoUrl,
+			});
+			this.log.debug(`[protect] snapshot cached for camera ${cameraId} (${buf.length} bytes)`);
+		} catch (err) {
+			this.rethrowIfStopped(err);
+			this.log.warn(`[protect] snapshot fetch for camera ${cameraId} failed: ${(err as Error).message}`);
+		}
+		return true;
+	}
+
+	/**
+	 * Camera and Protect event id from a system log target `{type: "camera event", id: "protect_<camera>_<event>"}`.
+	 * This format is not part of the documented API (observed on consoles with Protect).
+	 *
+	 * @param target One entry of `_source.target`
+	 * @returns undefined for any other target or an id that cannot be used safely
+	 */
+	private parseCameraTarget(target: unknown): { cameraId: string; eventId?: string } | undefined {
+		const t = target as { type?: unknown; id?: unknown } | null;
+		if (t?.type !== 'camera event') {
+			return undefined;
+		}
+		const id = t.id;
+		if (typeof id !== 'string' || !id.startsWith('protect_')) {
+			this.log.debug(`[protect] camera event with unexpected id format: ${String(id)}`);
+			return undefined;
+		}
+		const parts = id.split('_');
+		const cameraId = parts[1] ?? '';
+		const rawEventId = parts.length >= 3 ? parts.slice(2).join('_') : undefined;
+		// both ids become part of request paths and of the media URLs handed to clients
+		if (!/^[A-Za-z0-9]{1,64}$/.test(cameraId)) {
+			this.log.debug('[protect] camera event with unusable camera id — skipped');
+			return undefined;
+		}
+		return { cameraId, eventId: isSafeProtectId(rawEventId) ? rawEventId : undefined };
 	}
 
 	private async onUnload(callback: () => void): Promise<void> {
+		this.unloading = true;
 		try {
 			this.ws?.stop();
 			this.ws = null;
@@ -1167,6 +3031,42 @@ class UnifiAccess extends utils.Adapter {
 				this.clearTimeout(this.bootstrapRetryTimer);
 				this.bootstrapRetryTimer = undefined;
 			}
+			if (this.protectRetryTimer) {
+				this.clearTimeout(this.protectRetryTimer);
+				this.protectRetryTimer = undefined;
+			}
+			if (this.doorRefreshTimer) {
+				this.clearTimeout(this.doorRefreshTimer);
+				this.doorRefreshTimer = undefined;
+			}
+			for (const doorId of [...this.doorCheckTimers.keys()]) {
+				this.cancelDoorChecks(doorId);
+			}
+			for (const doorId of [...this.doorRuleEndTimers.keys()]) {
+				this.cancelRuleEndCheck(doorId);
+			}
+			if (this.webhookRegistrationRetryTimer) {
+				this.clearTimeout(this.webhookRegistrationRetryTimer);
+				this.webhookRegistrationRetryTimer = undefined;
+			}
+			if (this.doorbellExpiryTimer) {
+				this.clearTimeout(this.doorbellExpiryTimer);
+				this.doorbellExpiryTimer = undefined;
+			}
+			if (this.resyncTimer) {
+				this.clearTimeout(this.resyncTimer);
+				this.resyncTimer = undefined;
+			}
+			if (this.webhookCheckInterval) {
+				this.clearInterval(this.webhookCheckInterval);
+				this.webhookCheckInterval = undefined;
+			}
+			for (const timer of this.unlockPendingTimers.values()) {
+				this.clearTimeout(timer);
+			}
+			this.unlockPendingTimers.clear();
+			this.unlockPendingEvents.clear();
+			this.recentDoorUnlocks.clear();
 			if (this.httpServer) {
 				await this.httpServer.stop();
 				this.httpServer = null;
